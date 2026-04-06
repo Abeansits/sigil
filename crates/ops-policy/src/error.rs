@@ -18,6 +18,12 @@ pub enum PolicyError {
     #[error("grant expired")]
     GrantExpired,
 
+    #[error("path traversal denied: {reason}")]
+    PathTraversalDenied { reason: String },
+
+    #[error("approval fatigue cooldown active: try again after {cooldown_remaining_secs}s")]
+    FatigueCooldown { cooldown_remaining_secs: i64 },
+
     #[error("audit error: {0}")]
     Audit(#[from] ops_audit::AuditError),
 }
@@ -25,7 +31,9 @@ pub enum PolicyError {
 impl From<PolicyError> for ops_core::CoreError {
     fn from(err: PolicyError) -> Self {
         match err {
-            PolicyError::Denied { reason } => Self::ActionDenied { reason },
+            PolicyError::Denied { reason } | PolicyError::PathTraversalDenied { reason } => {
+                Self::ActionDenied { reason }
+            }
             PolicyError::TierCeilingExceeded { required, ceiling } => Self::ActionDenied {
                 reason: format!("tier ceiling exceeded: required {required:?}, ceiling {ceiling:?}"),
             },
@@ -34,6 +42,13 @@ impl From<PolicyError> for ops_core::CoreError {
             },
             PolicyError::GrantExpired => Self::ActionDenied {
                 reason: "grant expired".into(),
+            },
+            PolicyError::FatigueCooldown {
+                cooldown_remaining_secs,
+            } => Self::ActionDenied {
+                reason: format!(
+                    "approval fatigue cooldown active: try again after {cooldown_remaining_secs}s"
+                ),
             },
             PolicyError::Audit(e) => Self::Audit {
                 message: e.to_string(),

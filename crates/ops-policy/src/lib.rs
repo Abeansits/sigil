@@ -22,14 +22,18 @@
 
 pub mod error;
 pub mod evaluator;
+pub mod fatigue;
 pub mod grants;
 pub mod normalize;
+pub mod paths;
 pub mod zone;
 
 pub use error::PolicyError;
 pub use evaluator::{Evaluator, EvaluatorConfig};
+pub use fatigue::{FatigueGuard, FatigueLevel};
 pub use grants::{ApprovalGrant, GrantStore};
 pub use normalize::{normalize_text, strip_ansi, NormalizeResult};
+pub use paths::{quick_path_check, validate_path};
 
 use ops_core::action::{ActionRequest, PolicyDecision};
 use ops_core::error::CoreError;
