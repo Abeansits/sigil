@@ -69,7 +69,12 @@ pub async fn run(store: &Store, runtime: &TmuxRuntime, cmd: SessionCommands) -> 
 ///
 /// This gives fuzzy matching: exact title match wins, otherwise we look
 /// for a session whose ID starts with the provided string.
-async fn resolve_session(store: &Store, name: &str) -> Result<SessionRecord> {
+///
+/// # Errors
+///
+/// Returns an error if the session cannot be found by title, full ID,
+/// or ID prefix, or if the lookup is ambiguous.
+pub async fn resolve_session(store: &Store, name: &str) -> Result<SessionRecord> {
     // Try exact title match first.
     match store.get_session_by_title(name).await {
         Ok(session) => return Ok(session),

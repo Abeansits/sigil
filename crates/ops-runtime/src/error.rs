@@ -13,6 +13,18 @@ pub enum RuntimeError {
     #[error("session not running: {title}")]
     SessionNotRunning { title: String },
 
+    #[error("git command failed: {command} — {stderr}")]
+    GitCommand { command: String, stderr: String },
+
+    #[error("failed to load config from {path}: {message}")]
+    ConfigLoad {
+        path: std::path::PathBuf,
+        message: String,
+    },
+
+    #[error("failed to parse config: {message}")]
+    ConfigParse { message: String },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

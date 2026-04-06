@@ -43,6 +43,10 @@ pub enum Commands {
     #[command(subcommand)]
     Session(SessionCommands),
 
+    /// Git worktree management.
+    #[command(subcommand)]
+    Worktree(WorktreeCommands),
+
     /// Start the conductor loop.
     Conductor {
         /// Heartbeat interval in seconds.
@@ -150,6 +154,30 @@ pub enum SessionCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCommands {
+    /// Create a worktree for a session.
+    Create {
+        /// Session name or ID.
+        name: String,
+        /// Branch name.
+        #[arg(short, long)]
+        branch: String,
+    },
+
+    /// Finish a worktree (optionally merge before removing).
+    Finish {
+        /// Session name or ID.
+        name: String,
+        /// Merge branch into main before removing.
+        #[arg(long)]
+        merge: bool,
+    },
+
+    /// List active worktrees across sessions.
+    List,
+}
+
 /// Expand a leading `~` to the user's home directory.
 fn expand_tilde(path: &str) -> Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -189,6 +217,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Status { json } => commands::status::run(&store, json).await,
         Commands::Session(cmd) => commands::session::run(&store, &runtime, cmd).await,
+        Commands::Worktree(cmd) => commands::worktree::run(&store, cmd).await,
         Commands::Conductor { interval } => {
             commands::conductor::run(Arc::new(store), Arc::new(runtime), interval).await
         }
@@ -418,5 +447,75 @@ mod tests {
         assert!(result.is_ok());
         let path = result.expect("expand should succeed");
         assert!(!path.to_string_lossy().contains('~'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Worktree CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_worktree_create() {
+        let cli = Cli::try_parse_from([
+            "agent-ops",
+            "worktree",
+            "create",
+            "session-name",
+            "-b",
+            "feature/foo",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Worktree(WorktreeCommands::Create { name, branch }) => {
+                assert_eq!(name, "session-name");
+                assert_eq!(branch, "feature/foo");
+            }
+            other => panic!("expected Worktree Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_worktree_finish_with_merge() {
+        let cli = Cli::try_parse_from([
+            "agent-ops",
+            "worktree",
+            "finish",
+            "session-name",
+            "--merge",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Worktree(WorktreeCommands::Finish { name, merge }) => {
+                assert_eq!(name, "session-name");
+                assert!(merge);
+            }
+            other => panic!("expected Worktree Finish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_worktree_finish_without_merge() {
+        let cli = Cli::try_parse_from(["agent-ops", "worktree", "finish", "session-name"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Worktree(WorktreeCommands::Finish { name, merge }) => {
+                assert_eq!(name, "session-name");
+                assert!(!merge);
+            }
+            other => panic!("expected Worktree Finish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_worktree_list() {
+        let cli = Cli::try_parse_from(["agent-ops", "worktree", "list"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Worktree(WorktreeCommands::List)
+        ));
     }
 }

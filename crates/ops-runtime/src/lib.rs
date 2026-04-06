@@ -12,9 +12,13 @@
 //! - All tmux interaction goes through `tokio::process::Command`.
 
 pub mod adapter;
+pub mod config;
 pub mod error;
 pub mod tmux;
+pub mod worktree;
 
 pub use adapter::claude_code::ClaudeCodeAdapter;
+pub use config::ToolConfig;
 pub use error::RuntimeError;
 pub use tmux::TmuxRuntime;
+pub use worktree::{WorktreeInfo, WorktreeManager};
