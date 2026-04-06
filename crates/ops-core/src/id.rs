@@ -77,8 +77,21 @@ impl RequestId {
     }
 
     #[must_use]
+    pub fn from_ulid(id: Ulid) -> Self {
+        Self(id)
+    }
+
+    #[must_use]
     pub fn as_ulid(&self) -> Ulid {
         self.0
+    }
+}
+
+impl FromStr for RequestId {
+    type Err = ulid::DecodeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ulid::from_str(s).map(Self)
     }
 }
 

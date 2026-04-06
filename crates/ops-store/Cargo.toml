@@ -6,8 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ops-core = { path = "../ops-core" }
+ops-policy = { path = "../ops-policy" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+ulid.workspace = true
+sqlx = { workspace = true }
+tracing.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+assert_matches.workspace = true
 
 [lints]
 workspace = true
