@@ -18,6 +18,8 @@ tokio = { workspace = true, features = ["sync"] }
 reqwest.workspace = true
 secrecy.workspace = true
 tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

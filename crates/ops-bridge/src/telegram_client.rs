@@ -64,10 +64,7 @@ struct TgChat {
 /// Convert a raw Telegram update into the public type.
 fn tg_update_to_public(raw: TgUpdate) -> TelegramUpdate {
     let message = raw.message.map(|m| {
-        let from_user_id = m
-            .from
-            .map(|u| u.id.to_string())
-            .unwrap_or_default();
+        let from_user_id = m.from.map(|u| u.id.to_string()).unwrap_or_default();
 
         TelegramMessage {
             message_id: m.message_id,
@@ -94,10 +91,7 @@ impl TelegramClient {
     /// Returns `BridgeError::Platform` if the HTTP client cannot be
     /// built (e.g., TLS back-end unavailable).
     pub fn new(token: &SecretString) -> Result<Self, BridgeError> {
-        let base_url = format!(
-            "https://api.telegram.org/bot{}",
-            token.expose_secret()
-        );
+        let base_url = format!("https://api.telegram.org/bot{}", token.expose_secret());
 
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -167,11 +161,7 @@ impl TelegramClient {
     /// # Errors
     ///
     /// Returns `BridgeError::Platform` on network or API errors.
-    pub async fn send_message(
-        &self,
-        chat_id: i64,
-        text: &str,
-    ) -> Result<(), BridgeError> {
+    pub async fn send_message(&self, chat_id: i64, text: &str) -> Result<(), BridgeError> {
         let url = format!("{}/sendMessage", self.base_url);
 
         let body = serde_json::json!({
@@ -218,8 +208,7 @@ mod tests {
     #[test]
     fn new_builds_correct_base_url() {
         let token = SecretString::from("123456:ABC-DEF");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         assert_eq!(
             client.base_url,
             "https://api.telegram.org/bot123456:ABC-DEF"
@@ -229,8 +218,7 @@ mod tests {
     #[test]
     fn initial_last_update_id_is_zero() {
         let token = SecretString::from("test-token");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         assert_eq!(client.last_update_id(), 0);
     }
 

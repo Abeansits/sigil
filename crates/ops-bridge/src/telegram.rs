@@ -114,10 +114,7 @@ mod tests {
             .expect("should have a message");
         assert_eq!(result.text, "hello conductor");
         assert!(!result.is_command);
-        assert!(matches!(
-            result.origin,
-            ActionOrigin::BridgeTelegram { .. }
-        ));
+        assert!(matches!(result.origin, ActionOrigin::BridgeTelegram { .. }));
     }
 
     #[test]

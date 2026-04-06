@@ -118,8 +118,8 @@ impl TelegramBridge {
 mod tests {
     use std::sync::Arc;
 
-    use ops_core::protocol::BridgeMessage;
     use ops_core::CoreError;
+    use ops_core::protocol::BridgeMessage;
     use ops_core::traits::MessageSink;
     use tokio::sync::Mutex;
 
@@ -146,10 +146,7 @@ mod tests {
     }
 
     impl MessageSink for RecordingSink {
-        async fn accept(
-            &self,
-            message: BridgeMessage,
-        ) -> Result<(), CoreError> {
+        async fn accept(&self, message: BridgeMessage) -> Result<(), CoreError> {
             self.messages.lock().await.push(message);
             Ok(())
         }
@@ -162,8 +159,7 @@ mod tests {
         // that would make HTTP calls, so we test process_updates
         // directly via a bridge with a dummy client.
         let token = secrecy::SecretString::from("fake-token");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         let bridge = TelegramBridge::new(client, config);
 
         let (sink, messages) = RecordingSink::new();
@@ -190,8 +186,7 @@ mod tests {
     async fn process_updates_skips_unknown_sender_without_panic() {
         let config = default_config();
         let token = secrecy::SecretString::from("fake-token");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         let bridge = TelegramBridge::new(client, config);
 
         let (sink, messages) = RecordingSink::new();
@@ -218,8 +213,7 @@ mod tests {
     async fn process_updates_handles_empty_update_batch() {
         let config = default_config();
         let token = secrecy::SecretString::from("fake-token");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         let bridge = TelegramBridge::new(client, config);
 
         let (sink, messages) = RecordingSink::new();
@@ -234,8 +228,7 @@ mod tests {
     async fn process_updates_skips_non_message_updates() {
         let config = default_config();
         let token = secrecy::SecretString::from("fake-token");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         let bridge = TelegramBridge::new(client, config);
 
         let (sink, messages) = RecordingSink::new();
@@ -255,8 +248,7 @@ mod tests {
     async fn run_exits_on_cancellation() {
         let config = default_config();
         let token = secrecy::SecretString::from("fake-token");
-        let client =
-            TelegramClient::new(&token).expect("client should build");
+        let client = TelegramClient::new(&token).expect("client should build");
         let mut bridge = TelegramBridge::new(client, config);
 
         let (sink, _messages) = RecordingSink::new();

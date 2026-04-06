@@ -147,9 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_forwards_to_sink() {
-        let sink = Arc::new(FakeSink {
-            should_fail: false,
-        });
+        let sink = Arc::new(FakeSink { should_fail: false });
         let router = BridgeRouter::new(sink);
         let msg = BridgeMessage {
             origin: ops_core::ActionOrigin::BridgeTelegram {
