@@ -6,8 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
+assert_matches.workspace = true
 
 [lints]
 workspace = true
