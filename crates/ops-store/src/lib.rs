@@ -293,4 +293,94 @@ mod tests {
             .expect("find");
         assert!(found.is_none());
     }
+
+    // -- Grant cleanup tests --
+
+    #[tokio::test]
+    async fn cleanup_expired_grants_removes_expired() {
+        let store = Store::new_in_memory().await.expect("init");
+        // TTL of -1 second = already expired.
+        let grant = make_grant("paul", Capability::ReadHostFile, -1, None);
+        store.save_grant(&grant).await.expect("save");
+
+        let removed = store
+            .cleanup_expired_grants()
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 1);
+
+        // Verify it's actually gone by trying a direct SQL count.
+        let remaining = store.cleanup_expired_grants().await.expect("second cleanup");
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_grants_removes_exhausted() {
+        let store = Store::new_in_memory().await.expect("init");
+        let mut grant = make_grant("paul", Capability::WriteHostFile, 300, Some(3));
+        grant.uses = 3; // Fully used.
+        store.save_grant(&grant).await.expect("save");
+
+        let removed = store
+            .cleanup_expired_grants()
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_grants_keeps_valid() {
+        let store = Store::new_in_memory().await.expect("init");
+        // Valid grant: 300s TTL, 5 max uses, 0 consumed.
+        let grant = make_grant("paul", Capability::ReadHostFile, 300, Some(5));
+        store.save_grant(&grant).await.expect("save");
+
+        let removed = store
+            .cleanup_expired_grants()
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 0);
+
+        // Grant should still be findable.
+        let found = store
+            .find_grant("paul", Capability::ReadHostFile, None)
+            .await
+            .expect("find");
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_grants_mixed_keeps_valid_removes_expired() {
+        let store = Store::new_in_memory().await.expect("init");
+
+        // One valid, one expired.
+        let valid = make_grant("paul", Capability::ReadHostFile, 300, Some(5));
+        let expired = make_grant("paul", Capability::WriteHostFile, -1, None);
+
+        store.save_grant(&valid).await.expect("save valid");
+        store.save_grant(&expired).await.expect("save expired");
+
+        let removed = store
+            .cleanup_expired_grants()
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 1);
+
+        // Valid grant should still be there.
+        let found = store
+            .find_grant("paul", Capability::ReadHostFile, None)
+            .await
+            .expect("find");
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_grants_empty_store_returns_zero() {
+        let store = Store::new_in_memory().await.expect("init");
+        let removed = store
+            .cleanup_expired_grants()
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 0);
+    }
 }

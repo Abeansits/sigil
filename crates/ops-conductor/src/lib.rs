@@ -12,6 +12,7 @@
 pub mod error;
 pub mod escalation;
 pub mod heartbeat;
+pub mod reconcile;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,11 +21,12 @@ use ops_core::protocol::BridgeMessage;
 use ops_core::traits::SessionRuntime;
 use ops_runtime::TmuxRuntime;
 use ops_store::Store;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::ConductorError;
 use crate::escalation::format_status_report;
 use crate::heartbeat::{HeartbeatResult, scan_sessions};
+use crate::reconcile::{ReconcileResult, reconcile};
 
 /// The conductor — orchestrates agent sessions.
 ///
@@ -58,9 +60,39 @@ impl Conductor {
         self.heartbeat_interval
     }
 
+    /// Run on startup to reconcile DB state with actual tmux state.
+    ///
+    /// Compares every session in the store against the live tmux
+    /// backend and corrects mismatches. Call this before entering
+    /// the heartbeat loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConductorError`] if reconciliation fails.
+    pub async fn startup_reconcile(&self) -> Result<ReconcileResult, ConductorError> {
+        info!("running startup reconciliation");
+        let result = reconcile(&self.store, &self.runtime).await?;
+
+        info!(
+            checked = result.sessions_checked,
+            mismatches = result.state_mismatches,
+            missing = result.missing_sessions,
+            orphaned = result.orphaned_sessions,
+            corrections = result.state_corrections.len(),
+            "reconciliation complete",
+        );
+
+        for correction in &result.state_corrections {
+            info!(correction = %correction, "applied state correction");
+        }
+
+        Ok(result)
+    }
+
     /// Run one heartbeat scan cycle.
     ///
-    /// Delegates to [`scan_sessions`] and logs the result.
+    /// Delegates to [`scan_sessions`] and logs the result. Also runs
+    /// periodic maintenance (expired grant cleanup).
     ///
     /// # Errors
     ///
@@ -68,6 +100,13 @@ impl Conductor {
     pub async fn run_heartbeat_cycle(&self) -> Result<HeartbeatResult, ConductorError> {
         debug!("starting heartbeat cycle");
         let result = scan_sessions(&self.store, &self.runtime).await?;
+
+        // Periodic maintenance: clean up expired grants.
+        match self.store.cleanup_expired_grants().await {
+            Ok(0) => {}
+            Ok(n) => info!(removed = n, "cleaned up expired grants"),
+            Err(e) => warn!(error = %e, "failed to clean up expired grants"),
+        }
 
         info!(
             total = result.total,

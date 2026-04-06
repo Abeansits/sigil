@@ -93,6 +93,36 @@ impl GrantStore for Store {
     }
 }
 
+impl Store {
+    /// Remove expired approval grants from the database.
+    ///
+    /// Deletes any grant whose `expires_at` is in the past, or whose
+    /// `uses` has reached `max_uses`. Intended to be called periodically
+    /// (e.g., once per heartbeat cycle).
+    ///
+    /// Returns the number of grants removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] if the delete query fails.
+    pub async fn cleanup_expired_grants(&self) -> Result<usize, StoreError> {
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default();
+
+        let result = sqlx::query(
+            "DELETE FROM approval_grants \
+             WHERE expires_at <= ? \
+                OR (max_uses IS NOT NULL AND uses >= max_uses)",
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(usize::try_from(result.rows_affected()).unwrap_or(usize::MAX))
+    }
+}
+
 /// Convert a raw `sqlx::Row` into an [`ApprovalGrant`].
 fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalGrant, StoreError> {
     let id_str: String = row.get("id");

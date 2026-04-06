@@ -30,6 +30,31 @@ pub async fn run(store: Arc<Store>, runtime: Arc<TmuxRuntime>, interval: u64) ->
         Duration::from_secs(interval),
     );
 
+    // Reconcile DB state against live tmux sessions before entering
+    // the heartbeat loop. This catches stale state from crashes or
+    // upgrades.
+    match conductor.startup_reconcile().await {
+        Ok(result) => {
+            info!(
+                checked = result.sessions_checked,
+                corrections = result.state_corrections.len(),
+                "startup reconciliation complete",
+            );
+            if result.state_corrections.is_empty() {
+                println!("Reconciliation: all sessions consistent.");
+            } else {
+                println!(
+                    "Reconciliation: {} corrections applied.",
+                    result.state_corrections.len(),
+                );
+            }
+        }
+        Err(e) => {
+            // Reconciliation failure is non-fatal — log and continue.
+            error!(error = %e, "startup reconciliation failed");
+        }
+    }
+
     info!(interval_secs = interval, "conductor starting");
     println!("Conductor running (heartbeat every {interval}s). Press Ctrl-C to stop.");
 
