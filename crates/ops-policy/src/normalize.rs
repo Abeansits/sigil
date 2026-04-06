@@ -20,6 +20,38 @@ pub struct NormalizeResult {
     pub categories: Vec<String>,
 }
 
+/// Strip ANSI escape sequences from terminal output.
+///
+/// This is applied to session output before `ToolAdapter::parse_output()`.
+/// Handles:
+/// - CSI sequences (colors, cursor movement, scroll, etc.)
+/// - OSC sequences (operating system commands, title setting)
+/// - Simple two-byte escape sequences
+/// - Character set selection (`\x1b(B`, etc.)
+pub fn strip_ansi(input: &str) -> String {
+    static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| {
+        // Order matters: longer patterns first so the alternation is greedy.
+        // 1. CSI sequences: ESC [ <params> <intermediates> <final byte>
+        // 2. OSC sequences: ESC ] ... (ST or BEL)
+        // 3. Character set selection: ESC ( <char>  /  ESC ) <char>
+        // 4. Simple two-byte escapes: ESC <0x40..0x5F>
+        Regex::new(
+            concat!(
+                r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]",  // CSI
+                r"|\x1b\].*?(?:\x1b\\|\x07)",                    // OSC
+                r"|\x1b[()][A-Z0-9]",                             // charset select
+                r"|\x1b[\x40-\x5f]",                              // simple escape
+            ),
+        )
+        .unwrap_or_else(|_| {
+            #[allow(clippy::expect_used)]
+            Regex::new("").expect("empty regex is infallible")
+        })
+    });
+
+    ANSI_RE.replace_all(input, "").into_owned()
+}
+
 /// Normalize text by stripping invisible characters and flagging suspicious
 /// patterns.
 ///
@@ -255,5 +287,52 @@ mod tests {
         assert_eq!(result.cleaned, "");
         assert_eq!(result.stripped_count, 0);
         assert!(result.categories.is_empty());
+    }
+
+    // ── strip_ansi tests ──────────────────────────────────────────
+
+    #[test]
+    fn ansi_strips_color_codes() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+    }
+
+    #[test]
+    fn ansi_strips_cursor_movement() {
+        assert_eq!(strip_ansi("\x1b[2J\x1b[H"), "");
+    }
+
+    #[test]
+    fn ansi_preserves_plain_text() {
+        assert_eq!(strip_ansi("hello world"), "hello world");
+    }
+
+    #[test]
+    fn ansi_strips_mixed_content() {
+        assert_eq!(
+            strip_ansi("\x1b[1mbold\x1b[0m normal \x1b[32mgreen\x1b[0m"),
+            "bold normal green"
+        );
+    }
+
+    #[test]
+    fn ansi_strips_osc_sequences() {
+        assert_eq!(strip_ansi("\x1b]0;title\x07text"), "text");
+    }
+
+    #[test]
+    fn ansi_empty_input_returns_empty() {
+        assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn ansi_strips_sgr_charset_selection() {
+        // \x1b(B is a common "reset to ASCII" escape.
+        assert_eq!(strip_ansi("\x1b(Bhello"), "hello");
+    }
+
+    #[test]
+    fn ansi_strips_osc_with_st_terminator() {
+        // OSC terminated by ST (ESC \) instead of BEL.
+        assert_eq!(strip_ansi("\x1b]2;window title\x1b\\content"), "content");
     }
 }

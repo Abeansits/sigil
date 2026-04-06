@@ -29,7 +29,7 @@ pub mod zone;
 pub use error::PolicyError;
 pub use evaluator::{Evaluator, EvaluatorConfig};
 pub use grants::{ApprovalGrant, GrantStore};
-pub use normalize::{normalize_text, NormalizeResult};
+pub use normalize::{normalize_text, strip_ansi, NormalizeResult};
 
 use ops_core::action::{ActionRequest, PolicyDecision};
 use ops_core::error::CoreError;

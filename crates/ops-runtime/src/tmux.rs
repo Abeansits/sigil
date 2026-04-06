@@ -130,10 +130,10 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     async fn read_output(&self, handle: &SessionHandle) -> Result<String, CoreError> {
-        let output = self
+        let raw = self
             .run_tmux(&["capture-pane", "-t", &handle.title, "-p", "-S", "-100"])
             .await?;
-        Ok(output)
+        Ok(ops_policy::normalize::strip_ansi(&raw))
     }
 
     async fn status(&self, handle: &SessionHandle) -> Result<SessionState, CoreError> {
@@ -152,10 +152,12 @@ impl SessionRuntime for TmuxRuntime {
             return Ok(SessionState::Error);
         }
 
-        // Session exists — capture pane and let the adapter detect state.
-        let output = self
+        // Session exists — capture pane, strip ANSI escapes, then let the
+        // adapter detect state.
+        let raw = self
             .run_tmux(&["capture-pane", "-t", &handle.title, "-p", "-S", "-100"])
             .await?;
+        let output = ops_policy::normalize::strip_ansi(&raw);
 
         let adapter = Self::get_adapter(handle.tool);
         let signals = adapter.parse_output(&output);
