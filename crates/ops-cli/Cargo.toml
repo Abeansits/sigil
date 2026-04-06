@@ -23,7 +23,15 @@ tracing-subscriber.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+ops-core = { path = "../ops-core" }
+ops-policy = { path = "../ops-policy" }
+ops-audit = { path = "../ops-audit" }
+ops-store = { path = "../ops-store" }
+ops-bridge = { path = "../ops-bridge" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
 assert_matches.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
