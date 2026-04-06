@@ -5,9 +5,25 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "agent-ops"
+path = "src/main.rs"
+
 [dependencies]
+ops-core = { path = "../ops-core" }
+ops-store = { path = "../ops-store" }
+ops-runtime = { path = "../ops-runtime" }
+ops-conductor = { path = "../ops-conductor" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+time.workspace = true
 
 [dev-dependencies]
+assert_matches.workspace = true
 
 [lints]
 workspace = true
