@@ -3,10 +3,13 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use ops_audit::AuditLogWriter;
+use ops_core::PolicyDecision;
 use ops_core::id::{GroupId, SessionId};
 use ops_core::protocol::ConductorMessage;
 use ops_core::session::{SessionConfig, SessionHandle, SessionRecord, SessionState, ToolKind};
@@ -16,6 +19,7 @@ use ops_runtime::TmuxRuntime;
 use ops_store::Store;
 
 use crate::SessionCommands;
+use crate::audit::log_event;
 
 /// Route a `SessionCommands` variant to its handler.
 ///
@@ -23,7 +27,12 @@ use crate::SessionCommands;
 ///
 /// Returns an error if any session operation fails.
 #[allow(clippy::print_stdout)]
-pub async fn run(store: &Store, runtime: &TmuxRuntime, cmd: SessionCommands) -> Result<()> {
+pub async fn run(
+    store: &Store,
+    runtime: &TmuxRuntime,
+    audit: &Arc<AuditLogWriter>,
+    cmd: SessionCommands,
+) -> Result<()> {
     match cmd {
         SessionCommands::List { json } => list(store, json).await,
         SessionCommands::Show { name, json } => show(store, &name, json).await,
@@ -32,7 +41,7 @@ pub async fn run(store: &Store, runtime: &TmuxRuntime, cmd: SessionCommands) -> 
             title,
             tool,
             group,
-        } => create(store, &path, &title, &tool, group.as_deref()).await,
+        } => create(store, audit, &path, &title, &tool, group.as_deref()).await,
         SessionCommands::Launch {
             path,
             title,
@@ -43,6 +52,7 @@ pub async fn run(store: &Store, runtime: &TmuxRuntime, cmd: SessionCommands) -> 
             launch(
                 store,
                 runtime,
+                audit,
                 &path,
                 &title,
                 &tool,
@@ -51,17 +61,17 @@ pub async fn run(store: &Store, runtime: &TmuxRuntime, cmd: SessionCommands) -> 
             )
             .await
         }
-        SessionCommands::Start { name } => start(store, runtime, &name).await,
-        SessionCommands::Stop { name } => stop(store, runtime, &name).await,
-        SessionCommands::Restart { name } => restart(store, runtime, &name).await,
+        SessionCommands::Start { name } => start(store, runtime, audit, &name).await,
+        SessionCommands::Stop { name } => stop(store, runtime, audit, &name).await,
+        SessionCommands::Restart { name } => restart(store, runtime, audit, &name).await,
         SessionCommands::Send {
             name,
             message,
             wait,
             quiet,
-        } => send(store, runtime, &name, &message, wait, quiet).await,
+        } => send(store, runtime, audit, &name, &message, wait, quiet).await,
         SessionCommands::Output { name, quiet } => output(store, runtime, &name, quiet).await,
-        SessionCommands::Remove { name } => remove(store, &name).await,
+        SessionCommands::Remove { name } => remove(store, audit, &name).await,
     }
 }
 
@@ -209,6 +219,7 @@ async fn show(store: &Store, name: &str, json: bool) -> Result<()> {
 #[allow(clippy::print_stdout)]
 async fn create(
     store: &Store,
+    audit: &AuditLogWriter,
     path: &str,
     title: &str,
     tool: &str,
@@ -233,6 +244,15 @@ async fn create(
         .await
         .context("failed to create session")?;
 
+    log_event(
+        audit,
+        "session.create",
+        "cli",
+        PolicyDecision::Allow,
+        Some(record.id),
+    )
+    .await;
+
     println!("Created session '{}' ({})", record.title, record.id);
     Ok(())
 }
@@ -241,6 +261,7 @@ async fn create(
 async fn launch(
     store: &Store,
     runtime: &TmuxRuntime,
+    audit: &AuditLogWriter,
     path: &str,
     title: &str,
     tool: &str,
@@ -284,12 +305,26 @@ async fn launch(
         .await
         .context("failed to persist launched session")?;
 
+    log_event(
+        audit,
+        "session.launch",
+        "cli",
+        PolicyDecision::Allow,
+        Some(record.id),
+    )
+    .await;
+
     println!("Launched session '{}' ({})", record.title, record.id);
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn start(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()> {
+async fn start(
+    store: &Store,
+    runtime: &TmuxRuntime,
+    audit: &AuditLogWriter,
+    name: &str,
+) -> Result<()> {
     let session = resolve_session(store, name).await?;
 
     if session.state != SessionState::Stopped {
@@ -322,12 +357,26 @@ async fn start(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()> {
         .await
         .context("failed to update session state")?;
 
+    log_event(
+        audit,
+        "session.start",
+        "cli",
+        PolicyDecision::Allow,
+        Some(session.id),
+    )
+    .await;
+
     println!("Started session '{}'.", session.title);
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn stop(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()> {
+async fn stop(
+    store: &Store,
+    runtime: &TmuxRuntime,
+    audit: &AuditLogWriter,
+    name: &str,
+) -> Result<()> {
     let session = resolve_session(store, name).await?;
     let handle = record_to_handle(&session);
 
@@ -341,12 +390,26 @@ async fn stop(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()> {
         .await
         .context("failed to update session state")?;
 
+    log_event(
+        audit,
+        "session.stop",
+        "cli",
+        PolicyDecision::Allow,
+        Some(session.id),
+    )
+    .await;
+
     println!("Stopped session '{}'.", session.title);
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn restart(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()> {
+async fn restart(
+    store: &Store,
+    runtime: &TmuxRuntime,
+    audit: &AuditLogWriter,
+    name: &str,
+) -> Result<()> {
     let session = resolve_session(store, name).await?;
     let handle = record_to_handle(&session);
 
@@ -379,6 +442,15 @@ async fn restart(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()>
         .await
         .context("failed to update session state")?;
 
+    log_event(
+        audit,
+        "session.restart",
+        "cli",
+        PolicyDecision::Allow,
+        Some(session.id),
+    )
+    .await;
+
     println!("Restarted session '{}'.", session.title);
     Ok(())
 }
@@ -387,6 +459,7 @@ async fn restart(store: &Store, runtime: &TmuxRuntime, name: &str) -> Result<()>
 async fn send(
     store: &Store,
     runtime: &TmuxRuntime,
+    audit: &AuditLogWriter,
     name: &str,
     message: &str,
     wait: bool,
@@ -403,6 +476,15 @@ async fn send(
         .send(&handle, conductor_msg)
         .await
         .context("failed to send message")?;
+
+    log_event(
+        audit,
+        "session.send",
+        "cli",
+        PolicyDecision::Allow,
+        Some(session.id),
+    )
+    .await;
 
     if !quiet {
         println!("Sent to '{}'.", session.title);
@@ -475,13 +557,22 @@ async fn output(store: &Store, runtime: &TmuxRuntime, name: &str, quiet: bool) -
 }
 
 #[allow(clippy::print_stdout)]
-async fn remove(store: &Store, name: &str) -> Result<()> {
+async fn remove(store: &Store, audit: &AuditLogWriter, name: &str) -> Result<()> {
     let session = resolve_session(store, name).await?;
 
     store
         .delete_session(&session.id)
         .await
         .context("failed to delete session")?;
+
+    log_event(
+        audit,
+        "session.remove",
+        "cli",
+        PolicyDecision::Allow,
+        Some(session.id),
+    )
+    .await;
 
     println!("Removed session '{}' ({}).", session.title, session.id);
     Ok(())

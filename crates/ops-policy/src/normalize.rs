@@ -35,14 +35,12 @@ pub fn strip_ansi(input: &str) -> String {
         // 2. OSC sequences: ESC ] ... (ST or BEL)
         // 3. Character set selection: ESC ( <char>  /  ESC ) <char>
         // 4. Simple two-byte escapes: ESC <0x40..0x5F>
-        Regex::new(
-            concat!(
-                r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]",  // CSI
-                r"|\x1b\].*?(?:\x1b\\|\x07)",                    // OSC
-                r"|\x1b[()][A-Z0-9]",                             // charset select
-                r"|\x1b[\x40-\x5f]",                              // simple escape
-            ),
-        )
+        Regex::new(concat!(
+            r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]", // CSI
+            r"|\x1b\].*?(?:\x1b\\|\x07)",                 // OSC
+            r"|\x1b[()][A-Z0-9]",                         // charset select
+            r"|\x1b[\x40-\x5f]",                          // simple escape
+        ))
         .unwrap_or_else(|_| {
             #[allow(clippy::expect_used)]
             Regex::new("").expect("empty regex is infallible")

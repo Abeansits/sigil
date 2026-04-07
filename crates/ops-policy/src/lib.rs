@@ -32,7 +32,7 @@ pub use error::PolicyError;
 pub use evaluator::{Evaluator, EvaluatorConfig};
 pub use fatigue::{FatigueGuard, FatigueLevel};
 pub use grants::{ApprovalGrant, GrantStore};
-pub use normalize::{normalize_text, strip_ansi, NormalizeResult};
+pub use normalize::{NormalizeResult, normalize_text, strip_ansi};
 pub use paths::{quick_path_check, validate_path};
 
 use ops_core::action::{ActionRequest, PolicyDecision};
@@ -101,9 +101,9 @@ impl ops_core::PolicyEngine for PolicyService {
 
 #[cfg(test)]
 mod tests {
+    use ops_core::PolicyEngine;
     use ops_core::action::Action;
     use ops_core::origin::ActionOrigin;
-    use ops_core::PolicyEngine;
 
     use super::*;
 

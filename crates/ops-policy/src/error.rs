@@ -35,7 +35,9 @@ impl From<PolicyError> for ops_core::CoreError {
                 Self::ActionDenied { reason }
             }
             PolicyError::TierCeilingExceeded { required, ceiling } => Self::ActionDenied {
-                reason: format!("tier ceiling exceeded: required {required:?}, ceiling {ceiling:?}"),
+                reason: format!(
+                    "tier ceiling exceeded: required {required:?}, ceiling {ceiling:?}"
+                ),
             },
             PolicyError::ZoneTransitionDenied { from, to } => Self::ActionDenied {
                 reason: format!("zone transition not allowed: {from:?} -> {to:?}"),

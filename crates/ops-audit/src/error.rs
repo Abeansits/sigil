@@ -10,9 +10,7 @@ pub enum AuditError {
     #[error("failed to serialize audit event: {0}")]
     Serialize(#[source] serde_json::Error),
 
-    #[error(
-        "HMAC chain broken at event {event_id}: expected {expected}, got {actual}"
-    )]
+    #[error("HMAC chain broken at event {event_id}: expected {expected}, got {actual}")]
     ChainBroken {
         event_id: String,
         expected: String,

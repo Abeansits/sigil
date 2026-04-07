@@ -39,10 +39,7 @@ pub struct BrokenEntry {
 /// - [`AuditError::Write`] on other I/O failures.
 /// - [`AuditError::Serialize`] if a line cannot be deserialized.
 /// - [`AuditError::KeyNotAvailable`] if the HMAC key is rejected.
-pub async fn verify_log(
-    path: impl AsRef<Path>,
-    key: &[u8],
-) -> Result<VerifyResult, AuditError> {
+pub async fn verify_log(path: impl AsRef<Path>, key: &[u8]) -> Result<VerifyResult, AuditError> {
     let path = path.as_ref();
 
     let contents = tokio::fs::read_to_string(path).await.map_err(|e| {
@@ -93,9 +90,7 @@ fn parse_entries(contents: &str) -> Result<Vec<ChainedEntry>, AuditError> {
     contents
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|line| {
-            serde_json::from_str(line).map_err(AuditError::Serialize)
-        })
+        .map(|line| serde_json::from_str(line).map_err(AuditError::Serialize))
         .collect()
 }
 
@@ -120,8 +115,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_chain_passes_verification() {
-        let dir = tempfile::tempdir()
-            .expect("tempdir creation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
         let path = dir.path().join("valid.jsonl");
         let key = b"verify-key".to_vec();
 
@@ -147,8 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn tampered_chain_fails_verification() {
-        let dir = tempfile::tempdir()
-            .expect("tempdir creation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
         let path = dir.path().join("tampered.jsonl");
         let key = b"tamper-key".to_vec();
 
@@ -167,15 +160,12 @@ mod tests {
         let contents = tokio::fs::read_to_string(&path)
             .await
             .expect("read should succeed");
-        let mut lines: Vec<String> =
-            contents.lines().map(String::from).collect();
+        let mut lines: Vec<String> = contents.lines().map(String::from).collect();
 
         if let Some(line) = lines.get_mut(1) {
-            let mut entry: ChainedEntry = serde_json::from_str(line)
-                .expect("should parse");
+            let mut entry: ChainedEntry = serde_json::from_str(line).expect("should parse");
             entry.event.action_summary = "TAMPERED".to_owned();
-            *line = serde_json::to_string(&entry)
-                .expect("should serialize");
+            *line = serde_json::to_string(&entry).expect("should serialize");
         }
 
         let tampered = lines.join("\n") + "\n";
@@ -190,15 +180,13 @@ mod tests {
         assert_eq!(result.total_entries, 3);
         assert!(result.first_broken.is_some());
 
-        let broken =
-            result.first_broken.expect("should have a broken entry");
+        let broken = result.first_broken.expect("should have a broken entry");
         assert_eq!(broken.index, 1);
     }
 
     #[tokio::test]
     async fn empty_file_passes_verification() {
-        let dir = tempfile::tempdir()
-            .expect("tempdir creation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
         let path = dir.path().join("empty.jsonl");
         tokio::fs::write(&path, "")
             .await
@@ -215,11 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_returns_error() {
-        let result = verify_log(
-            "/tmp/nonexistent-audit-file.jsonl",
-            b"key",
-        )
-        .await;
+        let result = verify_log("/tmp/nonexistent-audit-file.jsonl", b"key").await;
 
         assert!(result.is_err());
         assert!(matches!(

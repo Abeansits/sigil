@@ -112,14 +112,15 @@ fn detect_mismatch(
 ) -> Option<StateCorrection> {
     match (stored, live) {
         // DB thinks it's alive, but tmux says it's gone.
-        (SessionState::Running | SessionState::Waiting | SessionState::Idle, SessionState::Error) => {
-            Some(StateCorrection {
-                session_title: title.to_owned(),
-                old_state: stored,
-                new_state: SessionState::Error,
-                reason: "tmux session not found".into(),
-            })
-        }
+        (
+            SessionState::Running | SessionState::Waiting | SessionState::Idle,
+            SessionState::Error,
+        ) => Some(StateCorrection {
+            session_title: title.to_owned(),
+            old_state: stored,
+            new_state: SessionState::Error,
+            reason: "tmux session not found".into(),
+        }),
 
         // DB thinks it's running, but tmux says stopped.
         (SessionState::Running, SessionState::Stopped) => Some(StateCorrection {
@@ -130,14 +131,15 @@ fn detect_mismatch(
         }),
 
         // DB thinks it's stopped, but tmux shows it alive.
-        (SessionState::Stopped, SessionState::Running | SessionState::Waiting | SessionState::Idle) => {
-            Some(StateCorrection {
-                session_title: title.to_owned(),
-                old_state: SessionState::Stopped,
-                new_state: SessionState::Running,
-                reason: "tmux session is alive but DB says stopped".into(),
-            })
-        }
+        (
+            SessionState::Stopped,
+            SessionState::Running | SessionState::Waiting | SessionState::Idle,
+        ) => Some(StateCorrection {
+            session_title: title.to_owned(),
+            old_state: SessionState::Stopped,
+            new_state: SessionState::Running,
+            reason: "tmux session is alive but DB says stopped".into(),
+        }),
 
         // Already in error or states agree — no correction needed.
         _ => None,

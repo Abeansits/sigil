@@ -60,10 +60,7 @@ pub async fn scan_sessions(
                 live = ?live_state,
                 "session state changed"
             );
-            if let Err(e) = store
-                .update_session_state(&session.id, live_state)
-                .await
-            {
+            if let Err(e) = store.update_session_state(&session.id, live_state).await {
                 warn!(session = %session.title, error = %e, "failed to update session state");
             }
         }

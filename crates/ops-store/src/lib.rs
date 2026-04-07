@@ -36,10 +36,8 @@ impl Store {
             .max_connections(5)
             .after_connect(|conn, _meta| {
                 Box::pin(async move {
-                    sqlx::Executor::execute(&mut *conn, "PRAGMA journal_mode=WAL")
-                        .await?;
-                    sqlx::Executor::execute(&mut *conn, "PRAGMA foreign_keys=ON")
-                        .await?;
+                    sqlx::Executor::execute(&mut *conn, "PRAGMA journal_mode=WAL").await?;
+                    sqlx::Executor::execute(&mut *conn, "PRAGMA foreign_keys=ON").await?;
                     Ok(())
                 })
             })
@@ -66,8 +64,7 @@ impl Store {
             .max_connections(1)
             .after_connect(|conn, _meta| {
                 Box::pin(async move {
-                    sqlx::Executor::execute(&mut *conn, "PRAGMA foreign_keys=ON")
-                        .await?;
+                    sqlx::Executor::execute(&mut *conn, "PRAGMA foreign_keys=ON").await?;
                     Ok(())
                 })
             })
@@ -303,14 +300,14 @@ mod tests {
         let grant = make_grant("paul", Capability::ReadHostFile, -1, None);
         store.save_grant(&grant).await.expect("save");
 
-        let removed = store
-            .cleanup_expired_grants()
-            .await
-            .expect("cleanup");
+        let removed = store.cleanup_expired_grants().await.expect("cleanup");
         assert_eq!(removed, 1);
 
         // Verify it's actually gone by trying a direct SQL count.
-        let remaining = store.cleanup_expired_grants().await.expect("second cleanup");
+        let remaining = store
+            .cleanup_expired_grants()
+            .await
+            .expect("second cleanup");
         assert_eq!(remaining, 0);
     }
 
@@ -321,10 +318,7 @@ mod tests {
         grant.uses = 3; // Fully used.
         store.save_grant(&grant).await.expect("save");
 
-        let removed = store
-            .cleanup_expired_grants()
-            .await
-            .expect("cleanup");
+        let removed = store.cleanup_expired_grants().await.expect("cleanup");
         assert_eq!(removed, 1);
     }
 
@@ -335,10 +329,7 @@ mod tests {
         let grant = make_grant("paul", Capability::ReadHostFile, 300, Some(5));
         store.save_grant(&grant).await.expect("save");
 
-        let removed = store
-            .cleanup_expired_grants()
-            .await
-            .expect("cleanup");
+        let removed = store.cleanup_expired_grants().await.expect("cleanup");
         assert_eq!(removed, 0);
 
         // Grant should still be findable.
@@ -360,10 +351,7 @@ mod tests {
         store.save_grant(&valid).await.expect("save valid");
         store.save_grant(&expired).await.expect("save expired");
 
-        let removed = store
-            .cleanup_expired_grants()
-            .await
-            .expect("cleanup");
+        let removed = store.cleanup_expired_grants().await.expect("cleanup");
         assert_eq!(removed, 1);
 
         // Valid grant should still be there.
@@ -377,10 +365,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_expired_grants_empty_store_returns_zero() {
         let store = Store::new_in_memory().await.expect("init");
-        let removed = store
-            .cleanup_expired_grants()
-            .await
-            .expect("cleanup");
+        let removed = store.cleanup_expired_grants().await.expect("cleanup");
         assert_eq!(removed, 0);
     }
 }

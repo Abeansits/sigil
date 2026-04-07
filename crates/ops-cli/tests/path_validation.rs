@@ -101,10 +101,7 @@ fn empty_allowed_roots_denies_everything() {
 
     let roots: Vec<PathBuf> = vec![];
     let result = validate_path(&file_path, &roots);
-    assert!(
-        result.is_err(),
-        "empty roots should deny all paths"
-    );
+    assert!(result.is_err(), "empty roots should deny all paths");
 }
 
 #[test]
@@ -116,10 +113,7 @@ fn path_outside_all_roots_is_denied() {
     std::fs::write(&file_path, "hi").expect("write should succeed");
 
     let result = validate_path(&file_path, &[root_dir.path().to_path_buf()]);
-    assert!(
-        result.is_err(),
-        "path outside all roots should be denied"
-    );
+    assert!(result.is_err(), "path outside all roots should be denied");
 }
 
 // ------------------------------------------------------------------
@@ -145,10 +139,7 @@ fn nonexistent_parent_directory_is_denied() {
     let roots = vec![PathBuf::from("/tmp")];
 
     let result = validate_path(path, &roots);
-    assert!(
-        result.is_err(),
-        "nonexistent parent should be denied"
-    );
+    assert!(result.is_err(), "nonexistent parent should be denied");
 }
 
 // ------------------------------------------------------------------
@@ -163,10 +154,7 @@ fn path_valid_in_second_root_is_allowed() {
     let file_path = root_b.path().join("allowed.txt");
     std::fs::write(&file_path, "ok").expect("write should succeed");
 
-    let roots = vec![
-        root_a.path().to_path_buf(),
-        root_b.path().to_path_buf(),
-    ];
+    let roots = vec![root_a.path().to_path_buf(), root_b.path().to_path_buf()];
 
     let result = validate_path(&file_path, &roots);
     assert!(

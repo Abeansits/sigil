@@ -108,11 +108,7 @@ impl FatigueGuard {
     /// Remove entries older than the sliding window.
     fn prune(&mut self, now: OffsetDateTime) {
         let cutoff = now - time::Duration::seconds(self.window_secs);
-        while self
-            .recent_requests
-            .front()
-            .is_some_and(|&ts| ts < cutoff)
-        {
+        while self.recent_requests.front().is_some_and(|&ts| ts < cutoff) {
             self.recent_requests.pop_front();
         }
     }
@@ -220,7 +216,11 @@ mod tests {
         // Recording a new request should prune the old ones.
         let level = guard.record_request();
         assert_eq!(level, FatigueLevel::Normal);
-        assert_eq!(guard.active_count(), 1, "old entries should have been pruned");
+        assert_eq!(
+            guard.active_count(),
+            1,
+            "old entries should have been pruned"
+        );
     }
 
     #[test]
@@ -228,8 +228,8 @@ mod tests {
         // threshold=2, half=1. 2 requests -> Warning, 3 -> HighRisk.
         let mut guard = FatigueGuard::new(2, 300);
 
-        assert_eq!(guard.record_request(), FatigueLevel::Normal);   // 1 <= 1
-        assert_eq!(guard.record_request(), FatigueLevel::Warning);  // 2 > 1
+        assert_eq!(guard.record_request(), FatigueLevel::Normal); // 1 <= 1
+        assert_eq!(guard.record_request(), FatigueLevel::Warning); // 2 > 1
         assert_eq!(guard.record_request(), FatigueLevel::HighRisk); // 3 > 2
     }
 }

@@ -42,11 +42,7 @@ pub struct Conductor {
 impl Conductor {
     /// Create a new conductor with the given dependencies.
     #[must_use]
-    pub fn new(
-        store: Arc<Store>,
-        runtime: Arc<TmuxRuntime>,
-        heartbeat_interval: Duration,
-    ) -> Self {
+    pub fn new(store: Arc<Store>, runtime: Arc<TmuxRuntime>, heartbeat_interval: Duration) -> Self {
         Self {
             store,
             runtime,
@@ -128,10 +124,7 @@ impl Conductor {
     /// # Errors
     ///
     /// Returns [`ConductorError`] if command processing fails.
-    pub async fn handle_message(
-        &self,
-        msg: &BridgeMessage,
-    ) -> Result<String, ConductorError> {
+    pub async fn handle_message(&self, msg: &BridgeMessage) -> Result<String, ConductorError> {
         let text = msg.text.trim();
 
         // Check if this is a command.
@@ -146,11 +139,12 @@ impl Conductor {
             let conductor_msg = ops_core::protocol::ConductorMessage::TaskAssignment {
                 instructions: text.to_owned(),
             };
-            self.runtime.send(&handle, conductor_msg).await.map_err(|e| {
-                ConductorError::Internal {
+            self.runtime
+                .send(&handle, conductor_msg)
+                .await
+                .map_err(|e| ConductorError::Internal {
                     message: format!("failed to send to session {}: {e}", session.title),
-                }
-            })?;
+                })?;
             return Ok(format!("Message sent to {}.", session.title));
         }
 
@@ -184,7 +178,12 @@ impl Conductor {
                 }
                 let mut lines = Vec::with_capacity(sessions.len());
                 for s in &sessions {
-                    lines.push(format!("- {} [{:?}] ({})", s.title, s.state, s.path.display()));
+                    lines.push(format!(
+                        "- {} [{:?}] ({})",
+                        s.title,
+                        s.state,
+                        s.path.display()
+                    ));
                 }
                 Ok(lines.join("\n"))
             }
@@ -211,10 +210,7 @@ impl Conductor {
                     .rev()
                     .collect::<Vec<_>>()
                     .join("\n");
-                Ok(format!(
-                    "{name} [{:?}]:\n{last_lines}",
-                    session.state
-                ))
+                Ok(format!("{name} [{:?}]:\n{last_lines}", session.state))
             }
 
             "/send" => {
@@ -228,23 +224,22 @@ impl Conductor {
                 let conductor_msg = ops_core::protocol::ConductorMessage::TaskAssignment {
                     instructions: message.to_owned(),
                 };
-                self.runtime.send(&handle, conductor_msg).await.map_err(|e| {
-                    ConductorError::Internal {
+                self.runtime
+                    .send(&handle, conductor_msg)
+                    .await
+                    .map_err(|e| ConductorError::Internal {
                         message: format!("failed to send to {name}: {e}"),
-                    }
-                })?;
+                    })?;
                 Ok(format!("Sent to {name}."))
             }
 
-            "/help" => Ok(
-                "Commands:\n\
+            "/help" => Ok("Commands:\n\
                  /status - Show session overview\n\
                  /sessions - List all sessions with state\n\
                  /check <name> - Read recent output from a session\n\
                  /send <name> <msg> - Send a message to a session\n\
                  /help - Show this help"
-                    .into(),
-            ),
+                .into()),
 
             _ => Ok(format!("Unknown command: {command}. Try /help.")),
         }
@@ -252,7 +247,9 @@ impl Conductor {
 }
 
 /// Convert a `SessionRecord` to a `SessionHandle` for runtime calls.
-fn session_to_handle(session: &ops_core::session::SessionRecord) -> ops_core::session::SessionHandle {
+fn session_to_handle(
+    session: &ops_core::session::SessionRecord,
+) -> ops_core::session::SessionHandle {
     ops_core::session::SessionHandle {
         id: session.id,
         title: session.title.clone(),
@@ -312,10 +309,7 @@ mod tests {
         let parts: Vec<&str> = msg.text.splitn(3, ' ').collect();
         assert_eq!(parts.first().copied(), Some("/send"));
         assert_eq!(parts.get(1).copied(), Some("api-server"));
-        assert_eq!(
-            parts.get(2).copied(),
-            Some("use the staging database")
-        );
+        assert_eq!(parts.get(2).copied(), Some("use the staging database"));
     }
 
     #[test]

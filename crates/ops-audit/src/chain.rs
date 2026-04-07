@@ -12,8 +12,7 @@ use crate::error::AuditError;
 type HmacSha256 = Hmac<Sha256>;
 
 /// The genesis hash used as `prev_hash` for the first entry in a chain.
-pub const GENESIS_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Compute the SHA-256 content hash of a JSON payload.
 ///
@@ -39,8 +38,7 @@ pub fn compute_entry_hmac(
     content_hash: &str,
     prev_hash: &str,
 ) -> Result<String, AuditError> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| AuditError::KeyNotAvailable)?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| AuditError::KeyNotAvailable)?;
     mac.update(content_hash.as_bytes());
     mac.update(prev_hash.as_bytes());
     Ok(hex_encode(mac.finalize().into_bytes()))
@@ -93,18 +91,14 @@ pub struct ChainedEntry {
 /// - [`AuditError::ChainBroken`] if any invariant is violated.
 /// - [`AuditError::KeyNotAvailable`] if the HMAC key is rejected.
 /// - [`AuditError::Serialize`] if the event cannot be re-serialized.
-pub fn verify_chain(
-    key: &[u8],
-    entries: &[ChainedEntry],
-) -> Result<(), AuditError> {
+pub fn verify_chain(key: &[u8], entries: &[ChainedEntry]) -> Result<(), AuditError> {
     let mut expected_prev = GENESIS_HASH.to_owned();
 
     for entry in entries {
         let event_id = entry.event.request_id.to_string();
 
         // 1. Verify content hash matches the event payload.
-        let event_bytes = serde_json::to_vec(&entry.event)
-            .map_err(AuditError::Serialize)?;
+        let event_bytes = serde_json::to_vec(&entry.event).map_err(AuditError::Serialize)?;
         let recomputed_hash = content_hash(&event_bytes);
         if recomputed_hash != entry.content_hash {
             return Err(AuditError::ChainBroken {
@@ -124,19 +118,10 @@ pub fn verify_chain(
         }
 
         // 3. Verify HMAC tag.
-        let hmac_ok = verify_entry_hmac(
-            key,
-            &entry.content_hash,
-            &entry.prev_hash,
-            &entry.hmac,
-        )?;
+        let hmac_ok = verify_entry_hmac(key, &entry.content_hash, &entry.prev_hash, &entry.hmac)?;
 
         if !hmac_ok {
-            let correct = compute_entry_hmac(
-                key,
-                &entry.content_hash,
-                &entry.prev_hash,
-            )?;
+            let correct = compute_entry_hmac(key, &entry.content_hash, &entry.prev_hash)?;
             return Err(AuditError::ChainBroken {
                 event_id,
                 expected: correct,
@@ -170,10 +155,8 @@ mod tests {
                   abcdef1234567890abcdef1234567890";
         let ph = GENESIS_HASH;
 
-        let h1 =
-            compute_entry_hmac(key, ch, ph).expect("key should be valid");
-        let h2 =
-            compute_entry_hmac(key, ch, ph).expect("key should be valid");
+        let h1 = compute_entry_hmac(key, ch, ph).expect("key should be valid");
+        let h2 = compute_entry_hmac(key, ch, ph).expect("key should be valid");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64, "HMAC-SHA256 hex should be 64 chars");
     }
@@ -184,10 +167,8 @@ mod tests {
                   abcdef1234567890abcdef1234567890";
         let ph = GENESIS_HASH;
 
-        let h1 = compute_entry_hmac(b"key-one", ch, ph)
-            .expect("key should be valid");
-        let h2 = compute_entry_hmac(b"key-two", ch, ph)
-            .expect("key should be valid");
+        let h1 = compute_entry_hmac(b"key-one", ch, ph).expect("key should be valid");
+        let h2 = compute_entry_hmac(b"key-two", ch, ph).expect("key should be valid");
         assert_ne!(h1, h2);
     }
 
@@ -197,14 +178,11 @@ mod tests {
         let ch = content_hash(b"payload");
         let ph = GENESIS_HASH;
 
-        let valid_hmac = compute_entry_hmac(key, &ch, ph)
-            .expect("key should be valid");
-        let ok = verify_entry_hmac(key, &ch, ph, &valid_hmac)
-            .expect("key should be valid");
+        let valid_hmac = compute_entry_hmac(key, &ch, ph).expect("key should be valid");
+        let ok = verify_entry_hmac(key, &ch, ph, &valid_hmac).expect("key should be valid");
         assert!(ok);
 
-        let bad = verify_entry_hmac(key, &ch, ph, "tampered_value")
-            .expect("key should be valid");
+        let bad = verify_entry_hmac(key, &ch, ph, "tampered_value").expect("key should be valid");
         assert!(!bad);
     }
 
@@ -227,11 +205,9 @@ mod tests {
         };
 
         // Compute content hash from the actual serialized event.
-        let event_bytes = serde_json::to_vec(&event)
-            .expect("serialization should succeed");
+        let event_bytes = serde_json::to_vec(&event).expect("serialization should succeed");
         let ch = content_hash(&event_bytes);
-        let hmac_val = compute_entry_hmac(key, &ch, GENESIS_HASH)
-            .expect("key should be valid");
+        let hmac_val = compute_entry_hmac(key, &ch, GENESIS_HASH).expect("key should be valid");
 
         let mut entry = ChainedEntry {
             event,

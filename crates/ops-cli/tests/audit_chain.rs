@@ -5,7 +5,7 @@
 
 use ops_audit::chain::ChainedEntry;
 use ops_audit::writer::AuditLogWriter;
-use ops_audit::{verify_log, AuditError};
+use ops_audit::{AuditError, verify_log};
 use ops_core::action::PolicyDecision;
 use ops_core::id::RequestId;
 use ops_core::traits::AuditEvent;
@@ -57,10 +57,7 @@ async fn audit_chain_integrity_across_multiple_events() {
     ];
 
     for event in &events {
-        writer
-            .append(event)
-            .await
-            .expect("append should succeed");
+        writer.append(event).await.expect("append should succeed");
     }
 
     // 2. Verify the chain is intact.
@@ -98,8 +95,7 @@ async fn tampered_event_breaks_chain() {
     let mut lines: Vec<String> = contents.lines().map(String::from).collect();
 
     if let Some(line) = lines.get_mut(1) {
-        let mut entry: ChainedEntry =
-            serde_json::from_str(line).expect("should parse entry");
+        let mut entry: ChainedEntry = serde_json::from_str(line).expect("should parse entry");
         entry.event.action_summary = "TAMPERED".to_owned();
         *line = serde_json::to_string(&entry).expect("should serialize");
     }
@@ -117,9 +113,7 @@ async fn tampered_event_breaks_chain() {
     assert_eq!(result.total_entries, 3);
     assert!(result.first_broken.is_some());
 
-    let broken = result
-        .first_broken
-        .expect("should have a broken entry");
+    let broken = result.first_broken.expect("should have a broken entry");
     assert_eq!(broken.index, 1, "second entry should be the broken one");
 }
 

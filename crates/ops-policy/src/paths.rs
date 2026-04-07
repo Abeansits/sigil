@@ -66,7 +66,10 @@ pub fn quick_path_check(path: &Path) -> Result<(), PolicyError> {
 
     // Control characters (ASCII 0x01..0x1F except tab/newline, which
     // are themselves weird in paths but less dangerous).
-    if path_str.chars().any(|c| c.is_control() && c != '\t' && c != '\n') {
+    if path_str
+        .chars()
+        .any(|c| c.is_control() && c != '\t' && c != '\n')
+    {
         return Err(PolicyError::PathTraversalDenied {
             reason: "path contains control characters".into(),
         });
@@ -142,7 +145,10 @@ mod tests {
 
         let roots = vec![dir.path().to_path_buf()];
         let result = validate_path(&file_path, &roots);
-        assert!(result.is_ok(), "path within root should be allowed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "path within root should be allowed: {result:?}"
+        );
     }
 
     #[test]
@@ -154,12 +160,14 @@ mod tests {
         // a/b/../c  resolves to  a/c  (still inside root)
         let file_path = sub.join("..").join("c.txt");
         // Create the target so canonicalize works.
-        std::fs::write(dir.path().join("a").join("c.txt"), "ok")
-            .expect("write should succeed");
+        std::fs::write(dir.path().join("a").join("c.txt"), "ok").expect("write should succeed");
 
         let roots = vec![dir.path().to_path_buf()];
         let result = validate_path(&file_path, &roots);
-        assert!(result.is_ok(), "path resolving inside root should be allowed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "path resolving inside root should be allowed: {result:?}"
+        );
     }
 
     #[test]

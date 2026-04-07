@@ -282,7 +282,10 @@ mod tests {
                 target_session: None,
                 is_command: false,
             };
-            router.route(msg).await.expect("local should bypass rate limit");
+            router
+                .route(msg)
+                .await
+                .expect("local should bypass rate limit");
         }
     }
 }

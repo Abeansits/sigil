@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 use assert_matches::assert_matches;
 
+use ops_core::ToolKind;
 use ops_core::id::{GroupId, SessionId};
 use ops_core::session::{SessionRecord, SessionState};
 use ops_core::trust::ExecutionClass;
-use ops_core::ToolKind;
 use ops_store::{Store, StoreError};
 
 fn make_session(title: &str) -> SessionRecord {
@@ -104,14 +104,8 @@ async fn multiple_sessions_with_state_filtering() {
     let waiting = make_session("waiter");
     let stopped = make_session("stopper");
 
-    store
-        .create_session(&running)
-        .await
-        .expect("create runner");
-    store
-        .create_session(&waiting)
-        .await
-        .expect("create waiter");
+    store.create_session(&running).await.expect("create runner");
+    store.create_session(&waiting).await.expect("create waiter");
     store
         .create_session(&stopped)
         .await

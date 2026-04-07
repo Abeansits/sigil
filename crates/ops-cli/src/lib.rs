@@ -3,6 +3,7 @@
 //! This is the application crate. It uses `anyhow` for error handling
 //! and routes subcommands to the appropriate handler in `commands/`.
 
+pub mod audit;
 pub mod commands;
 
 use std::path::PathBuf;
@@ -200,9 +201,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     let db_path = expand_tilde(&cli.db)?;
 
     // Ensure the parent directory exists for the database file.
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create database directory")?;
-    }
+    let data_dir = db_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+
+    std::fs::create_dir_all(&data_dir).context("failed to create data directory")?;
 
     let db_str = db_path
         .to_str()
@@ -214,12 +217,22 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let runtime = TmuxRuntime::new("agent-ops");
 
+    let audit = audit::init_audit_writer(&data_dir)
+        .await
+        .context("failed to initialize audit writer")?;
+
     match cli.command {
         Commands::Status { json } => commands::status::run(&store, json).await,
-        Commands::Session(cmd) => commands::session::run(&store, &runtime, cmd).await,
+        Commands::Session(cmd) => commands::session::run(&store, &runtime, &audit, cmd).await,
         Commands::Worktree(cmd) => commands::worktree::run(&store, cmd).await,
         Commands::Conductor { interval } => {
-            commands::conductor::run(Arc::new(store), Arc::new(runtime), interval).await
+            commands::conductor::run(
+                Arc::new(store),
+                Arc::new(runtime),
+                Arc::clone(&audit),
+                interval,
+            )
+            .await
         }
     }
 }
@@ -476,13 +489,8 @@ mod tests {
 
     #[test]
     fn cli_parses_worktree_finish_with_merge() {
-        let cli = Cli::try_parse_from([
-            "agent-ops",
-            "worktree",
-            "finish",
-            "session-name",
-            "--merge",
-        ]);
+        let cli =
+            Cli::try_parse_from(["agent-ops", "worktree", "finish", "session-name", "--merge"]);
         assert!(cli.is_ok());
         let cli = cli.expect("parse should succeed");
         match &cli.command {

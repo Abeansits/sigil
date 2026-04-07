@@ -20,7 +20,7 @@ pub mod verifier;
 pub mod writer;
 
 pub use error::AuditError;
-pub use verifier::{verify_log, VerifyResult};
+pub use verifier::{VerifyResult, verify_log};
 pub use writer::AuditLogWriter;
 
 // ---------------------------------------------------------------------------
@@ -28,10 +28,7 @@ pub use writer::AuditLogWriter;
 // ---------------------------------------------------------------------------
 
 impl ops_core::traits::AuditWriter for AuditLogWriter {
-    async fn append(
-        &self,
-        event: &ops_core::AuditEvent,
-    ) -> Result<(), ops_core::CoreError> {
+    async fn append(&self, event: &ops_core::AuditEvent) -> Result<(), ops_core::CoreError> {
         self.append(event).await.map_err(Into::into)
     }
 }

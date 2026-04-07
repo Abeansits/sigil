@@ -57,12 +57,7 @@ impl ApprovalGrant {
     /// Whether this grant matches the given principal, capability, and
     /// optional resource.
     #[must_use]
-    pub fn matches(
-        &self,
-        principal: &str,
-        capability: Capability,
-        resource: Option<&str>,
-    ) -> bool {
+    pub fn matches(&self, principal: &str, capability: Capability, resource: Option<&str>) -> bool {
         if self.principal_id != principal {
             return false;
         }
@@ -212,11 +207,7 @@ mod tests {
             300,
             None,
         );
-        assert!(!grant.matches(
-            "paul",
-            Capability::ReadHostFile,
-            Some("/etc/shadow"),
-        ));
+        assert!(!grant.matches("paul", Capability::ReadHostFile, Some("/etc/shadow"),));
     }
 
     #[test]
@@ -234,11 +225,7 @@ mod tests {
     #[test]
     fn unscoped_grant_allows_any_resource() {
         let grant = make_grant("paul", Capability::ReadHostFile, None, 300, None);
-        assert!(grant.matches(
-            "paul",
-            Capability::ReadHostFile,
-            Some("/etc/anything"),
-        ));
+        assert!(grant.matches("paul", Capability::ReadHostFile, Some("/etc/anything"),));
     }
 
     #[test]

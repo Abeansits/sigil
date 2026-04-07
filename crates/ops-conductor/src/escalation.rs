@@ -72,11 +72,7 @@ pub fn format_status_report(result: &HeartbeatResult) -> String {
     let summary = if parts.is_empty() {
         format!("[STATUS] {} sessions.", result.total)
     } else {
-        format!(
-            "[STATUS] {} sessions ({}).",
-            result.total,
-            parts.join(", ")
-        )
+        format!("[STATUS] {} sessions ({}).", result.total, parts.join(", "))
     };
     lines.push(summary);
 
@@ -126,9 +122,7 @@ pub fn should_escalate(
         if output_lower.contains(pattern) {
             return Some(EscalationMessage {
                 session_title: session.title.clone(),
-                reason: format!(
-                    "output contains decision-request pattern: \"{pattern}\""
-                ),
+                reason: format!("output contains decision-request pattern: \"{pattern}\""),
                 priority: EscalationPriority::High,
             });
         }
@@ -138,10 +132,7 @@ pub fn should_escalate(
     if waiting_secs >= WAIT_THRESHOLD_SECS {
         return Some(EscalationMessage {
             session_title: session.title.clone(),
-            reason: format!(
-                "waiting for {} minutes",
-                waiting_secs / 60
-            ),
+            reason: format!("waiting for {} minutes", waiting_secs / 60),
             priority: EscalationPriority::Medium,
         });
     }

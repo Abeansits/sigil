@@ -132,10 +132,7 @@ skills = []
 
         let claude = config.tools.get("claude").expect("missing claude");
         assert_eq!(claude.skills.len(), 1);
-        assert_eq!(
-            claude.skills[0],
-            PathBuf::from("/home/user/.skills/review"),
-        );
+        assert_eq!(claude.skills[0], PathBuf::from("/home/user/.skills/review"),);
     }
 
     #[test]

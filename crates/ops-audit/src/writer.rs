@@ -35,10 +35,7 @@ impl AuditLogWriter {
     /// Returns [`AuditError::Write`] if the file cannot be opened or
     /// created, or [`AuditError::Serialize`] if the last entry cannot
     /// be deserialized during recovery.
-    pub async fn new(
-        path: impl AsRef<Path>,
-        key: Vec<u8>,
-    ) -> Result<Self, AuditError> {
+    pub async fn new(path: impl AsRef<Path>, key: Vec<u8>) -> Result<Self, AuditError> {
         let path = path.as_ref().to_path_buf();
         let prev_hash = recover_prev_hash(&path).await?;
 
@@ -67,22 +64,14 @@ impl AuditLogWriter {
     /// Returns [`AuditError::Serialize`] if the event cannot be
     /// serialized, [`AuditError::Write`] on I/O failure, or
     /// [`AuditError::KeyNotAvailable`] if the HMAC key is rejected.
-    pub async fn append(
-        &self,
-        event: &ops_core::AuditEvent,
-    ) -> Result<(), AuditError> {
-        let json_bytes =
-            serde_json::to_vec(event).map_err(AuditError::Serialize)?;
+    pub async fn append(&self, event: &ops_core::AuditEvent) -> Result<(), AuditError> {
+        let json_bytes = serde_json::to_vec(event).map_err(AuditError::Serialize)?;
 
         let content_hash = chain::content_hash(&json_bytes);
 
         let mut state = self.state.lock().await;
 
-        let hmac_tag = chain::compute_entry_hmac(
-            &self.key,
-            &content_hash,
-            &state.prev_hash,
-        )?;
+        let hmac_tag = chain::compute_entry_hmac(&self.key, &content_hash, &state.prev_hash)?;
 
         let entry = ChainedEntry {
             event: event.clone(),
@@ -91,8 +80,7 @@ impl AuditLogWriter {
             hmac: hmac_tag.clone(),
         };
 
-        let mut line =
-            serde_json::to_vec(&entry).map_err(AuditError::Serialize)?;
+        let mut line = serde_json::to_vec(&entry).map_err(AuditError::Serialize)?;
         line.push(b'\n');
 
         state
@@ -130,8 +118,7 @@ async fn recover_prev_hash(path: &Path) -> Result<String, AuditError> {
 
     match last_line {
         Some(line) => {
-            let entry: ChainedEntry =
-                serde_json::from_str(line).map_err(AuditError::Serialize)?;
+            let entry: ChainedEntry = serde_json::from_str(line).map_err(AuditError::Serialize)?;
             Ok(entry.hmac)
         }
         None => Ok(GENESIS_HASH.to_owned()),
@@ -158,8 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_creates_valid_jsonl() {
-        let dir = tempfile::tempdir()
-            .expect("tempdir creation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
         let path = dir.path().join("audit.jsonl");
         let key = b"test-key".to_vec();
 
@@ -179,21 +165,19 @@ mod tests {
         let contents = tokio::fs::read_to_string(&path)
             .await
             .expect("reading log file should succeed");
-        let lines: Vec<&str> =
-            contents.lines().filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
         assert_eq!(lines.len(), 2, "should have two JSONL lines");
 
         // Each line should parse as a ChainedEntry.
         for line in &lines {
-            let _entry: ChainedEntry = serde_json::from_str(line)
-                .expect("each line should be valid ChainedEntry JSON");
+            let _entry: ChainedEntry =
+                serde_json::from_str(line).expect("each line should be valid ChainedEntry JSON");
         }
     }
 
     #[tokio::test]
     async fn recovery_from_existing_file() {
-        let dir = tempfile::tempdir()
-            .expect("tempdir creation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
         let path = dir.path().join("audit.jsonl");
         let key = b"recovery-key".to_vec();
 
@@ -229,21 +213,16 @@ mod tests {
         let entries: Vec<ChainedEntry> = contents
             .lines()
             .filter(|l| !l.is_empty())
-            .map(|l| {
-                serde_json::from_str(l)
-                    .expect("each line should be valid JSON")
-            })
+            .map(|l| serde_json::from_str(l).expect("each line should be valid JSON"))
             .collect();
 
         assert_eq!(entries.len(), 3);
-        chain::verify_chain(&key, &entries)
-            .expect("chain should be valid after recovery");
+        chain::verify_chain(&key, &entries).expect("chain should be valid after recovery");
     }
 
     #[tokio::test]
     async fn new_file_starts_from_genesis() {
-        let dir = tempfile::tempdir()
-            .expect("tempdir creation should succeed");
+        let dir = tempfile::tempdir().expect("tempdir creation should succeed");
         let path = dir.path().join("fresh.jsonl");
         let key = b"fresh-key".to_vec();
 

@@ -19,8 +19,7 @@ impl GrantStore for Store {
         capability: Capability,
         resource: Option<&str>,
     ) -> Result<Option<ApprovalGrant>, PolicyError> {
-        let cap_str =
-            serde_json::to_string(&capability).map_err(StoreError::Serialization)?;
+        let cap_str = serde_json::to_string(&capability).map_err(StoreError::Serialization)?;
         let now = OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .unwrap_or_default();
@@ -57,14 +56,8 @@ impl GrantStore for Store {
         let id = grant.id.to_string();
         let cap_str =
             serde_json::to_string(&grant.capability).map_err(StoreError::Serialization)?;
-        let expires_at = grant
-            .expires_at
-            .format(&Rfc3339)
-            .unwrap_or_default();
-        let issued_at = grant
-            .issued_at
-            .format(&Rfc3339)
-            .unwrap_or_default();
+        let expires_at = grant.expires_at.format(&Rfc3339).unwrap_or_default();
+        let issued_at = grant.issued_at.format(&Rfc3339).unwrap_or_default();
 
         sqlx::query(
             "INSERT INTO approval_grants \
@@ -141,11 +134,10 @@ fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalGrant, StoreErr
     let resource_scope: Option<String> = row.get("resource_scope");
 
     let expires_str: String = row.get("expires_at");
-    let expires_at = OffsetDateTime::parse(&expires_str, &Rfc3339).map_err(|e| {
-        StoreError::SessionNotFound {
+    let expires_at =
+        OffsetDateTime::parse(&expires_str, &Rfc3339).map_err(|e| StoreError::SessionNotFound {
             id: format!("invalid expires_at '{expires_str}': {e}"),
-        }
-    })?;
+        })?;
 
     let max_uses: Option<i64> = row.get("max_uses");
     let max_uses = max_uses.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
@@ -156,11 +148,10 @@ fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalGrant, StoreErr
     let issued_by: String = row.get("issued_by");
 
     let issued_str: String = row.get("issued_at");
-    let issued_at = OffsetDateTime::parse(&issued_str, &Rfc3339).map_err(|e| {
-        StoreError::SessionNotFound {
+    let issued_at =
+        OffsetDateTime::parse(&issued_str, &Rfc3339).map_err(|e| StoreError::SessionNotFound {
             id: format!("invalid issued_at '{issued_str}': {e}"),
-        }
-    })?;
+        })?;
 
     Ok(ApprovalGrant {
         id,

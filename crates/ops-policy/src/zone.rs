@@ -90,43 +90,33 @@ mod tests {
 
     #[test]
     fn ingress_to_control_plane_allowed() {
-        assert!(validate_zone_transition(
-            TrustZone::Ingress,
-            TrustZone::ControlPlane,
-            Tier::T0,
-        )
-        .is_ok());
+        assert!(
+            validate_zone_transition(TrustZone::Ingress, TrustZone::ControlPlane, Tier::T0,)
+                .is_ok()
+        );
     }
 
     #[test]
     fn control_plane_to_agent_runtime_allowed() {
-        assert!(validate_zone_transition(
-            TrustZone::ControlPlane,
-            TrustZone::AgentRuntime,
-            Tier::T0,
-        )
-        .is_ok());
+        assert!(
+            validate_zone_transition(TrustZone::ControlPlane, TrustZone::AgentRuntime, Tier::T0,)
+                .is_ok()
+        );
     }
 
     #[test]
     fn agent_runtime_to_control_plane_allowed() {
-        assert!(validate_zone_transition(
-            TrustZone::AgentRuntime,
-            TrustZone::ControlPlane,
-            Tier::T0,
-        )
-        .is_ok());
+        assert!(
+            validate_zone_transition(TrustZone::AgentRuntime, TrustZone::ControlPlane, Tier::T0,)
+                .is_ok()
+        );
     }
 
     #[test]
     fn control_plane_to_host_privileged_requires_t3() {
         // T2 is too low.
         assert_matches!(
-            validate_zone_transition(
-                TrustZone::ControlPlane,
-                TrustZone::HostPrivileged,
-                Tier::T2,
-            ),
+            validate_zone_transition(TrustZone::ControlPlane, TrustZone::HostPrivileged, Tier::T2,),
             Err(PolicyError::TierCeilingExceeded {
                 required: Tier::T3,
                 ceiling: Tier::T2,
@@ -134,20 +124,20 @@ mod tests {
         );
 
         // T3 is sufficient.
-        assert!(validate_zone_transition(
-            TrustZone::ControlPlane,
-            TrustZone::HostPrivileged,
-            Tier::T3,
-        )
-        .is_ok());
+        assert!(
+            validate_zone_transition(TrustZone::ControlPlane, TrustZone::HostPrivileged, Tier::T3,)
+                .is_ok()
+        );
 
         // T3Plus is also fine.
-        assert!(validate_zone_transition(
-            TrustZone::ControlPlane,
-            TrustZone::HostPrivileged,
-            Tier::T3Plus,
-        )
-        .is_ok());
+        assert!(
+            validate_zone_transition(
+                TrustZone::ControlPlane,
+                TrustZone::HostPrivileged,
+                Tier::T3Plus,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -169,11 +159,7 @@ mod tests {
     #[test]
     fn ingress_to_agent_runtime_denied() {
         assert_matches!(
-            validate_zone_transition(
-                TrustZone::Ingress,
-                TrustZone::AgentRuntime,
-                Tier::T3Plus,
-            ),
+            validate_zone_transition(TrustZone::Ingress, TrustZone::AgentRuntime, Tier::T3Plus,),
             Err(PolicyError::ZoneTransitionDenied { .. })
         );
     }
@@ -181,11 +167,7 @@ mod tests {
     #[test]
     fn ingress_to_host_privileged_denied() {
         assert_matches!(
-            validate_zone_transition(
-                TrustZone::Ingress,
-                TrustZone::HostPrivileged,
-                Tier::T3Plus,
-            ),
+            validate_zone_transition(TrustZone::Ingress, TrustZone::HostPrivileged, Tier::T3Plus,),
             Err(PolicyError::ZoneTransitionDenied { .. })
         );
     }
@@ -193,11 +175,7 @@ mod tests {
     #[test]
     fn host_privileged_to_ingress_denied() {
         assert_matches!(
-            validate_zone_transition(
-                TrustZone::HostPrivileged,
-                TrustZone::Ingress,
-                Tier::T3Plus,
-            ),
+            validate_zone_transition(TrustZone::HostPrivileged, TrustZone::Ingress, Tier::T3Plus,),
             Err(PolicyError::ZoneTransitionDenied { .. })
         );
     }

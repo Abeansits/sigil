@@ -332,11 +332,11 @@ mod tests {
 
         for case in &cases {
             let request = make_request(case.origin.clone(), case.action.clone());
-            let decision = evaluator.evaluate(&request).unwrap_or_else(|e| {
-                PolicyDecision::Deny {
+            let decision = evaluator
+                .evaluate(&request)
+                .unwrap_or_else(|e| PolicyDecision::Deny {
                     reason: e.to_string(),
-                }
-            });
+                });
             assert!(
                 (case.check)(&decision),
                 "FAILED: {}\n  got: {decision:?}",

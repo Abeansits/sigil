@@ -5,10 +5,10 @@ use std::str::FromStr;
 
 use sqlx::Row;
 
+use ops_core::ToolKind;
 use ops_core::id::{GroupId, SessionId};
 use ops_core::session::{SessionRecord, SessionState};
 use ops_core::trust::ExecutionClass;
-use ops_core::ToolKind;
 
 use crate::Store;
 use crate::error::StoreError;
@@ -76,10 +76,7 @@ impl Store {
     ///
     /// Returns [`StoreError::SessionNotFound`] if no session exists with the
     /// given title, or [`StoreError::Database`] on query failure.
-    pub async fn get_session_by_title(
-        &self,
-        title: &str,
-    ) -> Result<SessionRecord, StoreError> {
+    pub async fn get_session_by_title(&self, title: &str) -> Result<SessionRecord, StoreError> {
         let row = sqlx::query("SELECT * FROM sessions WHERE title = ?")
             .bind(title)
             .fetch_optional(&self.pool)
@@ -139,13 +136,12 @@ impl Store {
         let id_str = id.to_string();
         let state_str = serde_json::to_string(&state)?;
 
-        let result = sqlx::query(
-            "UPDATE sessions SET state = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(&state_str)
-        .bind(&id_str)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("UPDATE sessions SET state = ?, updated_at = datetime('now') WHERE id = ?")
+                .bind(&state_str)
+                .bind(&id_str)
+                .execute(&self.pool)
+                .await?;
 
         if result.rows_affected() == 0 {
             return Err(StoreError::SessionNotFound { id: id_str });

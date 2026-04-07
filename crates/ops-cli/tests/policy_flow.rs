@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 use assert_matches::assert_matches;
 
+use ops_core::PolicyEngine;
 use ops_core::action::{Action, ActionRequest, PolicyDecision};
 use ops_core::id::SessionId;
 use ops_core::origin::ActionOrigin;
-use ops_core::PolicyEngine;
 use ops_policy::{EvaluatorConfig, PolicyService};
 
 fn service() -> PolicyService {

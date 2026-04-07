@@ -4,10 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+use ops_audit::AuditLogWriter;
 use ops_conductor::Conductor;
+use ops_core::PolicyDecision;
 use ops_runtime::TmuxRuntime;
 use ops_store::Store;
 use tracing::{error, info};
+
+use crate::audit::log_event;
 
 /// Run the conductor heartbeat loop.
 ///
@@ -19,7 +24,12 @@ use tracing::{error, info};
 ///
 /// Returns an error if the initial tmux check fails.
 #[allow(clippy::print_stdout)]
-pub async fn run(store: Arc<Store>, runtime: Arc<TmuxRuntime>, interval: u64) -> Result<()> {
+pub async fn run(
+    store: Arc<Store>,
+    runtime: Arc<TmuxRuntime>,
+    audit: Arc<AuditLogWriter>,
+    interval: u64,
+) -> Result<()> {
     TmuxRuntime::check_tmux()
         .await
         .context("tmux is required for the conductor")?;
@@ -40,6 +50,19 @@ pub async fn run(store: Arc<Store>, runtime: Arc<TmuxRuntime>, interval: u64) ->
                 corrections = result.state_corrections.len(),
                 "startup reconciliation complete",
             );
+            let detail = format!(
+                "checked={}, corrections={}",
+                result.sessions_checked,
+                result.state_corrections.len(),
+            );
+            log_event(
+                &audit,
+                &format!("conductor.reconcile: {detail}"),
+                "conductor",
+                PolicyDecision::Allow,
+                None,
+            )
+            .await;
             if result.state_corrections.is_empty() {
                 println!("Reconciliation: all sessions consistent.");
             } else {
@@ -56,6 +79,14 @@ pub async fn run(store: Arc<Store>, runtime: Arc<TmuxRuntime>, interval: u64) ->
     }
 
     info!(interval_secs = interval, "conductor starting");
+    log_event(
+        &audit,
+        "conductor.start",
+        "conductor",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
     println!("Conductor running (heartbeat every {interval}s). Press Ctrl-C to stop.");
 
     loop {
@@ -63,6 +94,11 @@ pub async fn run(store: Arc<Store>, runtime: Arc<TmuxRuntime>, interval: u64) ->
             () = tokio::time::sleep(conductor.heartbeat_interval()) => {
                 match conductor.run_heartbeat_cycle().await {
                     Ok(result) => {
+                        let detail = format!(
+                            "total={} running={} waiting={} error={}",
+                            result.total, result.running, result.waiting, result.error,
+                        );
+                        log_event(&audit, &format!("conductor.heartbeat: {detail}"), "conductor", PolicyDecision::Allow, None).await;
                         info!(
                             total = result.total,
                             running = result.running,

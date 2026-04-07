@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ops-core = { path = "../ops-core" }
+ops-audit = { path = "../ops-audit" }
 ops-store = { path = "../ops-store" }
 ops-runtime = { path = "../ops-runtime" }
 ops-conductor = { path = "../ops-conductor" }
