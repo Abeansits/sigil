@@ -89,16 +89,25 @@ pub async fn run(
     .await;
     println!("Conductor running (heartbeat every {interval}s). Press Ctrl-C to stop.");
 
+    let mut prev_counts: Option<(usize, usize, usize, usize)> = None;
+
     loop {
         tokio::select! {
             () = tokio::time::sleep(conductor.heartbeat_interval()) => {
                 match conductor.run_heartbeat_cycle().await {
                     Ok(result) => {
-                        let detail = format!(
-                            "total={} running={} waiting={} error={}",
-                            result.total, result.running, result.waiting, result.error,
-                        );
-                        log_event(&audit, &format!("conductor.heartbeat: {detail}"), "conductor", PolicyDecision::Allow, None).await;
+                        let counts = (result.total, result.running, result.waiting, result.error);
+
+                        // Only log an audit event when session counts change.
+                        if prev_counts.as_ref() != Some(&counts) {
+                            let detail = format!(
+                                "total={} running={} waiting={} error={}",
+                                counts.0, counts.1, counts.2, counts.3,
+                            );
+                            log_event(&audit, &format!("conductor.heartbeat: {detail}"), "conductor", PolicyDecision::Allow, None).await;
+                            prev_counts = Some(counts);
+                        }
+
                         info!(
                             total = result.total,
                             running = result.running,

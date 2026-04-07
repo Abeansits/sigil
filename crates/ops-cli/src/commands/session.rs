@@ -153,6 +153,12 @@ fn record_to_handle(record: &SessionRecord) -> SessionHandle {
     }
 }
 
+/// Log an audit event for a session action (always `"cli"` origin, `Allow`
+/// decision). Reduces boilerplate across the session subcommands.
+async fn log_session_event(audit: &AuditLogWriter, action: &str, session_id: SessionId) {
+    log_event(audit, action, "cli", PolicyDecision::Allow, Some(session_id)).await;
+}
+
 // -- Subcommand handlers --
 
 #[allow(clippy::print_stdout)]
@@ -244,14 +250,7 @@ async fn create(
         .await
         .context("failed to create session")?;
 
-    log_event(
-        audit,
-        "session.create",
-        "cli",
-        PolicyDecision::Allow,
-        Some(record.id),
-    )
-    .await;
+    log_session_event(audit, "session.create", record.id).await;
 
     println!("Created session '{}' ({})", record.title, record.id);
     Ok(())
@@ -305,14 +304,7 @@ async fn launch(
         .await
         .context("failed to persist launched session")?;
 
-    log_event(
-        audit,
-        "session.launch",
-        "cli",
-        PolicyDecision::Allow,
-        Some(record.id),
-    )
-    .await;
+    log_session_event(audit, "session.launch", record.id).await;
 
     println!("Launched session '{}' ({})", record.title, record.id);
     Ok(())
@@ -357,14 +349,7 @@ async fn start(
         .await
         .context("failed to update session state")?;
 
-    log_event(
-        audit,
-        "session.start",
-        "cli",
-        PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    log_session_event(audit, "session.start", session.id).await;
 
     println!("Started session '{}'.", session.title);
     Ok(())
@@ -390,14 +375,7 @@ async fn stop(
         .await
         .context("failed to update session state")?;
 
-    log_event(
-        audit,
-        "session.stop",
-        "cli",
-        PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    log_session_event(audit, "session.stop", session.id).await;
 
     println!("Stopped session '{}'.", session.title);
     Ok(())
@@ -442,14 +420,7 @@ async fn restart(
         .await
         .context("failed to update session state")?;
 
-    log_event(
-        audit,
-        "session.restart",
-        "cli",
-        PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    log_session_event(audit, "session.restart", session.id).await;
 
     println!("Restarted session '{}'.", session.title);
     Ok(())
@@ -477,14 +448,7 @@ async fn send(
         .await
         .context("failed to send message")?;
 
-    log_event(
-        audit,
-        "session.send",
-        "cli",
-        PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    log_session_event(audit, "session.send", session.id).await;
 
     if !quiet {
         println!("Sent to '{}'.", session.title);
@@ -565,14 +529,7 @@ async fn remove(store: &Store, audit: &AuditLogWriter, name: &str) -> Result<()>
         .await
         .context("failed to delete session")?;
 
-    log_event(
-        audit,
-        "session.remove",
-        "cli",
-        PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    log_session_event(audit, "session.remove", session.id).await;
 
     println!("Removed session '{}' ({}).", session.title, session.id);
     Ok(())
