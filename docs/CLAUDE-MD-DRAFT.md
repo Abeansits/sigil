@@ -4,7 +4,7 @@
 
 A Rust workspace replacing agent-deck (Go) + bridge.py (Python). Single binary for managing AI agent sessions with security baked in.
 
-**Proposal:** `docs/REWRITE-PROPOSAL.md` — read this for full architecture, Action enum, trust zones, and build order.
+**Proposal:** `~/.agent-deck/conductor/ops/drafts/rewrite-proposal.md` — read this for full architecture, Action enum, trust zones, and build order.
 
 ## Workspace
 
