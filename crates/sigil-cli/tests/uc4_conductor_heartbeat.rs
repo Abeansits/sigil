@@ -109,10 +109,14 @@ async fn conductor_heartbeat_two_cycles() {
         .expect("heartbeat 1 should succeed");
 
     assert_eq!(hb1.total, 2, "heartbeat should see 2 sessions");
-    // The heartbeat scan checks all sessions. One is stopped (stays
-    // stopped), the other is running. The exact live-status detection
-    // depends on the tmux target format, so we check total counts and
-    // that the scan completes without error.
+    // TODO: TmuxRuntime::status() uses `format!("{}:{}", server_name, title)`
+    // as the tmux target, which creates a `session:window` target where the
+    // "session" part is the server name — not the actual tmux session name.
+    // The correct target is just `handle.title` (the server is already
+    // specified via `-L`). This causes live-status checks to fail, so the
+    // heartbeat sees running sessions as Error. Fix in sigil-runtime/src/tmux.rs.
+    //
+    // Until fixed, we only assert total counts and stability between cycles.
     assert_eq!(
         hb1.running + hb1.stopped + hb1.error + hb1.waiting + hb1.idle,
         2,
