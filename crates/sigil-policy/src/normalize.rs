@@ -329,3 +329,106 @@ mod tests {
         assert_eq!(strip_ansi("\x1b]2;window title\x1b\\content"), "content");
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Strategy that generates strings containing known problematic
+    /// characters (zero-width, directional overrides, control chars,
+    /// variation selectors, tag characters) mixed with normal text.
+    fn arb_tricky_input() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            // Inject zero-width characters.
+            "[a-z]{0,10}".prop_map(|s| format!("{s}\u{200B}\u{200C}\u{200D}\u{FEFF}")),
+            // Inject directional overrides.
+            "[a-z]{0,10}".prop_map(|s| format!("\u{202E}{s}\u{202C}")),
+            // Inject tag characters + variation selectors.
+            "[a-z]{0,10}".prop_map(|s| format!("{s}\u{E0001}\u{FE0F}")),
+            // Inject control characters (null, bell, ESC).
+            "[a-z]{0,10}".prop_map(|s| format!("{s}\x00\x07")),
+        ]
+    }
+
+    /// Strategy that generates strings with ANSI escape sequences.
+    fn arb_ansi_input() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            // SGR color codes.
+            "[a-z]{0,10}".prop_map(|s| format!("\x1b[31m{s}\x1b[0m")),
+            // OSC title setting (BEL terminated).
+            "[a-z]{0,10}".prop_map(|s| format!("\x1b]0;title\x07{s}")),
+            // Charset selection.
+            "[a-z]{0,10}".prop_map(|s| format!("\x1b(B{s}")),
+            // Cursor movement.
+            "[a-z]{0,10}".prop_map(|s| format!("\x1b[2J\x1b[H{s}")),
+        ]
+    }
+
+    proptest! {
+        /// Normalizing already-normalized text produces the same result.
+        #[test]
+        fn normalization_is_idempotent(s in arb_tricky_input()) {
+            let once = normalize_text(&s);
+            let twice = normalize_text(&once.cleaned);
+            prop_assert_eq!(
+                &once.cleaned, &twice.cleaned,
+                "normalize_text is not idempotent"
+            );
+        }
+
+        /// After normalization, nothing more is stripped on a second pass.
+        #[test]
+        fn normalized_output_has_zero_stripped_on_repass(s in arb_tricky_input()) {
+            let once = normalize_text(&s);
+            let twice = normalize_text(&once.cleaned);
+            prop_assert_eq!(
+                twice.stripped_count, 0,
+                "second normalization pass should strip nothing, but stripped {}",
+                twice.stripped_count,
+            );
+        }
+
+        /// Stripping ANSI escapes is idempotent: once stripped, a second
+        /// pass changes nothing.
+        #[test]
+        fn strip_ansi_is_idempotent(s in arb_ansi_input()) {
+            let once = strip_ansi(&s);
+            let twice = strip_ansi(&once);
+            prop_assert_eq!(
+                once, twice,
+                "strip_ansi is not idempotent"
+            );
+        }
+
+        /// Normalization never increases string length.
+        #[test]
+        fn normalization_never_grows(s in arb_tricky_input()) {
+            let result = normalize_text(&s);
+            prop_assert!(
+                result.cleaned.len() <= s.len(),
+                "normalized len {} > original len {}",
+                result.cleaned.len(),
+                s.len(),
+            );
+        }
+
+        /// stripped_count matches the difference in char count.
+        #[test]
+        fn stripped_count_is_accurate(s in arb_tricky_input()) {
+            let result = normalize_text(&s);
+            let original_chars = s.chars().count();
+            let cleaned_chars = result.cleaned.chars().count();
+            prop_assert_eq!(
+                result.stripped_count,
+                original_chars - cleaned_chars,
+                "stripped_count doesn't match char difference"
+            );
+        }
+    }
+}

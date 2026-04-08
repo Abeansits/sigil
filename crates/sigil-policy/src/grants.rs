@@ -344,3 +344,151 @@ mod tests {
         assert!(!grant.is_valid());
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use proptest::prelude::*;
+    use sigil_core::trust::Capability;
+
+    use super::*;
+
+    // ── Resource scope matching ───────────────────────────────────
+
+    proptest! {
+        /// Exact match is always accepted: `matches_resource_scope(s, s)`.
+        #[test]
+        fn scope_exact_match_is_reflexive(scope in "[a-z/]{1,30}") {
+            prop_assert!(
+                matches_resource_scope(&scope, &scope),
+                "exact match should always succeed for {scope:?}"
+            );
+        }
+
+        /// Prefix with a slash boundary always matches.
+        #[test]
+        fn scope_prefix_with_slash_boundary_matches(
+            scope in "/[a-z]{1,15}(/[a-z]{1,10}){0,3}",
+            suffix in "[a-z]{1,15}(/[a-z]{1,10}){0,3}",
+        ) {
+            let resource = format!("{scope}/{suffix}");
+            prop_assert!(
+                matches_resource_scope(&scope, &resource),
+                "{scope:?} should match {resource:?} (slash boundary)"
+            );
+        }
+
+        /// A prefix without a path boundary must NOT match.
+        /// scope = "/abc", resource = "/abcdef" — no slash at boundary.
+        #[test]
+        fn scope_prefix_without_boundary_rejects(
+            scope in "/[a-z]{2,15}",
+            extra in "[a-z]{1,10}",
+        ) {
+            let resource = format!("{scope}{extra}");
+            prop_assert!(
+                !matches_resource_scope(&scope, &resource),
+                "{scope:?} should NOT match {resource:?} (no boundary)"
+            );
+        }
+
+        /// Completely disjoint paths never match.
+        #[test]
+        fn disjoint_paths_never_match(
+            scope in "/[a-z]{1,10}",
+            resource in "/[A-Z]{1,10}",
+        ) {
+            // scope is lowercase, resource is uppercase → no prefix match.
+            prop_assert!(
+                !matches_resource_scope(&scope, &resource),
+                "{scope:?} should NOT match {resource:?}"
+            );
+        }
+    }
+
+    // ── Grant.matches() symmetry ──────────────────────────────────
+
+    fn arb_capability() -> impl Strategy<Value = Capability> {
+        prop_oneof![
+            Just(Capability::ReadSessionInfo),
+            Just(Capability::ReadSystemStatus),
+            Just(Capability::ManageSession),
+            Just(Capability::SendMessage),
+            Just(Capability::ModifyInfrastructure),
+            Just(Capability::ConfigureConductor),
+            Just(Capability::ReadHostFile),
+            Just(Capability::WriteHostFile),
+            Just(Capability::ExecuteHostCommand),
+            Just(Capability::ModifyGitState),
+        ]
+    }
+
+    fn arb_capability_2() -> impl Strategy<Value = Capability> {
+        prop_oneof![
+            Just(Capability::ExternalNetworkWrite),
+            Just(Capability::ServiceControl),
+            Just(Capability::BreakGlass),
+        ]
+    }
+
+    fn make_test_grant(
+        principal: &str,
+        capability: Capability,
+        resource_scope: Option<&str>,
+    ) -> ApprovalGrant {
+        let now = OffsetDateTime::now_utc();
+        ApprovalGrant {
+            id: RequestId::new(),
+            principal_id: principal.into(),
+            capability,
+            resource_scope: resource_scope.map(Into::into),
+            expires_at: now + time::Duration::seconds(300),
+            max_uses: None,
+            uses: 0,
+            issued_by: "test".into(),
+            issued_at: now,
+        }
+    }
+
+    proptest! {
+        /// A grant always matches its own principal + capability.
+        #[test]
+        fn grant_matches_own_identity(
+            principal in "[a-z]{1,10}",
+            cap in arb_capability(),
+        ) {
+            let grant = make_test_grant(&principal, cap, None);
+            prop_assert!(grant.matches(&principal, cap, None));
+        }
+
+        /// A grant never matches a different principal.
+        #[test]
+        fn grant_rejects_wrong_principal(
+            owner in "[a-z]{1,10}",
+            intruder in "[A-Z]{1,10}",
+            cap in arb_capability(),
+        ) {
+            let grant = make_test_grant(&owner, cap, None);
+            prop_assert!(
+                !grant.matches(&intruder, cap, None),
+                "grant for {owner:?} should reject {intruder:?}"
+            );
+        }
+
+        /// A grant never matches a different capability.
+        #[test]
+        fn grant_rejects_wrong_capability(
+            principal in "[a-z]{1,10}",
+            cap_a in arb_capability(),
+            cap_b in arb_capability_2(),
+        ) {
+            // cap_a from first group, cap_b from second → always different.
+            let grant = make_test_grant(&principal, cap_a, None);
+            prop_assert!(
+                !grant.matches(&principal, cap_b, None),
+                "grant for {cap_a:?} should reject {cap_b:?}"
+            );
+        }
+    }
+}

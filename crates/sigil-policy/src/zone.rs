@@ -180,3 +180,92 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use proptest::prelude::*;
+    use sigil_core::trust::{Tier, TrustZone};
+
+    use super::*;
+
+    fn arb_zone() -> impl Strategy<Value = TrustZone> {
+        prop_oneof![
+            Just(TrustZone::Ingress),
+            Just(TrustZone::ControlPlane),
+            Just(TrustZone::AgentRuntime),
+            Just(TrustZone::HostPrivileged),
+        ]
+    }
+
+    fn arb_tier() -> impl Strategy<Value = Tier> {
+        prop_oneof![
+            Just(Tier::T0),
+            Just(Tier::T1),
+            Just(Tier::T2),
+            Just(Tier::T3),
+            Just(Tier::T3Plus),
+        ]
+    }
+
+    proptest! {
+        /// Same-zone transitions are always allowed regardless of tier.
+        #[test]
+        fn same_zone_always_allowed(zone in arb_zone(), tier in arb_tier()) {
+            prop_assert!(
+                validate_zone_transition(zone, zone, tier).is_ok(),
+                "same-zone {zone:?} should always be allowed at {tier:?}"
+            );
+        }
+
+        /// AgentRuntime → HostPrivileged is architecturally blocked
+        /// regardless of tier.
+        #[test]
+        fn agent_to_host_always_blocked(tier in arb_tier()) {
+            let result = validate_zone_transition(
+                TrustZone::AgentRuntime,
+                TrustZone::HostPrivileged,
+                tier,
+            );
+            prop_assert!(
+                result.is_err(),
+                "AgentRuntime→HostPrivileged should always be blocked, got Ok at {tier:?}"
+            );
+        }
+
+        /// ControlPlane → HostPrivileged is allowed iff tier >= T3.
+        #[test]
+        fn control_plane_to_host_tier_gated(tier in arb_tier()) {
+            let result = validate_zone_transition(
+                TrustZone::ControlPlane,
+                TrustZone::HostPrivileged,
+                tier,
+            );
+            if tier >= Tier::T3 {
+                prop_assert!(
+                    result.is_ok(),
+                    "ControlPlane→HostPrivileged should be allowed at {tier:?}"
+                );
+            } else {
+                prop_assert!(
+                    result.is_err(),
+                    "ControlPlane→HostPrivileged should be denied at {tier:?}"
+                );
+            }
+        }
+
+        /// Zone transitions are deterministic: same inputs always give
+        /// the same result.
+        #[test]
+        fn zone_transition_is_deterministic(
+            from in arb_zone(),
+            to in arb_zone(),
+            tier in arb_tier(),
+        ) {
+            let r1 = validate_zone_transition(from, to, tier);
+            let r2 = validate_zone_transition(from, to, tier);
+            prop_assert_eq!(r1.is_ok(), r2.is_ok());
+        }
+    }
+}
