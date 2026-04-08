@@ -16,6 +16,8 @@ pub mod config;
 #[cfg(feature = "container")]
 pub mod container;
 pub mod error;
+#[cfg(feature = "container")]
+pub mod proxy;
 pub mod tmux;
 pub mod worktree;
 
@@ -24,5 +26,7 @@ pub use config::ToolConfig;
 #[cfg(feature = "container")]
 pub use container::{ContainerConfig, ContainerRuntime, NetworkMode};
 pub use error::RuntimeError;
+#[cfg(feature = "container")]
+pub use proxy::{DomainAllowlist, DomainProxy};
 pub use tmux::TmuxRuntime;
 pub use worktree::{WorktreeInfo, WorktreeManager};

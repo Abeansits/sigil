@@ -38,6 +38,10 @@ pub enum RuntimeError {
     #[cfg(feature = "container")]
     #[error("container command failed: {command} — {stderr}")]
     ContainerCommand { command: String, stderr: String },
+
+    #[cfg(feature = "container")]
+    #[error("proxy error: {message}")]
+    Proxy { message: String },
 }
 
 impl From<RuntimeError> for CoreError {

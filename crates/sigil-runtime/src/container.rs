@@ -12,19 +12,24 @@
 //!
 //! Feature-gated behind `container`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sigil_audit::AuditLogWriter;
 use sigil_core::error::CoreError;
 use sigil_core::protocol::ConductorMessage;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionState, ToolKind};
 use sigil_core::traits::{SessionRuntime, ToolAdapter};
 use tokio::process::Command;
-use tracing::{debug, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::adapter;
 use crate::error::RuntimeError;
+use crate::proxy::DomainProxy;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -41,6 +46,13 @@ pub enum NetworkMode {
     /// Unrestricted internet. Use only when the session is trusted or
     /// the proxy is handling filtering externally.
     Full,
+    /// Internal network with a domain-filtering proxy. The proxy runs
+    /// on the host, listening on a Unix socket published into the
+    /// container. Only domains in the allowlist can be reached.
+    Filtered {
+        /// Domains to permit (e.g. `".anthropic.com"`, `".github.com"`).
+        allowlist: Vec<String>,
+    },
 }
 
 /// Container-specific configuration layered on top of [`SessionConfig`].
@@ -88,25 +100,110 @@ const OUTPUT_PATH: &str = "/tmp/sigil-output";
 /// Container path for the MCP socket inside the container.
 const MCP_SOCKET_CONTAINER_PATH: &str = "/tmp/sigil-mcp.sock";
 
+/// Container path for the proxy socket inside the container.
+const PROXY_SOCKET_CONTAINER_PATH: &str = "/tmp/proxy.sock";
+
 /// Default timeout for `container stop` before falling back to `kill`.
 const STOP_TIMEOUT_SECS: u64 = 10;
+
+/// State for a running proxy associated with a session.
+struct ProxyHandle {
+    task: tokio::task::JoinHandle<()>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    socket_path: PathBuf,
+}
 
 /// Runs agent sessions inside Apple Containers.
 pub struct ContainerRuntime {
     config: ContainerConfig,
+    audit: Option<Arc<AuditLogWriter>>,
+    proxy_handles: Mutex<HashMap<String, ProxyHandle>>,
 }
 
 impl ContainerRuntime {
     /// Create a new container runtime with the given configuration.
     #[must_use]
     pub fn new(config: ContainerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            audit: None,
+            proxy_handles: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a new container runtime with audit logging.
+    #[must_use]
+    pub fn with_audit(config: ContainerConfig, audit: Arc<AuditLogWriter>) -> Self {
+        Self {
+            config,
+            audit: Some(audit),
+            proxy_handles: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Create a runtime with default settings.
     #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(ContainerConfig::default())
+    }
+
+    /// Return the host-side proxy socket path for a session.
+    #[must_use]
+    pub fn proxy_socket_path(session_title: &str) -> PathBuf {
+        PathBuf::from(format!("/tmp/sigil-proxy-{session_title}.sock"))
+    }
+
+    /// Start the domain proxy for a filtered-network session.
+    async fn start_proxy(
+        &self,
+        session_title: &str,
+        allowlist: &[String],
+    ) -> Result<PathBuf, RuntimeError> {
+        let socket_path = Self::proxy_socket_path(session_title);
+
+        let proxy = DomainProxy::new(
+            allowlist.to_vec(),
+            socket_path.clone(),
+            self.audit.clone(),
+            None, // session_id is assigned after launch
+        );
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let task = tokio::spawn(async move {
+            if let Err(e) = proxy.run(shutdown_rx).await {
+                warn!(error = %e, "proxy exited with error");
+            }
+        });
+
+        let handle = ProxyHandle {
+            task,
+            shutdown: shutdown_tx,
+            socket_path: socket_path.clone(),
+        };
+
+        self.proxy_handles
+            .lock()
+            .await
+            .insert(session_title.to_owned(), handle);
+
+        info!(session = session_title, path = %socket_path.display(), "started proxy");
+        Ok(socket_path)
+    }
+
+    /// Stop the proxy for a session (if one is running).
+    async fn stop_proxy(&self, session_title: &str) {
+        let handle = self.proxy_handles.lock().await.remove(session_title);
+
+        if let Some(handle) = handle {
+            // Signal shutdown.
+            let _ = handle.shutdown.send(true);
+            // Wait for the task to finish (with a timeout).
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle.task).await;
+            // Clean up socket just in case.
+            let _ = tokio::fs::remove_file(&handle.socket_path).await;
+            debug!(session = session_title, "stopped proxy");
+        }
     }
 
     // -- lifecycle helpers --------------------------------------------------
@@ -180,9 +277,10 @@ impl ContainerRuntime {
     // -- internal helpers ---------------------------------------------------
 
     /// Build the argument list for `container run`.
-    fn build_run_args<'a>(
-        &'a self,
-        session_config: &'a SessionConfig,
+    fn build_run_args(
+        &self,
+        session_config: &SessionConfig,
+        proxy_socket: Option<&PathBuf>,
     ) -> Result<Vec<String>, CoreError> {
         let worktree = session_config
             .path
@@ -233,9 +331,34 @@ impl ContainerRuntime {
             args.push(format!("{socket_str}:{MCP_SOCKET_CONTAINER_PATH}"));
         }
 
+        // Proxy socket publishing (for Filtered network mode).
+        if let Some(proxy_path) = proxy_socket {
+            let proxy_str = proxy_path
+                .to_str()
+                .ok_or_else(|| CoreError::InvalidConfig {
+                    message: format!(
+                        "proxy socket path is not valid UTF-8: {}",
+                        proxy_path.display()
+                    ),
+                })?;
+            args.push("--publish-socket".to_owned());
+            args.push(format!("{proxy_str}:{PROXY_SOCKET_CONTAINER_PATH}"));
+        }
+
         // Environment variables.
         args.push("-e".to_owned());
         args.push(format!("SIGIL_SESSION_ID={}", session_config.title));
+
+        // Proxy environment variables.
+        if proxy_socket.is_some() {
+            let proxy_url = format!("http://unix:{PROXY_SOCKET_CONTAINER_PATH}");
+            args.push("-e".to_owned());
+            args.push(format!("HTTP_PROXY={proxy_url}"));
+            args.push("-e".to_owned());
+            args.push(format!("HTTPS_PROXY={proxy_url}"));
+            args.push("-e".to_owned());
+            args.push("NO_PROXY=localhost,127.0.0.1".to_owned());
+        }
 
         for (key, value) in &self.config.extra_env {
             args.push("-e".to_owned());
@@ -244,7 +367,7 @@ impl ContainerRuntime {
 
         // Network.
         match self.config.network {
-            NetworkMode::Internal => {
+            NetworkMode::Internal | NetworkMode::Filtered { .. } => {
                 args.push("--network".to_owned());
                 args.push(self.config.internal_network_name.clone());
             }
@@ -331,12 +454,27 @@ fn parse_inspect_status(json_str: &str) -> SessionState {
 
 impl SessionRuntime for ContainerRuntime {
     async fn launch(&self, config: &SessionConfig) -> Result<SessionHandle, CoreError> {
-        // Ensure the internal network exists when using Internal mode.
-        if self.config.network == NetworkMode::Internal {
+        // Ensure the internal network exists when using Internal or
+        // Filtered mode.
+        let uses_internal = matches!(
+            self.config.network,
+            NetworkMode::Internal | NetworkMode::Filtered { .. }
+        );
+        if uses_internal {
             Self::create_internal_network(&self.config.internal_network_name).await?;
         }
 
-        let run_args = self.build_run_args(config)?;
+        // Start the proxy if using Filtered mode.
+        let proxy_socket = if let NetworkMode::Filtered { ref allowlist } = self.config.network {
+            let path = self.start_proxy(&config.title, allowlist).await?;
+            // Give the proxy a moment to bind the socket.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Some(path)
+        } else {
+            None
+        };
+
+        let run_args = self.build_run_args(config, proxy_socket.as_ref())?;
         let arg_refs: Vec<&str> = run_args.iter().map(String::as_str).collect();
         Self::run_container(&arg_refs).await?;
 
@@ -435,6 +573,9 @@ impl SessionRuntime for ContainerRuntime {
             let _ = Self::run_container(&["kill", &handle.title]).await;
         }
 
+        // Stop the proxy if one is running for this session.
+        self.stop_proxy(&handle.title).await;
+
         // Brief delay before cleanup.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -504,7 +645,9 @@ mod tests {
     fn build_run_args_minimal() {
         let rt = ContainerRuntime::with_defaults();
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         // Must contain: run -d --name test-agent-01
         assert_eq!(args[0], "run");
@@ -536,7 +679,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         assert!(!args.contains(&"--network".to_owned()));
     }
@@ -552,7 +697,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         assert!(args.contains(&"--mount".to_owned()));
         assert!(args.contains(
@@ -571,7 +718,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         assert!(args.contains(&"API_KEY=secret123".to_owned()));
         assert!(args.contains(&"TRUST_ZONE=AgentRuntime".to_owned()));
@@ -585,7 +734,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         assert!(args.contains(&"--publish-socket".to_owned()));
         assert!(args.contains(&format!("/tmp/sigil-mcp.sock:{MCP_SOCKET_CONTAINER_PATH}")));
@@ -599,7 +750,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         assert_eq!(args.last().expect("non-empty"), "my-agent:v2");
     }
@@ -612,7 +765,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         assert!(args.contains(&"my-net".to_owned()));
     }
@@ -629,7 +784,9 @@ mod tests {
         };
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
-        let args = rt.build_run_args(&session).expect("should build args");
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
 
         // Verify all pieces are present.
         assert!(args.contains(&"--mount".to_owned()));
@@ -647,8 +804,61 @@ mod tests {
         // sandboxed = true by inspecting the code path.
         let rt = ContainerRuntime::with_defaults();
         let session = test_session_config();
-        let args = rt.build_run_args(&session);
+        let args = rt.build_run_args(&session, None);
         assert!(args.is_ok(), "build_run_args should succeed");
+    }
+
+    // -- Filtered network mode -----------------------------------------------
+
+    #[test]
+    fn filtered_mode_uses_internal_network() {
+        let config = ContainerConfig {
+            network: NetworkMode::Filtered {
+                allowlist: vec![".anthropic.com".to_owned()],
+            },
+            ..ContainerConfig::default()
+        };
+        let rt = ContainerRuntime::new(config);
+        let session = test_session_config();
+        let args = rt
+            .build_run_args(&session, None)
+            .expect("should build args");
+        assert!(args.contains(&"--network".to_owned()));
+        assert!(args.contains(&"sigil-internal".to_owned()));
+    }
+
+    #[test]
+    fn filtered_mode_with_proxy_socket_adds_publish_and_env() {
+        let config = ContainerConfig {
+            network: NetworkMode::Filtered {
+                allowlist: vec![".anthropic.com".to_owned()],
+            },
+            ..ContainerConfig::default()
+        };
+        let rt = ContainerRuntime::new(config);
+        let session = test_session_config();
+        let proxy_path = PathBuf::from("/tmp/sigil-proxy-test.sock");
+        let args = rt
+            .build_run_args(&session, Some(&proxy_path))
+            .expect("should build args");
+
+        // Proxy socket published.
+        assert!(args.contains(&"--publish-socket".to_owned()));
+        assert!(args.contains(&format!(
+            "/tmp/sigil-proxy-test.sock:{PROXY_SOCKET_CONTAINER_PATH}"
+        )));
+
+        // HTTP_PROXY/HTTPS_PROXY env vars set.
+        let proxy_url = format!("http://unix:{PROXY_SOCKET_CONTAINER_PATH}");
+        assert!(args.contains(&format!("HTTP_PROXY={proxy_url}")));
+        assert!(args.contains(&format!("HTTPS_PROXY={proxy_url}")));
+        assert!(args.contains(&"NO_PROXY=localhost,127.0.0.1".to_owned()));
+    }
+
+    #[test]
+    fn proxy_socket_path_uses_session_title() {
+        let path = ContainerRuntime::proxy_socket_path("my-session");
+        assert_eq!(path, PathBuf::from("/tmp/sigil-proxy-my-session.sock"));
     }
 
     // -- JSON status parsing --------------------------------------------------
