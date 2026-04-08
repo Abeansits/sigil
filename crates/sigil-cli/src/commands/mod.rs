@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod bridge;
 pub mod conductor;
 pub mod session;

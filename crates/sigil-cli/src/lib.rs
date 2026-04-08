@@ -54,6 +54,10 @@ pub enum Commands {
     /// Run bridge adapters (Telegram, Slack, or both).
     #[command(subcommand)]
     Bridge(BridgeCommands),
+
+    /// Audit log operations.
+    #[command(subcommand)]
+    Audit(AuditCommands),
 }
 
 #[derive(Debug, Subcommand)]
@@ -191,8 +195,18 @@ pub enum BridgeCommands {
     All,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum AuditCommands {
+    /// Verify the HMAC chain in an audit log file.
+    Verify {
+        /// Path to the audit log file (default: ~/.sigil/audit.jsonl).
+        #[arg(long)]
+        path: Option<String>,
+    },
+}
+
 /// Expand a leading `~` to the user's home directory.
-fn expand_tilde(path: &str) -> Result<PathBuf> {
+pub(crate) fn expand_tilde(path: &str) -> Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = std::env::var("HOME").context("HOME environment variable not set")?;
         Ok(PathBuf::from(home).join(rest))
@@ -229,6 +243,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         return commands::bridge::run(Arc::clone(&audit), cmd).await;
     }
 
+    // The audit command is self-contained — no Store or TmuxRuntime needed.
+    if let Commands::Audit(cmd) = cli.command {
+        return commands::audit::run(cmd).await;
+    }
+
     let db_str = db_path
         .to_str()
         .context("database path is not valid UTF-8")?;
@@ -252,7 +271,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Commands::Bridge(_) => {
+        Commands::Bridge(_) | Commands::Audit(_) => {
             // Already handled in the early match above.
             Ok(())
         }
@@ -581,15 +600,48 @@ mod tests {
         let cli = Cli::try_parse_from(["sigil", "bridge", "all"]);
         assert!(cli.is_ok());
         let cli = cli.expect("parse should succeed");
-        assert!(matches!(
-            cli.command,
-            Commands::Bridge(BridgeCommands::All)
-        ));
+        assert!(matches!(cli.command, Commands::Bridge(BridgeCommands::All)));
     }
 
     #[test]
     fn cli_bridge_requires_subcommand() {
         let cli = Cli::try_parse_from(["sigil", "bridge"]);
+        assert!(cli.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_audit_verify() {
+        let cli = Cli::try_parse_from(["sigil", "audit", "verify"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Audit(AuditCommands::Verify { path }) => {
+                assert!(path.is_none());
+            }
+            other => panic!("expected Audit Verify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_audit_verify_with_path() {
+        let cli = Cli::try_parse_from(["sigil", "audit", "verify", "--path", "/tmp/audit.jsonl"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Audit(AuditCommands::Verify { path }) => {
+                assert_eq!(path.as_deref(), Some("/tmp/audit.jsonl"));
+            }
+            other => panic!("expected Audit Verify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_audit_requires_subcommand() {
+        let cli = Cli::try_parse_from(["sigil", "audit"]);
         assert!(cli.is_err());
     }
 }

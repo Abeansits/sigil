@@ -25,8 +25,8 @@ use sigil_core::session::ToolKind;
 use sigil_core::trust::{Capability, Tier, TrustZone};
 use sigil_policy::fatigue::{FatigueGuard, FatigueLevel};
 use sigil_policy::grants::ApprovalGrant;
-use sigil_policy::zone::validate_zone_transition;
 use sigil_policy::grants::NoopGrantStore;
+use sigil_policy::zone::validate_zone_transition;
 use sigil_policy::{EvaluatorConfig, PolicyService};
 use time::OffsetDateTime;
 
