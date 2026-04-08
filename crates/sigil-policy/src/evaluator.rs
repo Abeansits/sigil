@@ -5,7 +5,7 @@
 //! zone transitions, and approval grants.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sigil_core::action::{Action, ActionRequest, PolicyDecision};
 use sigil_core::origin::ActionOrigin;
@@ -13,6 +13,7 @@ use sigil_core::principal::resolve_principal;
 use sigil_core::trust::{Capability, Tier, TrustZone};
 
 use crate::error::PolicyError;
+use crate::fatigue::{FatigueGuard, FatigueLevel};
 use crate::grants::GrantStore;
 use crate::zone::validate_zone_transition;
 
@@ -33,6 +34,7 @@ pub struct EvaluatorConfig {
 pub struct Evaluator<G> {
     config: EvaluatorConfig,
     grants: Arc<G>,
+    fatigue: Arc<Mutex<FatigueGuard>>,
 }
 
 // Manual Clone: Arc<G> is always Clone regardless of G.
@@ -41,6 +43,7 @@ impl<G> Clone for Evaluator<G> {
         Self {
             config: self.config.clone(),
             grants: Arc::clone(&self.grants),
+            fatigue: Arc::clone(&self.fatigue),
         }
     }
 }
@@ -57,7 +60,21 @@ impl<G> fmt::Debug for Evaluator<G> {
 impl<G: GrantStore> Evaluator<G> {
     #[must_use]
     pub fn new(config: EvaluatorConfig, grants: Arc<G>) -> Self {
-        Self { config, grants }
+        Self {
+            config,
+            grants,
+            fatigue: Arc::new(Mutex::new(FatigueGuard::default())),
+        }
+    }
+
+    /// Create an evaluator with a custom fatigue guard (for testing).
+    #[must_use]
+    pub fn with_fatigue(config: EvaluatorConfig, grants: Arc<G>, fatigue: FatigueGuard) -> Self {
+        Self {
+            config,
+            grants,
+            fatigue: Arc::new(Mutex::new(fatigue)),
+        }
     }
 
     /// Evaluate an action request and return a policy decision.
@@ -112,7 +129,14 @@ impl<G: GrantStore> Evaluator<G> {
         let target_zone = action_target_zone(&request.action);
         validate_zone_transition(origin_zone, target_zone, effective_ceiling)?;
 
-        // 6-7. Approval logic with grant checking.
+        // 6-7. Approval logic with fatigue guard and grant checking.
+        if required_tier >= Tier::T2 {
+            // Check fatigue before processing any approval-tier action.
+            if let Some(deny) = self.check_fatigue() {
+                return Ok(deny);
+            }
+        }
+
         if required_tier >= Tier::T3 {
             return Ok(self
                 .check_privileged_approval(request, capability, &principal.identity)
@@ -193,6 +217,34 @@ impl<G: GrantStore> Evaluator<G> {
         PolicyDecision::NeedsApproval {
             description: format!("{capability:?} requires approval (tier 2)"),
         }
+    }
+
+    /// Check fatigue guard: enforce cooldown and record the request.
+    /// Returns `Some(Deny)` if the request should be blocked.
+    fn check_fatigue(&self) -> Option<PolicyDecision> {
+        let mut guard = self
+            .fatigue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Enforce cooldown from a prior high-risk detection.
+        if let Err(e) = guard.check_cooldown() {
+            tracing::warn!("fatigue cooldown active: {e}");
+            return Some(PolicyDecision::Deny {
+                reason: e.to_string(),
+            });
+        }
+
+        // Record this request and check the resulting fatigue level.
+        let level = guard.record_request();
+        if level == FatigueLevel::HighRisk {
+            tracing::warn!("fatigue high-risk threshold reached — denying approval");
+            return Some(PolicyDecision::Deny {
+                reason: "approval fatigue: too many approval requests in a short window".to_owned(),
+            });
+        }
+
+        None
     }
 
     /// Look up a matching grant, consume it if found, and persist the
@@ -812,5 +864,97 @@ mod tests {
                     reason: e.to_string(),
                 });
         assert_matches!(decision, PolicyDecision::NeedsApproval { .. });
+    }
+
+    // ------------------------------------------------------------------
+    // Fatigue guard integration tests
+    // ------------------------------------------------------------------
+
+    use crate::fatigue::FatigueGuard;
+
+    fn eval_with_fatigue(fatigue: FatigueGuard) -> Evaluator<NoopGrantStore> {
+        Evaluator::with_fatigue(
+            EvaluatorConfig::default(),
+            Arc::new(NoopGrantStore),
+            fatigue,
+        )
+    }
+
+    #[tokio::test]
+    async fn fatigue_normal_allows_t2_action() {
+        // Fresh fatigue guard — should allow T2 actions normally.
+        let evaluator = eval_with_fatigue(FatigueGuard::new(10, 300));
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::CreateWorktree {
+                session_id: SessionId::new(),
+                branch: "feature/test".into(),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn fatigue_high_risk_denies_t3_action() {
+        // Pre-load fatigue guard past threshold so the next request
+        // triggers HighRisk.
+        let mut fatigue = FatigueGuard::new(3, 300);
+        for _ in 0..3 {
+            fatigue.record_request();
+        }
+        // The next record_request() (count=4 > threshold=3) will be HighRisk.
+        let evaluator = eval_with_fatigue(fatigue);
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::Deny { reason } if reason.contains("fatigue"));
+    }
+
+    #[tokio::test]
+    async fn fatigue_cooldown_denies_t2_action() {
+        // Push past threshold to trigger HighRisk and set cooldown.
+        let mut fatigue = FatigueGuard::new(2, 300);
+        for _ in 0..3 {
+            fatigue.record_request();
+        }
+        // Cooldown is now active (last_high_risk is set).
+        // Create a fresh guard that has a cooldown set but the deque
+        // is below threshold (simulating time passing for the window
+        // but not for the cooldown).
+        // Instead, we just reuse the guard as-is — check_cooldown fires
+        // before record_request, so it will deny immediately.
+        let evaluator = eval_with_fatigue(fatigue);
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::CreateWorktree {
+                session_id: SessionId::new(),
+                branch: "feature/test".into(),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::Deny { reason } if reason.contains("cooldown"));
     }
 }

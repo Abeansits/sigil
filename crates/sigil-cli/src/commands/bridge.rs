@@ -84,8 +84,7 @@ fn load_identity_config() -> IdentityConfig {
 #[allow(clippy::print_stdout)]
 async fn run_telegram(audit: Arc<AuditLogWriter>) -> Result<()> {
     let token = read_env_secret("SIGIL_TELEGRAM_TOKEN")?;
-    let client =
-        TelegramClient::new(&token).context("failed to build Telegram client")?;
+    let client = TelegramClient::new(&token).context("failed to build Telegram client")?;
     let identity = load_identity_config();
     let mut bridge = TelegramBridge::new(client, identity);
     let sink = LoggingSink {
@@ -174,8 +173,7 @@ async fn run_all(audit: Arc<AuditLogWriter>) -> Result<()> {
     let slack_app = read_env_secret("SIGIL_SLACK_APP_TOKEN")?;
     let slack_bot = read_env_secret("SIGIL_SLACK_BOT_TOKEN")?;
 
-    let tg_client =
-        TelegramClient::new(&tg_token).context("failed to build Telegram client")?;
+    let tg_client = TelegramClient::new(&tg_token).context("failed to build Telegram client")?;
     let slack_client =
         SlackClient::new(&slack_bot, &slack_app).context("failed to build Slack client")?;
 
@@ -238,8 +236,8 @@ async fn run_all(audit: Arc<AuditLogWriter>) -> Result<()> {
 
 /// Read a required secret from an environment variable.
 fn read_env_secret(name: &str) -> Result<SecretString> {
-    let val = std::env::var(name)
-        .with_context(|| format!("{name} environment variable is required"))?;
+    let val =
+        std::env::var(name).with_context(|| format!("{name} environment variable is required"))?;
     if val.is_empty() {
         bail!("{name} environment variable must not be empty");
     }
