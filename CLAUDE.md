@@ -92,7 +92,7 @@ Workspace lint highlights:
 
 - Unit tests live primarily in `#[cfg(test)]` modules inside each crate.
 - Integration tests currently live in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
-- The workspace currently registers 318 tests total: 268 unit tests and 50 integration tests.
+- The workspace currently registers 368 tests total: 268 unit tests and 100 integration tests.
 
 Run these before shipping changes:
 
