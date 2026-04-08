@@ -1,0 +1,30 @@
+# Build artifacts
+target/
+
+# Version control
+.git/
+.gitignore
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed in the image)
+docs/
+*.md
+!README.md
+
+# Rust source (image is Node-based, no Rust inside)
+crates/
+Cargo.toml
+Cargo.lock
+rustfmt.toml
+clippy.toml
+deny.toml
