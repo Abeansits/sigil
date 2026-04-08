@@ -65,8 +65,10 @@ impl ApprovalGrant {
             return false;
         }
         // If the grant has a resource scope, the request must match it.
+        // Proper path boundary check: exact match OR prefix ending at a `/` boundary.
+        // This prevents `/home/paul` from matching `/home/paulie/secret`.
         match (&self.resource_scope, resource) {
-            (Some(scope), Some(res)) => res.starts_with(scope.as_str()),
+            (Some(scope), Some(res)) => matches_resource_scope(scope, res),
             (Some(_), None) => false,
             (None, _) => true,
         }
@@ -76,6 +78,24 @@ impl ApprovalGrant {
     pub fn consume(&mut self) {
         self.uses = self.uses.saturating_add(1);
     }
+}
+
+/// Check whether a resource matches a grant scope with proper path boundaries.
+///
+/// Returns `true` if `resource` equals `scope` exactly, or if `resource`
+/// starts with `scope` at a `/` boundary. This prevents `/home/paul` from
+/// matching `/home/paulie/secret`.
+fn matches_resource_scope(scope: &str, resource: &str) -> bool {
+    if resource == scope {
+        return true;
+    }
+    if !resource.starts_with(scope) {
+        return false;
+    }
+    // The prefix matched — now ensure it's at a path boundary.
+    // Either the scope already ends with '/' (e.g., "/home/paul/")
+    // or the next character in resource after scope is '/'.
+    scope.ends_with('/') || resource.as_bytes().get(scope.len()) == Some(&b'/')
 }
 
 /// Async store for approval grants.
@@ -96,6 +116,28 @@ pub trait GrantStore: Send + Sync {
         &self,
         grant: &ApprovalGrant,
     ) -> impl Future<Output = Result<(), PolicyError>> + Send;
+}
+
+/// A grant store that always returns no grants.
+///
+/// Used when no real store is available (e.g., in tests or when the
+/// evaluator is constructed without a backing database).
+#[derive(Clone, Debug)]
+pub struct NoopGrantStore;
+
+impl GrantStore for NoopGrantStore {
+    async fn find_grant(
+        &self,
+        _principal: &str,
+        _capability: Capability,
+        _resource: Option<&str>,
+    ) -> Result<Option<ApprovalGrant>, PolicyError> {
+        Ok(None)
+    }
+
+    async fn save_grant(&self, _grant: &ApprovalGrant) -> Result<(), PolicyError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -226,6 +268,67 @@ mod tests {
     fn unscoped_grant_allows_any_resource() {
         let grant = make_grant("paul", Capability::ReadHostFile, None, 300, None);
         assert!(grant.matches("paul", Capability::ReadHostFile, Some("/etc/anything"),));
+    }
+
+    #[test]
+    fn scoped_grant_rejects_adjacent_path_without_boundary() {
+        // /home/paul must NOT match /home/paulie/secret
+        let grant = make_grant(
+            "paul",
+            Capability::ReadHostFile,
+            Some("/home/paul"),
+            300,
+            None,
+        );
+        assert!(!grant.matches(
+            "paul",
+            Capability::ReadHostFile,
+            Some("/home/paulie/secret"),
+        ));
+    }
+
+    #[test]
+    fn scoped_grant_matches_exact_scope() {
+        let grant = make_grant(
+            "paul",
+            Capability::ReadHostFile,
+            Some("/home/paul"),
+            300,
+            None,
+        );
+        assert!(grant.matches("paul", Capability::ReadHostFile, Some("/home/paul"),));
+    }
+
+    #[test]
+    fn scoped_grant_matches_with_slash_boundary() {
+        // /home/paul should match /home/paul/docs/file.txt (boundary at /)
+        let grant = make_grant(
+            "paul",
+            Capability::ReadHostFile,
+            Some("/home/paul"),
+            300,
+            None,
+        );
+        assert!(grant.matches(
+            "paul",
+            Capability::ReadHostFile,
+            Some("/home/paul/docs/file.txt"),
+        ));
+    }
+
+    #[test]
+    fn matches_resource_scope_boundary_cases() {
+        // Exact match
+        assert!(matches_resource_scope("/home/paul", "/home/paul"));
+        // Proper path boundary
+        assert!(matches_resource_scope("/home/paul", "/home/paul/secret"));
+        // Scope with trailing slash
+        assert!(matches_resource_scope("/home/paul/", "/home/paul/secret"));
+        // Adjacent path — NOT a boundary match
+        assert!(!matches_resource_scope("/home/paul", "/home/paulie"));
+        assert!(!matches_resource_scope("/home/paul", "/home/paulie/secret"));
+        // Completely different path
+        assert!(!matches_resource_scope("/home/paul", "/etc/shadow"));
     }
 
     #[test]

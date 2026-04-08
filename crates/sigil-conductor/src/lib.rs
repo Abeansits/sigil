@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use sigil_core::protocol::BridgeMessage;
 use sigil_core::traits::SessionRuntime;
-use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 use tracing::{debug, info, warn};
 
@@ -30,19 +29,23 @@ use crate::reconcile::{ReconcileResult, reconcile};
 
 /// The conductor — orchestrates agent sessions.
 ///
+/// Generic over `R: SessionRuntime` so the runtime backend can be
+/// swapped (tmux today, containers in the future) without changing
+/// conductor logic.
+///
 /// Holds shared references to the store and runtime, plus configuration
 /// for the heartbeat interval. The `sigil-cli` crate wires this into an
 /// async run loop with `CancellationToken` for cooperative shutdown.
-pub struct Conductor {
+pub struct Conductor<R: SessionRuntime> {
     store: Arc<Store>,
-    runtime: Arc<TmuxRuntime>,
+    runtime: Arc<R>,
     heartbeat_interval: Duration,
 }
 
-impl Conductor {
+impl<R: SessionRuntime> Conductor<R> {
     /// Create a new conductor with the given dependencies.
     #[must_use]
-    pub fn new(store: Arc<Store>, runtime: Arc<TmuxRuntime>, heartbeat_interval: Duration) -> Self {
+    pub fn new(store: Arc<Store>, runtime: Arc<R>, heartbeat_interval: Duration) -> Self {
         Self {
             store,
             runtime,
@@ -56,9 +59,9 @@ impl Conductor {
         self.heartbeat_interval
     }
 
-    /// Run on startup to reconcile DB state with actual tmux state.
+    /// Run on startup to reconcile DB state with actual runtime state.
     ///
-    /// Compares every session in the store against the live tmux
+    /// Compares every session in the store against the live runtime
     /// backend and corrects mismatches. Call this before entering
     /// the heartbeat loop.
     ///

@@ -35,16 +35,14 @@ pub fn strip_ansi(input: &str) -> String {
         // 2. OSC sequences: ESC ] ... (ST or BEL)
         // 3. Character set selection: ESC ( <char>  /  ESC ) <char>
         // 4. Simple two-byte escapes: ESC <0x40..0x5F>
+        #[allow(clippy::expect_used)]
         Regex::new(concat!(
             r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]", // CSI
             r"|\x1b\].*?(?:\x1b\\|\x07)",                 // OSC
             r"|\x1b[()][A-Z0-9]",                         // charset select
             r"|\x1b[\x40-\x5f]",                          // simple escape
         ))
-        .unwrap_or_else(|_| {
-            #[allow(clippy::expect_used)]
-            Regex::new("").expect("empty regex is infallible")
-        })
+        .expect("ANSI strip regex must compile — this is a programming error")
     });
 
     ANSI_RE.replace_all(input, "").into_owned()
@@ -141,12 +139,9 @@ fn has_mixed_script_words(text: &str) -> bool {
     // empty regex is equally infallible. Using `ok()` + `unwrap_or`
     // avoids both `unwrap` and `expect`.
     static WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\b\w+\b").unwrap_or_else(|_| {
-            // An empty pattern matches everything; this branch is
-            // unreachable in practice but satisfies the no-panic lint.
-            #[allow(clippy::expect_used)]
-            Regex::new("").expect("empty regex is infallible")
-        })
+        #[allow(clippy::expect_used)]
+        Regex::new(r"\b\w+\b")
+            .expect("word boundary regex must compile — this is a programming error")
     });
 
     for m in WORD_RE.find_iter(text) {

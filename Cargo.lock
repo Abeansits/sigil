@@ -1733,6 +1733,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-mcp"
+version = "0.1.0"
+dependencies = [
+ "assert_matches",
+ "serde",
+ "serde_json",
+ "sigil-core",
+ "sigil-policy",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "sigil-policy"
 version = "0.1.0"
 dependencies = [

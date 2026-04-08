@@ -268,10 +268,10 @@ mod tests {
 
     use std::sync::Arc;
 
+    use secrecy::SecretString;
     use sigil_core::CoreError;
     use sigil_core::protocol::BridgeMessage;
     use sigil_core::traits::MessageSink;
-    use secrecy::SecretString;
     use tokio::sync::Mutex;
 
     use crate::identity::default_config;
