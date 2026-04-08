@@ -180,7 +180,11 @@ fn multiple_attack_vectors_stripped_simultaneously() {
     assert_eq!(result.cleaned, "/status");
     assert_eq!(result.stripped_count, 4);
     assert!(result.categories.contains(&"zero-width".to_owned()));
-    assert!(result.categories.contains(&"directional-override".to_owned()));
+    assert!(
+        result
+            .categories
+            .contains(&"directional-override".to_owned())
+    );
     assert!(result.categories.contains(&"control-character".to_owned()));
 }
 
@@ -193,7 +197,7 @@ fn homoglyph_detection_flags_mixed_script() {
     assert_eq!(result.cleaned, "p\u{0430}ssword");
 }
 
-// ─── Rate Limiting ───���──────────────────────────────────────────────
+// ─── Rate Limiting ──────────────────────────────────────────────────
 
 #[test]
 fn rate_limiter_allows_under_threshold() {
@@ -203,7 +207,10 @@ fn rate_limiter_allows_under_threshold() {
         limiter.record("user-1");
     }
     // 6th should be denied.
-    assert_matches!(limiter.check("user-1"), Err(BridgeError::RateLimited { .. }));
+    assert_matches!(
+        limiter.check("user-1"),
+        Err(BridgeError::RateLimited { .. })
+    );
 }
 
 #[test]
@@ -211,7 +218,10 @@ fn rate_limiter_independent_per_user() {
     let mut limiter = RateLimiter::new(2, 100);
     limiter.record("alice");
     limiter.record("alice");
-    assert!(limiter.check("alice").is_err(), "alice should be rate-limited");
+    assert!(
+        limiter.check("alice").is_err(),
+        "alice should be rate-limited"
+    );
     assert!(limiter.check("bob").is_ok(), "bob should not be affected");
 }
 
@@ -221,10 +231,13 @@ fn hour_limit_enforced() {
     for _ in 0..3 {
         limiter.record("user-h");
     }
-    assert_matches!(limiter.check("user-h"), Err(BridgeError::RateLimited { .. }));
+    assert_matches!(
+        limiter.check("user-h"),
+        Err(BridgeError::RateLimited { .. })
+    );
 }
 
-// ─── Routing ──────────────��─────────────────────────��───────────────
+// ─── Routing ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn router_forwards_message_to_sink() {
@@ -322,7 +335,7 @@ async fn router_propagates_sink_error() {
     assert_matches!(err, BridgeError::Platform { .. });
 }
 
-// ─── Target Session Parsing ─────────────────────────────────���───────
+// ─── Target Session Parsing ─────────────────────────────────────────
 
 #[test]
 fn parse_at_mention() {

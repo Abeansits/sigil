@@ -20,11 +20,7 @@ use sigil_store::Store;
 #[command(name = "sigil", about = "AI agent session orchestration")]
 pub struct Cli {
     /// `SQLite` database path.
-    #[arg(
-        long,
-        default_value = "~/.sigil/sigil.db",
-        env = "SIGIL_DB"
-    )]
+    #[arg(long, default_value = "~/.sigil/sigil.db", env = "SIGIL_DB")]
     pub db: String,
 
     #[command(subcommand)]
@@ -491,8 +487,7 @@ mod tests {
 
     #[test]
     fn cli_parses_worktree_finish_with_merge() {
-        let cli =
-            Cli::try_parse_from(["sigil", "worktree", "finish", "session-name", "--merge"]);
+        let cli = Cli::try_parse_from(["sigil", "worktree", "finish", "session-name", "--merge"]);
         assert!(cli.is_ok());
         let cli = cli.expect("parse should succeed");
         match &cli.command {

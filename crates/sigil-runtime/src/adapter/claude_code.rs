@@ -1,8 +1,8 @@
+use regex::Regex;
 use sigil_core::ConductorMessage;
 use sigil_core::protocol::{AgentSignal, Confidence, HookFormat, StatusPattern};
 use sigil_core::session::SessionState;
 use sigil_core::traits::ToolAdapter;
-use regex::Regex;
 
 /// Adapter for Claude Code terminal sessions.
 ///

@@ -156,7 +156,14 @@ fn record_to_handle(record: &SessionRecord) -> SessionHandle {
 /// Log an audit event for a session action (always `"cli"` origin, `Allow`
 /// decision). Reduces boilerplate across the session subcommands.
 async fn log_session_event(audit: &AuditLogWriter, action: &str, session_id: SessionId) {
-    log_event(audit, action, "cli", PolicyDecision::Allow, Some(session_id)).await;
+    log_event(
+        audit,
+        action,
+        "cli",
+        PolicyDecision::Allow,
+        Some(session_id),
+    )
+    .await;
 }
 
 // -- Subcommand handlers --

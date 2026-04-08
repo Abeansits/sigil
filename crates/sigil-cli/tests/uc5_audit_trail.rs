@@ -175,14 +175,18 @@ async fn audit_trail_valid_after_session_lifecycle() {
     // Each subsequent entry's prev_hash should be the previous entry's hmac.
     for i in 1..entries.len() {
         assert_eq!(
-            entries[i].prev_hash, entries[i - 1].hmac,
+            entries[i].prev_hash,
+            entries[i - 1].hmac,
             "entry {i} prev_hash should equal entry {} hmac",
             i - 1
         );
     }
 
     // Verify expected action summaries.
-    let actions: Vec<&str> = entries.iter().map(|e| e.event.action_summary.as_str()).collect();
+    let actions: Vec<&str> = entries
+        .iter()
+        .map(|e| e.event.action_summary.as_str())
+        .collect();
     assert_eq!(actions[0], "session.create");
     assert_eq!(actions[1], "session.start");
     assert_eq!(actions[2], "session.send");

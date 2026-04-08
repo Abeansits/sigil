@@ -34,7 +34,7 @@ fn service() -> PolicyService {
 
 // ═══════════════════════════════════════════════════════════════════
 // Table-driven: Tier / Zone / Capability matrix
-// ═════════════════════��═════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 /// Exhaustive table of (origin, action) -> expected decision variant.
 #[tokio::test]
@@ -92,8 +92,7 @@ async fn comprehensive_tier_zone_capability_matrix() {
             action: Action::GetSessionStatus { session_id: sid },
             expect: |d| matches!(d, PolicyDecision::Allow),
         },
-
-        // ── T1 session management ───────────────────────────────────
+        // ── T1 session management ─────────────────────────────────────────
         Case {
             label: "LocalCli + CreateSession -> Allow",
             origin: ActionOrigin::LocalCli,
@@ -144,8 +143,7 @@ async fn comprehensive_tier_zone_capability_matrix() {
             },
             expect: |d| matches!(d, PolicyDecision::Allow),
         },
-
-        // ── T2 infrastructure ───────────────────────────────────────
+        // ── T2 infrastructure ─────────────────────────────────────────────
         Case {
             label: "LocalCli + CreateWorktree -> Allow (Sebastian auto-allowed)",
             origin: ActionOrigin::LocalCli,
@@ -200,8 +198,7 @@ async fn comprehensive_tier_zone_capability_matrix() {
             },
             expect: |d| matches!(d, PolicyDecision::Allow),
         },
-
-        // ── T3 privileged ──────────────────────────────────────���────
+        // ── T3 privileged ─────────────────────────────────────────────────
         Case {
             label: "LocalCli + ReadHostFile -> NeedsApproval (T3 requires confirmation)",
             origin: ActionOrigin::LocalCli,
@@ -260,8 +257,7 @@ async fn comprehensive_tier_zone_capability_matrix() {
             },
             expect: |d| matches!(d, PolicyDecision::Allow),
         },
-
-        // ── T3+ break glass ────────────────────────────────────────
+        // ── T3+ break glass ───────────────────────────────────────────────
         Case {
             label: "LocalCli + BreakGlass -> NeedsApproval",
             origin: ActionOrigin::LocalCli,
@@ -298,7 +294,6 @@ async fn comprehensive_tier_zone_capability_matrix() {
             },
             expect: |d| matches!(d, PolicyDecision::Allow),
         },
-
         // ── Cross-origin T1 actions ─────────────────────────────────
         Case {
             label: "BridgeTelegram + StartSession -> Allow (TG user has T3 ceiling)",
@@ -452,7 +447,7 @@ fn zone_transition_table() {
 
 // ═══════════════════════════════════════════════════════════════════
 // Grant validity and consumption
-// ═════════��══════════════════════════════════���══════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 fn make_grant(
     principal: &str,
@@ -519,12 +514,7 @@ fn grant_validity_matrix() {
     ];
 
     for case in &cases {
-        assert_eq!(
-            case.grant.is_valid(),
-            case.valid,
-            "FAILED: {}",
-            case.label
-        );
+        assert_eq!(case.grant.is_valid(), case.valid, "FAILED: {}", case.label);
     }
 }
 
@@ -645,7 +635,7 @@ fn grant_consumption_tracks_uses() {
 
 // ═══════════════════════════════════════════════════════════════════
 // Fatigue guard
-// ═════════════════════���══════════════════════════════════���══════════
+// ═══════════════════════════════════════════════════════════════════
 
 #[test]
 fn fatigue_guard_levels() {
@@ -720,7 +710,7 @@ fn fatigue_small_threshold_boundaries() {
 
 // ═══════════════════════════════════════════════════════════════════
 // Deny reason content validation
-// ═══════════════════════���═══════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 async fn deny_reason_mentions_ceiling() {
