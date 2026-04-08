@@ -80,12 +80,20 @@ impl<G: GrantStore> McpServer<G> {
     }
 
     /// Handle the `initialize` handshake.
+    ///
+    /// A valid `session_id` is **required**. Without it, the server
+    /// will still initialize (MCP protocol requirement) but tool calls
+    /// will be rejected — we never fall back to `LocalCli` origin.
     fn handle_initialize(&mut self, request: &JsonRpcRequest) -> JsonRpcResponse {
-        // Extract the session ID from params if provided.
+        // Extract the session ID from params.
         if let Some(session_id_str) = request.params.get("session_id").and_then(|v| v.as_str()) {
             if let Ok(ulid) = session_id_str.parse::<ulid::Ulid>() {
                 self.agent_session_id = Some(SessionId::from_ulid(ulid));
             }
+        }
+
+        if self.agent_session_id.is_none() {
+            tracing::warn!("MCP initialize called without a valid session_id");
         }
 
         JsonRpcResponse::success(
@@ -111,7 +119,20 @@ impl<G: GrantStore> McpServer<G> {
     }
 
     /// Handle `tools/call` — dispatch a tool call through policy.
+    ///
+    /// Requires a valid `session_id` from `initialize`. If no session ID
+    /// was set, tool calls are rejected — we never fall back to `LocalCli`
+    /// origin to prevent privilege escalation.
     async fn handle_tools_call(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        // Fail closed: reject tool calls without a valid agent session.
+        let Some(session_id) = self.agent_session_id else {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                codes::INVALID_REQUEST,
+                "no valid session_id — call initialize with a session_id first".into(),
+            );
+        };
+
         // Parse the tool call from params.
         let tool = match serde_json::from_value::<McpTool>(request.params.clone()) {
             Ok(tool) => tool,
@@ -133,9 +154,7 @@ impl<G: GrantStore> McpServer<G> {
         };
 
         // Create an ActionRequest with the agent's origin.
-        let origin = self.agent_session_id.map_or(ActionOrigin::LocalCli, |sid| {
-            ActionOrigin::AgentGenerated { session_id: sid }
-        });
+        let origin = ActionOrigin::AgentGenerated { session_id };
 
         let action_request = ActionRequest::new(action, origin);
 
@@ -150,10 +169,21 @@ impl<G: GrantStore> McpServer<G> {
         };
 
         // Wrap in MCP content format.
+        let result_text = match serde_json::to_string(&tool_result) {
+            Ok(text) => text,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    codes::INTERNAL_ERROR,
+                    format!("failed to serialize tool result: {e}"),
+                );
+            }
+        };
+
         let content = serde_json::json!({
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string(&tool_result).unwrap_or_default(),
+                "text": result_text,
             }],
             "isError": tool_result.status == ToolStatus::Error || tool_result.status == ToolStatus::Denied,
         });
@@ -271,6 +301,18 @@ mod tests {
         }
     }
 
+    /// Initialize a server with a fresh agent session ID.
+    async fn init_server() -> (McpServer<NoopGrantStore>, SessionId) {
+        let mut server = make_server();
+        let session_id = SessionId::new();
+        let req = make_request(
+            "initialize",
+            serde_json::json!({ "session_id": session_id.to_string() }),
+        );
+        server.handle_request(&req).await;
+        (server, session_id)
+    }
+
     #[tokio::test]
     async fn initialize_returns_server_info() {
         let mut server = make_server();
@@ -301,14 +343,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_call_list_sessions_allowed() {
+    async fn tools_call_without_init_rejected() {
+        // Tool calls before initialize (no session_id) must be rejected
+        // to prevent privilege escalation via LocalCli fallback.
         let mut server = make_server();
-        let req = make_request(
-            "tools/call",
-            serde_json::json!({
-                "name": "list_sessions"
-            }),
-        );
+        let req = make_request("tools/call", serde_json::json!({ "name": "list_sessions" }));
+        let resp = server.handle_request(&req).await;
+
+        assert!(resp.error.is_some());
+        let error = resp.error.expect("should have error");
+        assert_eq!(error.code, codes::INVALID_REQUEST);
+        assert!(error.message.contains("session_id"));
+    }
+
+    #[tokio::test]
+    async fn tools_call_list_sessions_allowed_after_init() {
+        let (mut server, _) = init_server().await;
+        let req = make_request("tools/call", serde_json::json!({ "name": "list_sessions" }));
         let resp = server.handle_request(&req).await;
 
         assert!(resp.error.is_none());
@@ -321,33 +372,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_call_read_host_file_needs_approval() {
-        let mut server = make_server();
-        let req = make_request(
-            "tools/call",
-            serde_json::json!({
-                "name": "request_approval",
-                "arguments": {
-                    "action": "ReadHostFile",
-                    "path": "/etc/hosts",
-                }
-            }),
-        );
-        let resp = server.handle_request(&req).await;
-
-        assert!(resp.error.is_none());
-        let result = resp.result.expect("should have result");
-        let text = result["content"][0]["text"]
-            .as_str()
-            .expect("should have text");
-        let tool_result: ToolResult = serde_json::from_str(text).expect("valid ToolResult");
-        // Without an agent session ID, origin is LocalCli → NeedsApproval for T3.
-        assert_eq!(tool_result.status, ToolStatus::NeedsApproval);
-    }
-
-    #[tokio::test]
     async fn tools_call_invalid_tool_returns_error() {
-        let mut server = make_server();
+        let (mut server, _) = init_server().await;
         let req = make_request(
             "tools/call",
             serde_json::json!({
@@ -374,36 +400,13 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_with_session_id_sets_agent_origin() {
-        let mut server = make_server();
-        let session_id = SessionId::new();
-        let req = make_request(
-            "initialize",
-            serde_json::json!({
-                "session_id": session_id.to_string(),
-            }),
-        );
-        server.handle_request(&req).await;
-
-        assert!(server.agent_session_id.is_some());
+        let (server, session_id) = init_server().await;
         assert_eq!(server.agent_session_id, Some(session_id));
-
-        // Now a list_sessions call should use AgentGenerated origin.
-        let req = make_request("tools/call", serde_json::json!({ "name": "list_sessions" }));
-        let resp = server.handle_request(&req).await;
-        assert!(resp.error.is_none());
     }
 
     #[tokio::test]
     async fn agent_origin_read_host_file_denied_by_ceiling() {
-        let mut server = make_server();
-
-        // Initialize with an agent session ID.
-        let session_id = SessionId::new();
-        let init_req = make_request(
-            "initialize",
-            serde_json::json!({ "session_id": session_id.to_string() }),
-        );
-        server.handle_request(&init_req).await;
+        let (mut server, _) = init_server().await;
 
         // Agent tries to read a host file — denied because agent
         // ceiling is T1, ReadHostFile requires T3.

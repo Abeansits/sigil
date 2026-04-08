@@ -57,10 +57,7 @@ impl<G> fmt::Debug for Evaluator<G> {
 impl<G: GrantStore> Evaluator<G> {
     #[must_use]
     pub fn new(config: EvaluatorConfig, grants: Arc<G>) -> Self {
-        Self {
-            config,
-            grants,
-        }
+        Self { config, grants }
     }
 
     /// Evaluate an action request and return a policy decision.
@@ -215,12 +212,15 @@ impl<G: GrantStore> Evaluator<G> {
         match grant {
             Ok(Some(mut grant)) if grant.is_valid() => {
                 grant.consume();
+                // Fail closed: if we can't persist the consumed grant,
+                // deny the action to prevent double-spend.
                 if let Err(e) = self.grants.save_grant(&grant).await {
-                    tracing::warn!(
+                    tracing::error!(
                         grant_id = %grant.id,
                         error = %e,
-                        "failed to persist consumed grant — still allowing action"
+                        "failed to persist consumed grant — denying action (fail closed)"
                     );
+                    return false;
                 }
                 true
             }

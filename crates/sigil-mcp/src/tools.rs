@@ -107,7 +107,8 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "The action to request (ReadHostFile, WriteHostFile, ExecuteHostCommand, ModifyGitState, BreakGlass)",
+                        "enum": ["ReadHostFile", "WriteHostFile", "BreakGlass"],
+                        "description": "The action to request",
                     },
                     "path": {
                         "type": "string",
