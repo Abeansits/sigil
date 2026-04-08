@@ -1684,6 +1684,7 @@ dependencies = [
  "anyhow",
  "assert_matches",
  "clap",
+ "secrecy",
  "serde_json",
  "sigil-audit",
  "sigil-bridge",
@@ -1695,6 +1696,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
