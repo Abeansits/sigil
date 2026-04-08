@@ -1,7 +1,7 @@
 # Use Cases
 
 **Status:** aligned to the current CLI  
-**Date:** 2026-04-07
+**Date:** 2026-04-08
 
 These scenarios are written against the command surface that exists today.
 
@@ -117,25 +117,57 @@ cat ~/.sigil/audit.jsonl
 - entries include `content_hash`, `prev_hash`, and `hmac`
 - the first entry uses the genesis `prev_hash`
 
-Library-level verification uses `sigil-audit::verify_log`; there is not yet a dedicated CLI subcommand for verification.
+Verify the chain from the CLI:
 
-## UC7 — Bridge And Policy Coverage
+```bash
+sigil audit verify
+```
 
-Bridge behavior is currently tested at the library level, not through a top-level `sigil bridge ...` command.
+**Verify:**
 
-Examples covered by tests:
+- the command exits successfully if the chain is intact
+- a tampered or truncated log produces a clear error
 
-- known Telegram sender resolves and routes
-- unknown sender is rejected
+## UC7 — Bridge CLI
+
+```bash
+# Run the Telegram bridge loop
+sigil bridge telegram
+
+# Run the Slack bridge loop
+sigil bridge slack
+
+# Run all bridge loops concurrently
+sigil bridge all
+```
+
+**Verify:**
+
+- each command starts its respective bridge loop
+- known senders resolve and route messages
+- unknown senders are rejected
 - zero-width and directional-override characters are stripped
 - per-user rate limiting triggers at the configured threshold
-- Slack-origin `T1` actions are allowed
-- Slack-origin `T2` and `T3` actions are denied
+- Slack-origin `T1` actions are allowed; `T2`/`T3` are denied
 - human-approved origins elevate otherwise-blocked privileged actions
+
+## UC8 — Audit Verify
+
+```bash
+# Verify HMAC chain integrity
+sigil audit verify
+```
+
+**Verify:**
+
+- exits successfully when the audit log chain is intact
+- reports a clear error when the log has been tampered with or truncated
 
 ## Current Notes
 
-- The CLI currently exposes `status`, `session`, `worktree`, and `conductor` only.
-- Audit logging is wired into the CLI now; the earlier “audit not wired” finding is obsolete.
-- `worktree finish` now attempts safe branch deletion after removing the worktree, so the older “branch always left behind” finding is obsolete.
-- Bridge loops exist in `sigil-bridge`, but they are not yet exposed through a top-level CLI command.
+- The CLI exposes `status`, `session`, `worktree`, `conductor`, `bridge`, and `audit`.
+- Audit logging is wired into the CLI; `sigil audit verify` validates HMAC chain integrity.
+- `worktree finish` attempts safe branch deletion after removing the worktree.
+- Bridge loops are exposed through `sigil bridge telegram/slack/all`.
+- The policy evaluator consults stored approval grants and the `FatigueGuard` is wired into the approval flow.
+- The conductor is generic over `SessionRuntime`.

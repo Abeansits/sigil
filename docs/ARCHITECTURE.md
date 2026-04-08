@@ -1,7 +1,7 @@
 # sigil Architecture
 
 **Status:** current workspace snapshot  
-**Date:** 2026-04-07
+**Date:** 2026-04-08
 
 This document describes what is actually implemented in the Rust workspace today. It replaces the earlier proposal-style architecture writeup as the primary reference for workspace structure, dependency flow, and command surface.
 
@@ -18,6 +18,7 @@ sigil/
     sigil-runtime/
     sigil-conductor/
     sigil-bridge/
+    sigil-mcp/
     sigil-cli/
 ```
 
@@ -32,18 +33,20 @@ sigil/
 | `sigil-runtime` | tmux-backed `SessionRuntime`, Claude Code adapter, worktree manager |
 | `sigil-conductor` | Heartbeat scans, reconciliation, status formatting, bridge message handling |
 | `sigil-bridge` | Telegram/Slack parsing, identity allowlisting, rate limiting, routing, live loops |
-| `sigil-cli` | `sigil` binary, clap commands, audit initialization, conductor runner |
+| `sigil-mcp` | Host-side MCP server for policy-mediated agent actions (JSON-RPC over stdin/stdout) |
+| `sigil-cli` | `sigil` binary, clap commands, bridge runner, audit verification, conductor runner |
 
-There is no `ops-container` crate in this workspace. Container-backed runtime work remains future work.
+Container-backed runtime research exists in `docs/CONTAINER-POC.md` but no container backend crate is implemented yet.
 
 ## Dependency Graph
 
 Compile-time workspace edges:
 
 ```text
-sigil-cli → sigil-audit, sigil-conductor, sigil-core, sigil-runtime, sigil-store
+sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-core, sigil-runtime, sigil-store
 sigil-conductor → sigil-audit, sigil-core, sigil-policy, sigil-runtime, sigil-store
 sigil-bridge → sigil-audit, sigil-core, sigil-policy
+sigil-mcp → sigil-core, sigil-policy
 sigil-runtime → sigil-core, sigil-policy
 sigil-store → sigil-core, sigil-policy
 sigil-policy → sigil-audit, sigil-core
@@ -53,9 +56,11 @@ sigil-core → (no internal deps)
 
 Notes:
 
-- `sigil-cli` also has test-only dependencies on `sigil-bridge` and `sigil-policy`.
+- `sigil-cli` depends on `sigil-bridge` directly for bridge CLI commands.
+- `sigil-cli` has test-only dependencies on `sigil-policy`.
 - `sigil-bridge` and `sigil-conductor` remain decoupled at compile time; bridge code targets `MessageSink`.
 - `sigil-store` depends on `sigil-policy` because it implements the `GrantStore` trait and stores approval grants.
+- `sigil-mcp` is a standalone library; nothing in the workspace depends on it yet.
 
 ## Core Runtime Model
 
@@ -144,7 +149,7 @@ Telegram/Slack payload
   -> conductor handles /status, /sessions, /check, /send or forwards text
 ```
 
-Bridge code is implemented at the crate level, but the top-level CLI does not yet expose a dedicated bridge runner.
+Bridge code is exposed through the `sigil bridge` CLI commands (`telegram`, `slack`, `all`).
 
 ## Current CLI Surface
 
@@ -155,6 +160,8 @@ sigil status
 sigil session <subcommand>
 sigil worktree <subcommand>
 sigil conductor
+sigil bridge <subcommand>
+sigil audit <subcommand>
 ```
 
 ### `session`
@@ -188,13 +195,27 @@ Implemented:
 
 - `conductor --interval <seconds>`
 
-The conductor performs:
+The conductor is generic over `SessionRuntime` (not hardcoded to `TmuxRuntime`). It performs:
 
 - startup reconciliation
 - heartbeat scans
 - expired-grant cleanup
 - status formatting
 - bridge-style slash-command handling at the library level
+
+### `bridge`
+
+Implemented subcommands:
+
+- `telegram` — runs the Telegram long-poll bridge loop
+- `slack` — runs the Slack Socket Mode bridge loop
+- `all` — runs all bridge loops concurrently
+
+### `audit`
+
+Implemented subcommands:
+
+- `verify` — validates HMAC chain integrity of the audit log
 
 ## What Is Implemented Today
 
@@ -205,32 +226,28 @@ The conductor performs:
 - tmux-backed runtime
 - worktree create/list/finish
 - HMAC-chained audit logging from CLI/conductor
-- audit-chain verification library
+- audit-chain verification library and `sigil audit verify` CLI
 - trust-zone and tier evaluation
+- approval grants stored in SQLite and consulted by the policy evaluator
+- `FatigueGuard` wired into the approval flow
 - bridge input normalization and sender allowlisting
 - bridge rate limiting
-- conductor reconciliation and heartbeat scans
-
-### Present but not fully integrated
-
-- approval grants are stored in SQLite, but the evaluator does not yet consult them before returning `NeedsApproval`
-- `FatigueGuard` exists in `sigil-policy`, but it is not yet wired into the approval flow
-- bridge live loops exist in `sigil-bridge`, but there is no top-level `sigil bridge ...` runtime command yet
+- bridge CLI commands (`sigil bridge telegram/slack/all`)
+- conductor reconciliation and heartbeat scans (generic over `SessionRuntime`)
+- grant prefix matching with path boundary checks
+- `strip_ansi` panics on malformed input (no silent fallback)
+- host-side MCP server for policy-mediated agent actions (`sigil-mcp`)
 
 ### Not implemented in this workspace
 
-- container runtime backend
-- host-side MCP approval server
+- container runtime backend (research in `docs/CONTAINER-POC.md`)
 - Keychain-backed audit key management
 - workflow-bundle approvals
 - WebFetch/content sanitization pipeline
 
 ## Verification Snapshot
 
-The workspace currently registers 318 tests:
-
-- 268 unit tests
-- 50 integration tests in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests)
+The workspace currently registers 411 tests across unit and integration suites in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
 
 Recommended verification commands:
 
