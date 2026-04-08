@@ -1,57 +1,59 @@
-# agent-ops
+# sigil
 
-A security-first Rust binary for managing AI agent sessions. Replaces [agent-deck](https://github.com/Abeansits/agent-deck) (Go) + bridge.py (Python) with a single binary that has security baked in from day one.
+A security-first Rust workspace for managing AI agent sessions. It replaces the older Go + Python split with one typed, testable workspace built around policy checks, audit logging, and tmux-backed orchestration.
 
-## Why
+## Workspace
 
-Running multiple AI coding agents (Claude Code, Codex, etc.) in tmux sessions works — but it's held together with Go + Python + shell scripts, no permission model, no audit trail, and no sandboxing. Agent-ops fixes that.
-
-## Architecture
-
-```
-ops-cli            CLI entry point (clap)
-ops-conductor      Heartbeat, escalation, session coordination
-ops-bridge         Telegram + Slack adapters, rate limiting, identity resolution
-ops-runtime        tmux session backend, tool adapters, git worktrees
-ops-store          SQLite persistence (sessions, grants, audit index)
-ops-policy         Trust zones, tier evaluation, approval grants, input sanitization
-ops-audit          HMAC-chained JSONL audit trail
-ops-core           Action enum, trust model, traits, domain types
+```text
+sigil-cli         `sigil` binary, clap commands, audit wiring
+sigil-conductor   Heartbeat loop, reconciliation, bridge message handling
+sigil-bridge      Telegram/Slack parsing, identity resolution, routing, live bridge loops
+sigil-runtime     tmux runtime, tool adapters, git worktree manager
+sigil-store       SQLite persistence for sessions and approval grants
+sigil-policy      Trust-zone checks, tier evaluation, normalization, fatigue guard, grant model
+sigil-audit       HMAC-chained JSONL audit writer and verifier
+sigil-core        Action protocol, origins, principals, trust model, trait ports
 ```
 
-Dependency flow is strictly top-down — no cycles.
+The workspace is an 8-crate DAG with `sigil-core` at the bottom and no internal dependency cycles.
 
-## Key Design Decisions
+## Design
 
-- **Action enum as sole authority protocol** — ~30 typed variants, no `Shell(String)`. Every agent request maps to a concrete action.
-- **Trust zones** — Z0 (Ingress) → Z1 (ControlPlane) → Z2 (AgentRuntime) → Z3 (HostPrivileged). Z2→Z3 is always blocked.
-- **Permission tiers** — T0 (Read) → T1 (Operate) → T2 (Modify Infra) → T3 (Privileged Host) → T3+ (Break Glass).
-- **Terminal parsing is observability only** — status scraping never grants authority. All privileged requests flow through structured MCP tool calls.
-- **HMAC-chained audit** — SHA-256 content hash + prev_hash chain + HMAC-SHA256. Tamper-evident by design.
-- **Principal model** — ActionOrigin → Principal → permissions. Auth strength, platform binding, trust posture, tier ceiling.
+- `ActionRequest` is the typed authority protocol for orchestrated actions.
+- Terminal parsing is observability-only; `ToolAdapter` emits `AgentSignal`, not authority.
+- Trust zones are `Ingress`, `ControlPlane`, `AgentRuntime`, and `HostPrivileged`.
+- Audit events are written as append-only HMAC-chained JSONL entries.
+- Approval grants have a real domain model and SQLite storage, though evaluator-side grant lookups are still pending.
 
-## Build
+## Build And Verify
 
 ```bash
-cargo build --release    # 5.6 MB binary (thin LTO)
-cargo test               # 314 tests (267 unit + 47 integration)
-cargo clippy -- -D warnings
+cargo build --release     # current macOS arm64 build: 5.7M
+cargo test               # 318 tests (268 unit + 50 integration)
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Requires Rust 1.85+ (edition 2024).
+Rust 1.85+ is required. The release profile uses thin LTO and `codegen-units = 1`.
 
 ## Status
 
-Steps 1–10 of the [build plan](docs/ARCHITECTURE.md) are complete. Shadow mode (step 11) and cutover (step 12) are next.
+The current workspace has working session lifecycle commands, status reporting, worktree management, tmux reconciliation, audit logging, policy evaluation, grant persistence, and bridge libraries for Slack and Telegram.
+
+The main gaps between the current code and the longer-term design are:
+
+- runtime is tmux-only today; no container backend is implemented
+- the policy evaluator does not yet consult stored approval grants
+- bridge loops exist as library code but are not yet wired into a top-level runtime command
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md) — full system design, Action enum spec, trust zones, build order
-- [Feature Audit](docs/FEATURE-AUDIT.md) — 120 features from agent-deck, triaged into tiers
-- [Rewrite Proposal](docs/REWRITE-PROPOSAL.md) — Codex consultation + Ting review results
-- [Security Plan](docs/SECURITY-PLAN.md) — 8-layer security architecture
-- [Agent Traps Defense](docs/AGENT-TRAPS-DEFENSE.md) — adversarial prompt/steganography defenses
-- [Stego Defense](docs/STEGO-DEFENSE.md) — steganographic attack analysis
+- [Architecture](docs/ARCHITECTURE.md) — current workspace structure, dependency graph, and runtime flow
+- [Feature Audit](docs/FEATURE-AUDIT.md) — current status of the feature set carried over from agent-deck
+- [Rewrite Proposal](docs/REWRITE-PROPOSAL.md) — proposal history plus what has and has not landed
+- [Security Plan](docs/SECURITY-PLAN.md) — current security controls and remaining hardening work
+- [Use Cases](docs/USE-CASES.md) — CLI-oriented walkthroughs aligned to the current command surface
+- [Agent Traps Defense](docs/AGENT-TRAPS-DEFENSE.md) — threat-model notes for current and planned defenses
+- [Stego Defense](docs/STEGO-DEFENSE.md) — steganography hardening notes and future work
 
 ## License
 

@@ -6,7 +6,7 @@ members = ["crates/*"]
 edition = "2024"
 rust-version = "1.85.0"
 license = "MIT"
-repository = "https://github.com/Abeansits/agent-ops"
+repository = "https://github.com/Abeansits/sigil"
 authors = ["Sebastian"]
 
 [workspace.dependencies]

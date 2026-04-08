@@ -1,7 +1,8 @@
 # Agent Traps Defense Matrix
 
 **Source:** "AI Agent Traps" — Franklin et al., Google DeepMind, 2026
-**Purpose:** Map each trap category against agent-ops defenses. Identify what we guard against, what we can't yet, and what we should watch.
+**Purpose:** Map each trap category against sigil defenses. Identify what we guard against, what we can't yet, and what we should watch.
+**Status note (2026-04-07):** This file is a target-state threat-modeling document. The current workspace implements bridge normalization, sender allowlisting, rate limiting, trust-zone checks, grant persistence, and CLI/conductor audit logging. It does not yet implement container isolation, WebFetch sanitization, approval-fatigue enforcement, or memory-write controls.
 
 ---
 
@@ -11,18 +12,18 @@
 
 | Trap | Description | Our Defense | Status |
 |------|------------|-------------|--------|
-| **Web-Standard Obfuscation** | Hidden instructions in HTML comments, CSS `display:none`, `aria-label` tags, off-screen positioned text | Container network allowlist limits which sites agents visit. Input sanitization strips suspicious HTML/metadata on ingested content. | ⚠️ Partial — we sanitize bridge input, but agents fetch web content directly inside containers. We don't sanitize what Claude Code's WebFetch returns. |
-| **Dynamic Cloaking** | Servers detect agent visitors (via browser fingerprinting, user-agent, IP) and serve different content | Container network goes through allowlisted domains only. But we don't control what those domains serve. | ❌ Can't defend — this is server-side. We'd need a trusted proxy that strips/flags suspicious divergence. |
-| **Steganographic Payloads** | Malicious instructions encoded in image pixel data, audio perturbations | Agents process images/audio as part of work (Paul's image gen, video production). We can't strip stego from every media file. | ❌ Can't defend at our layer — this requires model-level robustness. Container isolation limits blast radius. |
+| **Web-Standard Obfuscation** | Hidden instructions in HTML comments, CSS `display:none`, `aria-label` tags, off-screen positioned text | Current defense is limited to bridge-input normalization. A future WebFetch/content sanitizer and sandbox/network policy would help, but are not implemented yet. | ⚠️ Partial — bridge text is sanitized, but fetched web content is not. |
+| **Dynamic Cloaking** | Servers detect agent visitors (via browser fingerprinting, user-agent, IP) and serve different content | No direct current defense. Future sandbox/network allowlists may narrow exposure, but they would not solve server-side cloaking. | ❌ Can't defend fully — this is server-side. We'd need a trusted proxy that strips or flags suspicious divergence. |
+| **Steganographic Payloads** | Malicious instructions encoded in image pixel data, audio perturbations | Agents process images/audio as part of work, and the current workspace has no dedicated media sanitization pipeline. | ❌ Can't defend at our layer — this requires model-level robustness plus future media sanitization. |
 | **Syntactic Masking** | Instructions hidden in Markdown link text, LaTeX, formatting syntax | Our session output sanitizer flags suspicious patterns ("SYSTEM:", base64 blocks). But formatting-level masking is hard to detect. | ⚠️ Partial — we catch obvious markers but not sophisticated syntactic masking. |
 
-### What to add to agent-ops:
+### What to add to sigil:
 - **WebFetch output sanitization:** When an agent fetches web content, the runtime adapter should strip HTML comments, hidden elements, and metadata before the content enters the agent's context. This is a `ToolAdapter` responsibility.
 - **Content provenance tagging:** Tag all external content with source domain and fetch timestamp so the audit trail can trace which content influenced which action.
 
 ### Current limitations (can't fully solve):
 - Dynamic cloaking is server-side — we can't control what trusted domains serve.
-- Steganographic payloads in media files are a model-level problem. Our containers limit the blast radius, but we can't prevent the model from being influenced.
+- Steganographic payloads in media files are a model-level problem. The current workspace also lacks a media-sanitization pipeline, so this remains mostly future work.
 - Sophisticated syntactic masking that uses valid formatting is hard to detect without model-level understanding.
 
 ---
@@ -37,7 +38,7 @@
 | **Oversight & Critic Evasion** | Wrapping malicious instructions in "security audit," "educational," or "red-teaming" framing to bypass safety filters | No defense beyond model's own alignment. | ❌ Model-level problem. Container isolation limits what a compromised agent can do. |
 | **Persona Hyperstition** | Seeding narratives about a model's identity that re-enter via retrieval, causing self-reinforcing behavior | Our SOUL.md files define conductor identity. But if external content poisons the narrative... | ⚠️ Partial — our explicit SOUL.md anchors identity, but a sophisticated attack could still shift behavior through accumulated context. |
 
-### What to add to agent-ops:
+### What to add to sigil:
 - **Nothing actionable at the infrastructure level.** These are model reasoning vulnerabilities.
 - **Midflight cross-checks:** For high-stakes decisions (deployments, financial, public-facing content), run midflight to get a second opinion from a different model. Different models have different susceptibilities.
 
@@ -57,7 +58,7 @@
 | **Latent Memory Poisoning** | Injecting innocuous data into memory stores that becomes malicious in future context | Our conductors write to LEARNINGS.md and state.json. A compromised agent could write poisoned learnings. | ⚠️ Real risk — a compromised session could write malicious patterns to LEARNINGS.md that a conductor later follows. |
 | **Contextual Learning Traps** | Corrupting few-shot demonstrations or reward signals to steer in-context learning | Our conductors learn from auto-response outcomes (LEARNINGS.md promotion pattern). A carefully crafted sequence of interactions could steer this. | ⚠️ Real risk — our self-improvement loop (auto_response_ok/wrong → promoted patterns) could be gamed. |
 
-### What to add to agent-ops:
+### What to add to sigil:
 - **Memory write audit:** Every write to persistent memory files (LEARNINGS.md, OPS.md, state.json) gets logged to the audit trail with the originating session and ActionOrigin. If a Slack-originated session writes to LEARNINGS.md, that's flagged.
 - **Memory integrity checks:** Periodic diff of memory files against last known-good state. Alert on unexpected changes. HMAC-chain the memory files, not just the audit log.
 - **Container memory isolation:** Sandboxed sessions can NOT write to conductor memory files. They can only write to their own project directory. Memory updates go through the conductor (host-side) as a T2 action.
@@ -74,11 +75,11 @@
 
 | Trap | Description | Our Defense | Status |
 |------|------------|-------------|--------|
-| **Embedded Jailbreak Sequences** | Adversarial prompts in external resources that override safety alignment on ingestion | Container isolation limits what a jailbroken agent can access. Network allowlist limits exfiltration targets. | ✅ Strong — even if jailbroken, the agent is in a container with limited filesystem and network. This is exactly what containers solve. |
-| **Data Exfiltration Traps** | Inducing the agent to locate, encode, and exfiltrate data to attacker endpoints | Container network allowlist blocks unknown endpoints. No access to sensitive paths. http.write restrictions limit POST to known APIs. | ✅ Strong — primary defense is the container boundary + network allowlist. The confused deputy attack (question 1 from earlier) is addressed. |
+| **Embedded Jailbreak Sequences** | Adversarial prompts in external resources that override safety alignment on ingestion | Current defenses are typed actions, tier ceilings, trust-zone checks, and audit logging. Planned sandbox isolation would strengthen this considerably. | ⚠️ Partial — authority controls reduce blast radius, but runtime isolation is not implemented yet. |
+| **Data Exfiltration Traps** | Inducing the agent to locate, encode, and exfiltrate data to attacker endpoints | Current defenses are policy-mediated actions, bridge allowlisting, and audit visibility. Planned sandbox/network restrictions would be the stronger containment layer. | ⚠️ Partial — the current workspace reduces privilege, but it does not yet provide container-style egress isolation. |
 | **Sub-agent Spawning Traps** | Exploiting orchestrator privileges to spawn attacker-controlled sub-agents with poisoned prompts | Our conductor creates sessions. If the conductor is compromised, it could spawn malicious sessions. | ⚠️ Partial — session creation is a T2 action. Bridge-originated (Paul/Slack) messages can't create sessions. But Sebastian's compromised conductor could. |
 
-### What to add to agent-ops:
+### What to add to sigil:
 - **Sub-agent spawn controls:** Session creation should always log the full prompt/instructions to the audit trail. New sessions spawned by the conductor inherit the conductor's ActionOrigin chain — if the conductor was triggered by a bridge message, the spawned session carries that taint.
 - **Session creation rate limit:** Max N new sessions per hour. Anomaly detection if a conductor suddenly spawns many sessions.
 - **Instructions review:** When a session is created with custom instructions (not from a template), flag for review if the instructions contain suspicious patterns (URLs, credential references, "ignore previous instructions", etc.).
@@ -100,7 +101,7 @@
 | **Compositional Fragment Traps** | Partitioning a malicious payload across multiple benign-looking sources that reconstitute when aggregated | A conductor aggregates output from multiple sessions. Fragments across sessions could reconstitute. | ⚠️ Theoretical risk — low probability for our setup, but the architecture does aggregate multi-session data. |
 | **Sybil Attacks** | Fabricating multiple agent identities to influence collective decisions | N/A — we don't have democratic agent decision-making. | ✅ N/A for our use case. |
 
-### What to add to agent-ops:
+### What to add to sigil:
 - Nothing for MVP. These are relevant at scale (hundreds/thousands of agents).
 - **Future consideration:** If we add Ting-like multi-model deliberation to automated workflows, Sybil attacks and compositional fragments become relevant.
 
@@ -116,7 +117,7 @@
 | **Automation Bias** | Presenting technical, benign-looking summaries that a non-expert human would likely authorize | Our conductor presents summaries to Sebastian. If those summaries are crafted to look safe... | ⚠️ Real risk — Sebastian trusts the conductor's judgment. A compromised conductor could frame malicious actions as routine. |
 | **Social Engineering via Agent** | Using the agent to deliver phishing links or manipulative content to the human | Bridge messages go directly to Sebastian. A compromised agent's output could contain phishing. | ⚠️ Partial — the audit trail logs everything, but doesn't prevent Sebastian from clicking a link in a Telegram message. |
 
-### What to add to agent-ops:
+### What to add to sigil:
 - **Approval request rate limit:** Max N approval requests per hour per session. If a session is generating many approval requests, flag it and pause.
 - **Approval request context:** Every approval notification includes: what session requested it, what ActionOrigin triggered it, how many approvals this session has requested today, and a risk indicator based on the action's tier.
 - **Cool-down after burst:** If >3 approvals in 10 minutes, enforce a 5-minute cool-down before the next approval can be granted. Forces Sebastian to slow down.
@@ -130,7 +131,7 @@
 
 ## Summary: What We Guard Against vs. What We Can't
 
-### ✅ Strong defenses (containers + policy engine + audit):
+### Target-state strong defenses (requires sandboxing + policy engine + audit):
 - Data exfiltration (network allowlist + filesystem isolation)
 - Embedded jailbreak blast radius (container limits what jailbroken agent can access)
 - Unauthorized session creation from untrusted sources (Action enum + tier enforcement)
@@ -154,7 +155,7 @@
 
 ---
 
-## Action Items for agent-ops
+## Action Items for sigil
 
 ### Add to proposal:
 1. WebFetch output sanitization in `ToolAdapter` (strip HTML comments, hidden elements, metadata)

@@ -1,196 +1,144 @@
-# Agent-Deck Feature Audit
+# Feature Audit
 
-Say **keep**, **drop**, or **modify** for each. Call out numbers like "keep 1-5, drop 6, modify 7".
+**Status:** current implementation audit  
+**Date:** 2026-04-07
 
----
+This file records how the original agent-deck feature inventory maps onto the current `sigil` workspace. It is intentionally status-oriented now; the earlier “keep / drop / modify” worksheet is no longer the best description of the code that actually exists.
 
-## A. Session Lifecycle
+## Summary
 
-1. Add session (specify path, title, group, tool)
-2. Launch session (add + start + send initial message in one step)
-3. Start / Stop / Restart session
-4. Remove session
-5. Rename session
-6. Fork session (clone Claude session with context preserved)
-7. Attach to session (interactive tmux attach)
-8. Session auto-detect (knows which session you're in from tmux env)
+| Area | Status | Notes |
+|------|--------|-------|
+| Session lifecycle | Implemented | Create, launch, start, stop, restart, send, output, remove, list, show |
+| Status tracking | Implemented | Session states, tmux reads, reconciliation, status CLI |
+| Groups and parent links | Partial | Group and parent fields exist in stored session records; management commands are not exposed yet |
+| Conductor loop | Partial | Heartbeat, reconciliation, bridge-style command handling exist; multi-conductor management and policy-driven auto-response are not exposed |
+| Slack / Telegram bridges | Partial | Parsing, identity resolution, routing, rate limiting, and live loops exist at crate level; no top-level bridge runtime command yet |
+| tmux integration | Implemented | Dedicated tmux server label, send, output capture, status checks |
+| Git worktrees | Implemented | Create, list, finish, optional merge, safe branch delete attempt |
+| Approval grants | Partial | Domain model and SQLite storage exist; evaluator lookup is still pending |
+| Audit trail | Implemented | CLI and conductor write HMAC-chained JSONL audit entries |
+| Security normalization | Implemented | Bridge normalization, ANSI stripping, trust zones, tier ceilings |
+| Container sandboxing | Not started | No container runtime exists in the current workspace |
+| Profiles / TUI / Web / SSH / Remotes / Cost tracking | Not started | These areas are not present in the current Rust CLI |
 
-## B. Session Communication
+## Implemented Command-Facing Features
 
-9. Send message to session (with wait/no-wait options)
-10. Read session output (last response, quiet mode)
-11. Send output from one session as message to another (cross-session relay)
+### Sessions
 
-## C. Session Metadata & Status
+Implemented in the CLI today:
 
-12. Status detection via hooks (Claude/Gemini/Codex send events on state change)
-13. Status detection via tmux polling (fallback when hooks unavailable)
-14. Session states: running, waiting, idle, error, stopped
-15. Per-session notes (user-editable, persistent)
-16. Session metadata: title, path, group, tool, parent, created_at, last_accessed
-17. Session resolution: by ID, title, fuzzy match, prefix, or auto-detect from tmux
+- create a session with title, path, tool, and optional group
+- launch a session in one step
+- list sessions in text or JSON
+- show session details in text or JSON
+- start, stop, and restart sessions
+- send messages with `--wait` and quiet output modes
+- read session output
+- remove sessions
+- resolve sessions by title, full ID, or ID prefix
 
-## D. Parent-Child & Groups
+Not implemented from the original inventory:
 
-18. Parent-child session linking (sub-sessions)
-19. Child event notifications (parent gets notified when child is waiting)
-20. Group hierarchy (nested groups, sessions organized in tree)
-21. Move sessions between groups
-22. Group reordering (up/down/position)
+- interactive attach
+- automatic “current tmux session” detection
+- rename command
+- fork/clone session command
+- notes editing
 
-## E. Profiles
+### Status And Metadata
 
-23. Multiple isolated profiles (separate session DB per profile)
-24. Per-profile config overrides
-25. Profile CRUD (create, delete, list, set-default)
-26. Cross-profile listing (--all flag)
-27. Profile-specific MCP pool configuration
+Implemented:
 
-## F. Conductor (Meta-Agent Orchestration)
+- session states: `Running`, `Waiting`, `Idle`, `Error`, `Stopped`
+- status summary command with JSON output
+- conductor reconciliation against live tmux state
+- ANSI stripping on runtime reads
 
-28. Named conductor instances
-29. Per-conductor instructions file + CLAUDE.md
-30. Per-conductor policy/learnings split
-31. Heartbeat system (periodic check-in)
-32. Child waiting event notifications
-33. Auto-response capabilities
-34. Multi-conductor per profile
-35. Conductor setup/teardown commands
+Partial:
 
-## G. Messaging Bridges
+- group and parent metadata are stored but not fully surfaced through dedicated management commands
 
-36. Telegram bridge (bot token, user auth, voice transcription)
-37. Slack bridge (socket mode, channel routing, outbox system)
-38. Discord bridge (config skeleton exists, not fully built)
-39. Bridge message routing to specific sessions by profile
+Not implemented:
 
-## H. Tmux Integration
+- per-session notes
+- “last accessed” tracking
 
-40. Each session = one tmux window in profile-specific tmux server
-41. Tmux send-keys for input
-42. Tmux pane capture for output
-43. Custom tmux options via config
-44. Keyboard protocol management (kitty protocol handling)
+### Worktrees
 
-## I. Git Worktree Support
+Implemented:
 
-45. Auto-create worktree for branch on session add
-46. Worktree location modes (sibling, subdirectory, custom template)
-47. Worktree finish workflow (merge + remove worktree + delete session)
-48. Orphaned worktree cleanup
-49. Multi-repo worktree support
+- create a worktree for a session
+- list active worktrees
+- finish a worktree
+- optional merge before removal
+- safe branch cleanup with `git branch -d`
 
-## J. MCP (Model Context Protocol)
+Not implemented:
 
-50. Per-session MCP attach/detach
-51. Global MCP configuration
-52. MCP pool mode (HTTP server pooling for shared MCP instances)
-53. MCP auto-start on session launch
-54. MCP auto-consent configuration
-55. MCP stdio and HTTP transports
+- auto-create worktree on session creation
+- custom placement strategies
+- orphan cleanup worker
+- multi-repo orchestration beyond the current single-session repo model
 
-## K. Skills System
+### Bridges
 
-56. Attach/detach skills per project
-57. Skill source management (add/remove/list sources)
-58. Skill discovery from configured sources
+Implemented at the crate level:
 
-## L. Docker Sandbox
+- Telegram parsing and long-poll loop
+- Slack parsing and Socket Mode loop
+- sender allowlist resolution
+- per-user rate limiting
+- routing through `MessageSink`
 
-59. Run sessions in Docker containers (--sandbox flag)
-60. Custom Docker image, CPU/memory limits, volume mounts
+Not yet wired into the current CLI:
 
-## M. SSH Remote
+- dedicated bridge runtime command
+- Discord bridge
+- profile-aware bridge routing
 
-61. Run sessions on remote hosts via SSH
-62. Remote working directory specification
+### Security And Policy
 
-## N. Remote Instances (Multi-Machine)
+Implemented:
 
-63. Add/remove remote agent-deck instances
-64. List sessions across remotes
-65. Attach to remote sessions
-66. Install/update agent-deck on remotes
+- typed action protocol
+- trust-zone evaluation
+- principal resolution and tier ceilings
+- bridge input normalization
+- tmux output ANSI stripping
+- approval grant persistence
+- HMAC-chained audit trail
 
-## O. Cost Tracking
+Partial:
 
-67. Per-session cost tracking (token counts, model pricing)
-68. Daily/weekly/monthly summaries with projections
-69. Budget limits (daily/weekly/monthly, per-group)
-70. Cost sync from Claude transcripts
-71. Custom pricing overrides per model
+- fatigue guard exists but is not wired into approval handling
+- approval grants are stored but not consulted by the evaluator yet
 
-## P. TUI (Terminal UI)
+Not implemented:
 
-72. Tree view of sessions organized by groups
-73. Preview pane (toggleable, configurable location/size)
-74. Full keyboard shortcut system (~30 bindings)
-75. Session creation wizard dialog
-76. MCP manager dialog
-77. Skill manager dialog
-78. Notes editor
-79. Search/filter across sessions
-80. Theme support (dark/light/system)
-81. Responsive layout
+- container sandbox
+- network read/write policy split at runtime
+- content provenance tagging
+- host-side MCP approval transport
 
-## Q. Web Interface
+## Explicitly Out Of Scope For The Current CLI
 
-82. Web server alongside TUI (localhost:8420)
-83. Bearer token auth
-84. Read-only mode option
-85. WebSocket real-time updates
-86. Web push notifications (VAPID keys)
+The following feature groups from the old inventory are still absent from the workspace and should be treated as backlog, not as hidden or partially wired features:
 
-## R. OpenClaw Integration
+- profile CRUD
+- TUI dialogs and tree UI
+- web UI / WebSocket server / push notifications
+- Docker sandbox
+- SSH remote execution
+- multi-machine instance management
+- cost tracking and budget UI
+- OpenClaw integration
+- hook install / uninstall command set
 
-87. Sync OpenClaw agents as sessions
-88. Bridge TUI for OpenClaw agents
-89. Send messages to OpenClaw agents
+## Source Of Truth
 
-## S. Hook System
+Use these files for current behavior:
 
-90. Claude Code hook handler (SessionStart, BeforeAgent, AfterAgent, Stop, etc.)
-91. Gemini hooks
-92. Codex notification hooks
-93. Hook-based status tracking
-94. Hook install/uninstall/status commands
-
-## T. Maintenance & Operations
-
-95. Background maintenance worker (stale cleanup, consistency checks)
-96. Debug ring buffer (in-memory logs for crash dumps)
-97. Debug dump command (post-mortem analysis)
-98. Configurable log levels, formats, retention
-99. Automatic update checking and installation
-100. Uninstall command
-
-## U. CLI Quality-of-Life
-
-101. JSON output mode on all commands
-102. Quiet mode (exit codes only, for scripting)
-103. Fuzzy matching for session resolution
-104. Helpful error messages with exit codes (0=success, 1=error, 2=not found)
-105. Try command (quick experiment: find-or-create dated folder)
-106. Global search across session transcripts
-
-## V. Security (Current)
-
-107. macOS Keychain for secrets (Telegram token)
-108. Docker sandbox isolation
-109. Environment variable support for sensitive config
-110. Profile name validation (prevents path traversal)
-
----
-
-## Features NOT in agent-deck (from our security plan / wishlist)
-
-111. Input sanitization (strip-invisible, hidden char detection)
-112. Permission tiers (owner/partner/automated/external)
-113. Trust zones (trusted/semi-trusted/sandboxed)
-114. Bridge-level command allowlist
-115. Sender allowlist + rate limiting
-116. Audit trail (append-only security log)
-117. Approval gates with scoped grants + TTL
-118. Network policy (read/write split)
-119. Supply chain hardening (pinned deps, MCP verification)
-120. WASM or container sandboxing for untrusted inputs
+- [`docs/ARCHITECTURE.md`](/Users/zebas/Developer/sigil/docs/ARCHITECTURE.md)
+- [`docs/USE-CASES.md`](/Users/zebas/Developer/sigil/docs/USE-CASES.md)
+- [`README.md`](/Users/zebas/Developer/sigil/README.md)

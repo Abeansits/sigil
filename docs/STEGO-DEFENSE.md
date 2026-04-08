@@ -1,7 +1,8 @@
 # Steganography Defense Analysis
 
 **Source:** ST3GG toolkit (Pliny/elder-plinius) — 112 techniques, ALLSIGHT detection engine
-**Context:** Maps ST3GG's attack surface against agent-ops defenses. Companion to `agent-traps-defense-matrix.md`.
+**Context:** Maps ST3GG's attack surface against sigil defenses. Companion to [`AGENT-TRAPS-DEFENSE.md`](/Users/zebas/Developer/sigil/docs/AGENT-TRAPS-DEFENSE.md).
+**Status note (2026-04-07):** This file describes the desired hardening pipeline. Today the workspace implements text normalization and tmux-output ANSI stripping, but it does not yet implement the web/media sanitization and sandbox-network controls discussed below.
 
 ---
 
@@ -45,14 +46,14 @@
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
-| HTML comments | Strip in WebFetch sanitizer | ✅ (planned) |
-| HTML hidden elements (display:none, off-screen) | Strip in WebFetch sanitizer | ✅ (planned) |
+| HTML comments | Strip in WebFetch sanitizer | 📋 Planned |
+| HTML hidden elements (display:none, off-screen) | Strip in WebFetch sanitizer | 📋 Planned |
 | HTML aria-label injection | Strip metadata attributes | ⚠️ Need to add |
 | JSON Unicode escapes | Normalize Unicode in JSON parsing | ⚠️ Need to add |
 | Markdown comments | Strip `<!-- -->` in Markdown content | ⚠️ Need to add |
 | XML CDATA/processing instructions | Strip if processing XML | ⚠️ Low priority |
 | CSV/YAML/TOML/INI comment encoding | Low risk — agents rarely parse raw config from untrusted sources | ✅ Low priority |
-| PDF streams/XMP | Low risk inside containers — PDF processing is rare | ✅ Low priority |
+| PDF streams/XMP | Low current priority — PDF processing is rare in this workspace | ✅ Low priority |
 
 **Action:** Add to WebFetch output sanitizer: strip HTML comments, hidden elements, aria-labels, and Markdown comments. Normalize JSON Unicode escapes.
 
@@ -66,16 +67,16 @@
 
 **Risk assessment:** Low. Audio comes from ElevenLabs (trusted API), not from untrusted external sources. If we ever process untrusted audio, re-encode through lossy codec (MP3/AAC) to strip LSB.
 
-### Network — CONTAINER HANDLES THIS
+### Network — PLANNED SANDBOX CONTROL
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
-| DNS tunneling | Container network allowlist restricts DNS | ✅ |
-| ICMP payload injection | Container blocks raw ICMP | ✅ |
-| TCP covert channels | Not directly defensible at our layer | ⚠️ Low risk in container |
-| HTTP header smuggling | Container network goes through allowlisted endpoints | ✅ |
+| DNS tunneling | Planned sandbox/network allowlist backend would restrict DNS | 📋 Planned |
+| ICMP payload injection | Planned sandbox backend would block raw ICMP | 📋 Planned |
+| TCP covert channels | Not directly defensible at our layer; a future sandbox would only reduce exposure | ⚠️ Planned mitigation |
+| HTTP header smuggling | Planned allowlisted egress in a sandbox backend | 📋 Planned |
 
-**Risk assessment:** Low. The container network allowlist and the fact that we control which domains agents can reach makes most network stego impractical. The attacker would need to control one of our allowlisted domains.
+**Risk assessment:** This is planned-state analysis. The current workspace does not yet have sandboxed egress controls, so these network mitigations should be read as future hardening rather than present protection.
 
 ### Code — RELEVANT (agents read/write code constantly)
 
