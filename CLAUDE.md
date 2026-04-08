@@ -44,7 +44,7 @@ sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-core, sigil-runt
 sigil-conductor → sigil-audit, sigil-core, sigil-policy, sigil-runtime, sigil-store
 sigil-bridge → sigil-audit, sigil-core, sigil-policy
 sigil-mcp → sigil-core, sigil-policy
-sigil-runtime → sigil-core, sigil-policy
+sigil-runtime → sigil-core, sigil-mcp [container], sigil-policy
 sigil-store → sigil-core, sigil-policy
 sigil-policy → sigil-audit, sigil-core
 sigil-audit → sigil-core
@@ -57,7 +57,7 @@ Notes:
 - `sigil-cli` has test-only dependencies on `sigil-policy`.
 - `sigil-bridge` and `sigil-conductor` still do not depend on each other directly.
 - `sigil-store` depends on `sigil-policy` because it implements the approval-grant store trait.
-- `sigil-mcp` is a standalone library; nothing in the workspace depends on it yet.
+- `sigil-runtime` depends on `sigil-mcp` behind the `container` feature gate (MCP socket server for containers).
 
 ## Current Implementation Notes
 

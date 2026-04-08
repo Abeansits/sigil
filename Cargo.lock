@@ -1777,6 +1777,7 @@ dependencies = [
  "serde_json",
  "sigil-audit",
  "sigil-core",
+ "sigil-mcp",
  "sigil-policy",
  "tempfile",
  "thiserror 2.0.18",

@@ -30,6 +30,6 @@ pub mod tools;
 pub mod transport;
 
 pub use error::McpError;
-pub use server::{McpServer, run_stdio};
+pub use server::{McpServer, handle_stream, run_stdio};
 pub use tools::{McpTool, ToolResult, ToolStatus};
 pub use transport::{JsonRpcRequest, JsonRpcResponse};
