@@ -296,6 +296,90 @@ The proxy approach (Option C above) is the recommended path forward.
 - `container system start` must be run before first use
 - Install: `brew install container`
 
+## Apple Container Roadmap Research
+
+Research date: 2026-04-08. Sources: GitHub issues, discussions, PRs, release notes, Containerization framework repo, Anthropic's devcontainer reference.
+
+### The Exact Same Use Case Exists Upstream
+
+Multiple people are trying to sandbox AI coding agents (Claude Code, Codex CLI) with domain-level network allowlisting. The key threads:
+
+- **[Discussion #719](https://github.com/apple/container/discussions/719)** — "Firewall to block all internet traffic except for domains I allow?" Filed specifically about running Claude Code in Apple Containers with an allowlist for `api.anthropic.com`, `github.com`, etc. References Anthropic's [devcontainer firewall script](https://github.com/anthropics/claude-code/tree/main/.devcontainer) which uses iptables + ipset.
+
+- **[Discussion #1170](https://github.com/apple/container/discussions/1170)** — "macOS 26 network isolation" — asks about container-to-container isolation and led to the dual-homed proxy approach.
+
+- **[Issue #1320](https://github.com/apple/container/issues/1320)** — "Option to prevent host access on internal networks" — filed by `@jamesmacaulay` who is running the same dual-homed proxy pattern we designed. Identifies the gap: on `--internal` networks, the host gateway IP is still reachable, so a root agent could bypass the proxy.
+
+### Maintainer Response (Active Work)
+
+Apple maintainer `@dcantah` responded on #1320 (2026-03-17) with concrete plans:
+
+> "I've been thinking about the exact same lately and should have something to share hopefully soon"
+
+> "TLDR we should be able to expose some bits on containerization (the sister library) to do some **nftables setup in the root of the VM** such that it can only talk to certain ports on the gateway addr (for my use case only 1 port that is running a proxy). We can shove the container in a **netns** such that it's none the wiser about the rulesets applied to the other end of some veth in the root of the vm."
+
+> "I was exploring basically the same idea. Want to run some coding agent that only has access to 1 ip:port (for some http proxy running on the host)."
+
+Apple contributor `@jglogan` added (2026-03-31):
+
+> "It would be also be nice to be able to prevent this via the vmnet network configuration APIs, and plumb this out to a network configuration option for `container network create --internal`."
+
+### Why iptables/nftables Don't Work Today
+
+The VM kernel doesn't have netfilter compiled in:
+- `iptables -L` → "Could not fetch rule set generation id: Invalid argument"
+- `nft list ruleset` → "cache initialization failed: Invalid argument"
+- No `--cap-add` flag exists (or is needed — each container is its own VM with no capability restrictions)
+
+The Anthropic devcontainer approach (iptables rules inside the container) cannot work with Apple Containers today. The maintainer's plan to add nftables support in the VM root namespace would fix this at the hypervisor level.
+
+### Milestones
+
+The repo uses monthly milestones:
+- **2026-04**: 18 open issues, 1 closed (current)
+- **2026-05**: empty
+- **2026-06**: empty (likely WWDC 2026 timeframe)
+
+The nftables/netns work from #1320 is not yet assigned to a milestone, but the maintainer signaled "hopefully soon" on March 17.
+
+### Related Issues
+
+| Issue | Title | Status | Relevance |
+|-------|-------|--------|-----------|
+| [#719](https://github.com/apple/container/discussions/719) | Firewall to block all internet except allowed domains | Discussion | Exact use case — AI agent sandboxing |
+| [#1320](https://github.com/apple/container/issues/1320) | Option to prevent host access on internal networks | Open, active | Maintainer working on nftables fix |
+| [#1170](https://github.com/apple/container/discussions/1170) | macOS 26 network isolation | Discussion | Container-to-container isolation |
+| [#500](https://github.com/apple/container/issues/500) | Allow creation of networks with no host access | Open | Network isolation model |
+| [#1047](https://github.com/apple/container/issues/1047) | Support loading network config from file | Open | Could enable richer network policies |
+| [#1151](https://github.com/apple/container/pull/1151) | Support multiple network plugins | Merged (v0.10.0) | Plugin architecture for custom backends |
+
+### What Anthropic's Reference Implementation Does
+
+The [Claude Code devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) uses `init-firewall.sh` with:
+- `iptables` + `ipset` to create a "allowed-domains" set
+- Resolves domains to IPs at boot: `api.anthropic.com`, `statsig.anthropic.com`, GitHub IP ranges (via API), `registry.npmjs.org`, VS Code marketplace
+- Default policy: DROP on INPUT, FORWARD, and OUTPUT
+- Allows: DNS (UDP 53), SSH (TCP 22), localhost, established connections, and IPs in the allowed set
+
+This approach requires `--cap-add=NET_ADMIN` and `--cap-add=NET_RAW` (Docker-specific), plus a kernel with netfilter — neither available in Apple Containers today.
+
+### Impact on sigil's Proxy Decision
+
+**Short-term (now):** Build the custom Rust proxy (Option C from section 5). The dual-homed proxy pattern is validated by the community — `@jamesmacaulay` is running it in production for the same use case. Use `--internal` network + proxy socket.
+
+**Medium-term (weeks/months):** Watch #1320. When Apple ships nftables support in the VM root namespace, the proxy becomes optional — the container itself can enforce network rules at the kernel level without root bypass risk. The proxy may still be valuable for audit logging of outbound connections.
+
+**Long-term (WWDC 2026+):** If Apple adds `container network create --internal --allow-gateway-port=8080` or similar first-class support, the entire proxy layer could be replaced with a single CLI flag.
+
+### Recommendation Update
+
+The custom Rust proxy remains the right call. Even when Apple adds nftables support, the proxy provides:
+1. Domain-level filtering (nftables only does IP-level)
+2. Audit trail of all outbound HTTP requests
+3. A single configuration surface (session config, not iptables rules baked into images)
+
+Design the proxy interface so it can be made optional when upstream catches up.
+
 ## Next Steps
 
 1. Build a minimal `sigil-agent` container image (Dockerfile with Claude Code + git + node)
@@ -303,3 +387,4 @@ The proxy approach (Option C above) is the recommended path forward.
 3. Add `ContainerRuntime` trait implementation alongside `TmuxRuntime`
 4. Wire socket-based IPC for the MCP approval protocol
 5. Add container lifecycle to conductor heartbeat scans
+6. Watch [apple/container#1320](https://github.com/apple/container/issues/1320) for nftables/netns support
