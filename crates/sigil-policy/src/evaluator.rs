@@ -2,7 +2,10 @@
 //!
 //! The [`Evaluator`] takes an [`ActionRequest`] and produces a
 //! [`PolicyDecision`] by checking principal identity, tier ceilings,
-//! zone transitions, and (eventually) approval grants.
+//! zone transitions, and approval grants.
+
+use std::fmt;
+use std::sync::Arc;
 
 use sigil_core::action::{Action, ActionRequest, PolicyDecision};
 use sigil_core::origin::ActionOrigin;
@@ -10,6 +13,7 @@ use sigil_core::principal::resolve_principal;
 use sigil_core::trust::{Capability, Tier, TrustZone};
 
 use crate::error::PolicyError;
+use crate::grants::GrantStore;
 use crate::zone::validate_zone_transition;
 
 /// Configuration for the policy evaluator.
@@ -21,17 +25,39 @@ pub struct EvaluatorConfig {
     // Future: per-user tier ceilings, allowed capability overrides, etc.
 }
 
-/// The core policy evaluator. Stateless -- all state lives in the
-/// config and the grant store (when wired up).
-#[derive(Clone, Debug)]
-pub struct Evaluator {
-    _config: EvaluatorConfig,
+/// The core policy evaluator. Delegates to a [`GrantStore`] for
+/// approval grant lookups.
+///
+/// Generic over `G: GrantStore` because the `GrantStore` trait uses
+/// RPITIT (`impl Future` returns) and is not dyn-compatible.
+pub struct Evaluator<G> {
+    config: EvaluatorConfig,
+    grants: Arc<G>,
 }
 
-impl Evaluator {
+// Manual Clone: Arc<G> is always Clone regardless of G.
+impl<G> Clone for Evaluator<G> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            grants: Arc::clone(&self.grants),
+        }
+    }
+}
+
+// Manual Debug: skip the grants field (no Debug bound on G needed).
+impl<G> fmt::Debug for Evaluator<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Evaluator")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<G: GrantStore> Evaluator<G> {
     #[must_use]
-    pub fn new(config: EvaluatorConfig) -> Self {
-        Self { _config: config }
+    pub fn new(config: EvaluatorConfig, grants: Arc<G>) -> Self {
+        Self { config, grants }
     }
 
     /// Evaluate an action request and return a policy decision.
@@ -49,11 +75,12 @@ impl Evaluator {
     /// 3. Determine required capability and tier.
     /// 4. Check tier ceiling.
     /// 5. Validate zone transition.
-    /// 6. For T3+, return `NeedsApproval` unless `HumanApproved`.
-    /// 7. For T2, return `NeedsApproval` unless `HumanApproved` (grant
-    ///    checking TODO).
+    /// 6. For T3+, check grant store, then return `NeedsApproval`
+    ///    unless `HumanApproved` or a valid grant exists.
+    /// 7. For T2, same grant-aware logic (Sebastian auto-allowed
+    ///    from CLI).
     /// 8. Otherwise, `Allow`.
-    pub fn evaluate(&self, request: &ActionRequest) -> Result<PolicyDecision, PolicyError> {
+    pub async fn evaluate(&self, request: &ActionRequest) -> Result<PolicyDecision, PolicyError> {
         // 1. Resolve principal.
         let principal = resolve_principal(&request.origin);
 
@@ -85,64 +112,131 @@ impl Evaluator {
         let target_zone = action_target_zone(&request.action);
         validate_zone_transition(origin_zone, target_zone, effective_ceiling)?;
 
-        // 6-7. Approval logic.
+        // 6-7. Approval logic with grant checking.
         if required_tier >= Tier::T3 {
-            return Ok(check_privileged_approval(request, capability));
+            return Ok(self
+                .check_privileged_approval(request, capability, &principal.identity)
+                .await);
         }
 
         if required_tier >= Tier::T2 {
-            return Ok(check_infrastructure_approval(request, capability));
+            return Ok(self
+                .check_infrastructure_approval(request, capability, &principal.identity)
+                .await);
         }
 
         // 8. T0-T1: allowed.
         Ok(PolicyDecision::Allow)
     }
-}
 
-/// T3+ actions require human approval unless origin is `HumanApproved`.
-fn check_privileged_approval(request: &ActionRequest, capability: Capability) -> PolicyDecision {
-    if is_human_approved(&request.origin) {
-        return PolicyDecision::Allow;
+    /// T3+ actions require human approval unless origin is `HumanApproved`
+    /// or a valid approval grant exists.
+    async fn check_privileged_approval(
+        &self,
+        request: &ActionRequest,
+        capability: Capability,
+        principal_id: &str,
+    ) -> PolicyDecision {
+        if is_human_approved(&request.origin) {
+            return PolicyDecision::Allow;
+        }
+
+        // Check the grant store for a valid grant covering this action.
+        if self
+            .try_consume_grant(principal_id, capability, &request.action)
+            .await
+        {
+            tracing::info!(
+                capability = ?capability,
+                principal = principal_id,
+                "T3+ action allowed via approval grant"
+            );
+            return PolicyDecision::Allow;
+        }
+
+        PolicyDecision::NeedsApproval {
+            description: format!("{capability:?} requires human approval (tier 3+)"),
+        }
     }
 
-    // TODO: check grant store for a valid grant that covers this
-    // capability. For now, always request approval.
-    tracing::info!(
-        capability = ?capability,
-        origin = ?request.origin,
-        "T3+ action requires approval -- grant checking not yet wired"
-    );
+    /// T2 actions: Sebastian auto-allowed from CLI / `HumanApproved`,
+    /// others need a grant or explicit approval.
+    async fn check_infrastructure_approval(
+        &self,
+        request: &ActionRequest,
+        capability: Capability,
+        principal_id: &str,
+    ) -> PolicyDecision {
+        if is_human_approved(&request.origin) {
+            return PolicyDecision::Allow;
+        }
 
-    PolicyDecision::NeedsApproval {
-        description: format!("{capability:?} requires human approval (tier 3+)"),
+        // `LocalCli` resolves to Sebastian with T3Plus ceiling — auto-allow
+        // for T2 actions.
+        if matches!(request.origin, ActionOrigin::LocalCli) {
+            return PolicyDecision::Allow;
+        }
+
+        // Check the grant store.
+        if self
+            .try_consume_grant(principal_id, capability, &request.action)
+            .await
+        {
+            tracing::info!(
+                capability = ?capability,
+                principal = principal_id,
+                "T2 action allowed via approval grant"
+            );
+            return PolicyDecision::Allow;
+        }
+
+        PolicyDecision::NeedsApproval {
+            description: format!("{capability:?} requires approval (tier 2)"),
+        }
     }
-}
 
-/// T2 actions: Sebastian auto-allowed from CLI / `HumanApproved`,
-/// others need approval.
-fn check_infrastructure_approval(
-    request: &ActionRequest,
-    capability: Capability,
-) -> PolicyDecision {
-    if is_human_approved(&request.origin) {
-        return PolicyDecision::Allow;
-    }
+    /// Look up a matching grant, consume it if found, and persist the
+    /// updated use count. Returns `true` if a valid grant was consumed.
+    async fn try_consume_grant(
+        &self,
+        principal_id: &str,
+        capability: Capability,
+        action: &Action,
+    ) -> bool {
+        let resource = action.resource_scope();
+        let grant = self
+            .grants
+            .find_grant(principal_id, capability, resource.as_deref())
+            .await;
 
-    // `LocalCli` resolves to Sebastian with T3Plus ceiling -- auto-allow
-    // for T2 actions.
-    if matches!(request.origin, ActionOrigin::LocalCli) {
-        return PolicyDecision::Allow;
-    }
-
-    // TODO: check grant store. For now, request approval.
-    tracing::info!(
-        capability = ?capability,
-        origin = ?request.origin,
-        "T2 action requires approval -- grant checking not yet wired"
-    );
-
-    PolicyDecision::NeedsApproval {
-        description: format!("{capability:?} requires approval (tier 2)"),
+        match grant {
+            Ok(Some(mut grant)) if grant.is_valid() => {
+                grant.consume();
+                // Fail closed: if we can't persist the consumed grant,
+                // deny the action to prevent double-spend.
+                if let Err(e) = self.grants.save_grant(&grant).await {
+                    tracing::error!(
+                        grant_id = %grant.id,
+                        error = %e,
+                        "failed to persist consumed grant — denying action (fail closed)"
+                    );
+                    return false;
+                }
+                true
+            }
+            // No valid grant found (or grant invalid — shouldn't happen
+            // if store filters correctly, but be defensive).
+            Ok(_) => false,
+            Err(e) => {
+                tracing::warn!(
+                    principal = principal_id,
+                    capability = ?capability,
+                    error = %e,
+                    "grant store lookup failed — falling through to NeedsApproval"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -168,16 +262,24 @@ fn is_human_approved(origin: &ActionOrigin) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use assert_matches::assert_matches;
+    use tokio::sync::Mutex;
 
     use sigil_core::id::SessionId;
+    use sigil_core::trust::Capability;
+
+    use crate::error::PolicyError;
+    use crate::grants::{ApprovalGrant, GrantStore, NoopGrantStore};
 
     use super::*;
 
-    fn eval() -> Evaluator {
-        Evaluator::new(EvaluatorConfig::default())
+    fn eval() -> Evaluator<NoopGrantStore> {
+        Evaluator::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore))
     }
 
     fn make_request(origin: ActionOrigin, action: Action) -> ActionRequest {
@@ -185,13 +287,95 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Mock grant store for testing grant-aware evaluation
+    // ------------------------------------------------------------------
+
+    /// A test grant store that returns a preconfigured grant.
+    #[derive(Debug)]
+    struct MockGrantStore {
+        grant: Mutex<Option<ApprovalGrant>>,
+    }
+
+    impl MockGrantStore {
+        fn with_grant(grant: ApprovalGrant) -> Self {
+            Self {
+                grant: Mutex::new(Some(grant)),
+            }
+        }
+
+        fn empty() -> Self {
+            Self {
+                grant: Mutex::new(None),
+            }
+        }
+    }
+
+    impl GrantStore for MockGrantStore {
+        async fn find_grant(
+            &self,
+            principal: &str,
+            capability: Capability,
+            resource: Option<&str>,
+        ) -> Result<Option<ApprovalGrant>, PolicyError> {
+            let guard = self.grant.lock().await;
+            if let Some(ref grant) = *guard {
+                if grant.matches(principal, capability, resource) && grant.is_valid() {
+                    return Ok(Some(grant.clone()));
+                }
+            }
+            Ok(None)
+        }
+
+        async fn save_grant(&self, grant: &ApprovalGrant) -> Result<(), PolicyError> {
+            let mut guard = self.grant.lock().await;
+            *guard = Some(grant.clone());
+            Ok(())
+        }
+    }
+
+    fn make_grant(
+        principal: &str,
+        capability: Capability,
+        resource_scope: Option<&str>,
+        ttl_secs: i64,
+        max_uses: Option<u32>,
+    ) -> ApprovalGrant {
+        let now = time::OffsetDateTime::now_utc();
+        ApprovalGrant {
+            id: sigil_core::id::RequestId::new(),
+            principal_id: principal.into(),
+            capability,
+            resource_scope: resource_scope.map(Into::into),
+            expires_at: now + time::Duration::seconds(ttl_secs),
+            max_uses,
+            uses: 0,
+            issued_by: "sebastian".into(),
+            issued_at: now,
+        }
+    }
+
+    fn eval_with_grant(grant: ApprovalGrant) -> Evaluator<MockGrantStore> {
+        Evaluator::new(
+            EvaluatorConfig::default(),
+            Arc::new(MockGrantStore::with_grant(grant)),
+        )
+    }
+
+    fn eval_with_empty_store() -> Evaluator<MockGrantStore> {
+        Evaluator::new(
+            EvaluatorConfig::default(),
+            Arc::new(MockGrantStore::empty()),
+        )
+    }
+
+    // ------------------------------------------------------------------
     // Table-driven auth tests
     // ------------------------------------------------------------------
 
     /// (origin, action, expected decision variant)
-    #[test]
+    #[tokio::test]
     #[allow(clippy::too_many_lines, clippy::items_after_statements)]
-    fn table_driven_policy_decisions() {
+    async fn table_driven_policy_decisions() {
         let evaluator = eval();
 
         let session_id = SessionId::new();
@@ -333,11 +517,13 @@ mod tests {
 
         for case in &cases {
             let request = make_request(case.origin.clone(), case.action.clone());
-            let decision = evaluator
-                .evaluate(&request)
-                .unwrap_or_else(|e| PolicyDecision::Deny {
-                    reason: e.to_string(),
-                });
+            let decision =
+                evaluator
+                    .evaluate(&request)
+                    .await
+                    .unwrap_or_else(|e| PolicyDecision::Deny {
+                        reason: e.to_string(),
+                    });
             assert!(
                 (case.check)(&decision),
                 "FAILED: {}\n  got: {decision:?}",
@@ -350,8 +536,8 @@ mod tests {
     // Individual edge-case tests
     // ------------------------------------------------------------------
 
-    #[test]
-    fn agent_generated_send_message_allowed() {
+    #[tokio::test]
+    async fn agent_generated_send_message_allowed() {
         let session_id = SessionId::new();
         let request = make_request(
             ActionOrigin::AgentGenerated { session_id },
@@ -362,14 +548,15 @@ mod tests {
         );
         let decision = eval()
             .evaluate(&request)
+            .await
             .unwrap_or_else(|e| PolicyDecision::Deny {
                 reason: e.to_string(),
             });
         assert_matches!(decision, PolicyDecision::Allow);
     }
 
-    #[test]
-    fn bridge_telegram_manage_session_allowed() {
+    #[tokio::test]
+    async fn bridge_telegram_manage_session_allowed() {
         let request = make_request(
             ActionOrigin::BridgeTelegram {
                 user_id: "12345".into(),
@@ -380,6 +567,7 @@ mod tests {
         );
         let decision = eval()
             .evaluate(&request)
+            .await
             .unwrap_or_else(|e| PolicyDecision::Deny {
                 reason: e.to_string(),
             });
@@ -387,8 +575,8 @@ mod tests {
         assert_matches!(decision, PolicyDecision::Allow);
     }
 
-    #[test]
-    fn bridge_slack_modify_infrastructure_denied_by_ceiling() {
+    #[tokio::test]
+    async fn bridge_slack_modify_infrastructure_denied_by_ceiling() {
         let request = make_request(
             ActionOrigin::BridgeSlack {
                 user_id: "U_PAUL".into(),
@@ -401,6 +589,7 @@ mod tests {
         );
         let decision = eval()
             .evaluate(&request)
+            .await
             .unwrap_or_else(|e| PolicyDecision::Deny {
                 reason: e.to_string(),
             });
@@ -408,8 +597,8 @@ mod tests {
         assert_matches!(decision, PolicyDecision::Deny { .. });
     }
 
-    #[test]
-    fn human_approved_break_glass_allowed() {
+    #[tokio::test]
+    async fn human_approved_break_glass_allowed() {
         let request = make_request(
             ActionOrigin::HumanApproved {
                 approver: "sebastian".into(),
@@ -423,6 +612,7 @@ mod tests {
         );
         let decision = eval()
             .evaluate(&request)
+            .await
             .unwrap_or_else(|e| PolicyDecision::Deny {
                 reason: e.to_string(),
             });
@@ -457,5 +647,170 @@ mod tests {
             }),
             TrustZone::HostPrivileged,
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Grant-aware evaluation tests
+    // ------------------------------------------------------------------
+
+    // Grant tests use LocalCli origin (ControlPlane zone, principal "sebastian")
+    // because Ingress -> HostPrivileged zone transitions are blocked before
+    // grant checking. LocalCli resolves to "sebastian" principal.
+
+    #[tokio::test]
+    async fn grant_found_allows_t3_action() {
+        // LocalCli (ControlPlane, T3Plus ceiling) requesting ReadHostFile
+        // with a valid grant — should be allowed via grant.
+        let grant = make_grant(
+            "sebastian",
+            Capability::ReadHostFile,
+            Some("/etc/hosts"),
+            300,
+            Some(5),
+        );
+        let evaluator = eval_with_grant(grant);
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn expired_grant_returns_needs_approval() {
+        // Grant with -1s TTL = already expired.
+        let grant = make_grant(
+            "sebastian",
+            Capability::ReadHostFile,
+            Some("/etc/hosts"),
+            -1,
+            Some(5),
+        );
+        let evaluator = eval_with_grant(grant);
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::NeedsApproval { .. });
+    }
+
+    #[tokio::test]
+    async fn grant_wrong_scope_returns_needs_approval() {
+        // Grant for /home/paul but request for /etc/shadow.
+        let grant = make_grant(
+            "sebastian",
+            Capability::ReadHostFile,
+            Some("/home/paul"),
+            300,
+            Some(5),
+        );
+        let evaluator = eval_with_grant(grant);
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/shadow"),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::NeedsApproval { .. });
+    }
+
+    #[tokio::test]
+    async fn no_grant_in_store_returns_needs_approval() {
+        let evaluator = eval_with_empty_store();
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::NeedsApproval { .. });
+    }
+
+    #[tokio::test]
+    async fn grant_consumed_increments_use_count() {
+        let grant = make_grant(
+            "sebastian",
+            Capability::ReadHostFile,
+            Some("/etc/hosts"),
+            300,
+            Some(3),
+        );
+        let store = Arc::new(MockGrantStore::with_grant(grant));
+        let evaluator = Evaluator::new(EvaluatorConfig::default(), Arc::clone(&store));
+
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+        );
+
+        // First use — should be allowed and use count incremented.
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::Allow);
+
+        // Verify use count was incremented in the store.
+        let stored = store.grant.lock().await;
+        let g = stored.as_ref().expect("grant should exist");
+        assert_eq!(g.uses, 1);
+    }
+
+    #[tokio::test]
+    async fn grant_wrong_capability_returns_needs_approval() {
+        // Grant for WriteHostFile but request is ReadHostFile.
+        let grant = make_grant("sebastian", Capability::WriteHostFile, None, 300, Some(5));
+        let evaluator = eval_with_grant(grant);
+        let request = make_request(
+            ActionOrigin::LocalCli,
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+        );
+        let decision =
+            evaluator
+                .evaluate(&request)
+                .await
+                .unwrap_or_else(|e| PolicyDecision::Deny {
+                    reason: e.to_string(),
+                });
+        assert_matches!(decision, PolicyDecision::NeedsApproval { .. });
     }
 }

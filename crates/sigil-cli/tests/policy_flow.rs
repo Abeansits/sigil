@@ -9,14 +9,16 @@ use std::path::PathBuf;
 
 use assert_matches::assert_matches;
 
+use std::sync::Arc;
+
 use sigil_core::PolicyEngine;
 use sigil_core::action::{Action, ActionRequest, PolicyDecision};
 use sigil_core::id::SessionId;
 use sigil_core::origin::ActionOrigin;
-use sigil_policy::{EvaluatorConfig, PolicyService};
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 
-fn service() -> PolicyService {
-    PolicyService::new(EvaluatorConfig::default())
+fn service() -> PolicyService<NoopGrantStore> {
+    PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore))
 }
 
 // ------------------------------------------------------------------

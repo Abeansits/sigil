@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use sigil_core::session::{SessionRecord, SessionState};
 use sigil_core::traits::SessionRuntime;
-use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 use tracing::{debug, warn};
 
@@ -34,9 +33,9 @@ pub struct HeartbeatResult {
 /// Returns [`ConductorError::Store`] if the session list cannot be fetched
 /// or state updates fail, or [`ConductorError::NoSessions`] if the store
 /// is empty.
-pub async fn scan_sessions(
+pub async fn scan_sessions<R: SessionRuntime>(
     store: &Arc<Store>,
-    runtime: &Arc<TmuxRuntime>,
+    runtime: &Arc<R>,
 ) -> Result<HeartbeatResult, ConductorError> {
     let sessions = store.list_sessions().await?;
 
@@ -75,7 +74,10 @@ pub async fn scan_sessions(
 ///
 /// If the runtime query fails (e.g. tmux session gone), returns
 /// `SessionState::Error` rather than propagating the error.
-async fn check_live_state(runtime: &Arc<TmuxRuntime>, session: &SessionRecord) -> SessionState {
+async fn check_live_state<R: SessionRuntime>(
+    runtime: &Arc<R>,
+    session: &SessionRecord,
+) -> SessionState {
     // Only check sessions that are supposed to be alive.
     if session.state == SessionState::Stopped {
         return SessionState::Stopped;

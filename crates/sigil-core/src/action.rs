@@ -148,6 +148,28 @@ pub enum Action {
 }
 
 impl Action {
+    /// The resource scope for this action, if any.
+    ///
+    /// Used by the policy evaluator to match against approval grant
+    /// resource scopes. Returns the file path, repo path, or domain
+    /// associated with the action.
+    #[must_use]
+    #[allow(clippy::wildcard_enum_match_arm)]
+    pub fn resource_scope(&self) -> Option<String> {
+        match self {
+            Self::ReadHostFile { path } | Self::WriteHostFile { path, .. } => {
+                Some(path.to_string_lossy().into_owned())
+            }
+            Self::ModifyGitState { repo, .. } => Some(repo.to_string_lossy().into_owned()),
+            Self::ExternalNetworkWrite { domain, .. } => Some(domain.clone()),
+            Self::BreakGlass { cwd, .. } => Some(cwd.to_string_lossy().into_owned()),
+            // Actions without a resource scope (T0-T2 operations, named
+            // templates, services). The exhaustive list is intentionally
+            // covered by a wildcard + non_exhaustive to handle future variants.
+            _ => None,
+        }
+    }
+
     /// The capability required for this action.
     #[must_use]
     pub fn required_capability(&self) -> Capability {

@@ -254,11 +254,7 @@ fn parse_porcelain(raw: &str) -> Vec<WorktreeInfo> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::print_stderr
-    )]
+    #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::print_stderr)]
 
     use super::*;
 

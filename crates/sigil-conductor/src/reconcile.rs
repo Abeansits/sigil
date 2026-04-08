@@ -1,15 +1,14 @@
-//! Crash recovery — reconcile DB state against live tmux sessions.
+//! Crash recovery — reconcile DB state against live runtime sessions.
 //!
 //! When the conductor restarts (crash, upgrade, etc.), the persisted
 //! session states in `SQLite` may be stale. This module compares each
-//! stored session against the tmux backend and corrects mismatches.
+//! stored session against the runtime backend and corrects mismatches.
 
 use std::fmt;
 use std::sync::Arc;
 
 use sigil_core::session::{SessionHandle, SessionState};
 use sigil_core::traits::SessionRuntime;
-use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 use tracing::{info, warn};
 
@@ -19,11 +18,11 @@ use crate::error::ConductorError;
 #[derive(Clone, Debug, Default)]
 pub struct ReconcileResult {
     pub sessions_checked: usize,
-    /// DB said running but tmux says stopped (or vice versa).
+    /// DB said running but runtime says stopped (or vice versa).
     pub state_mismatches: usize,
-    /// In tmux but not in DB (future use — not yet detected).
+    /// In runtime but not in DB (future use — not yet detected).
     pub orphaned_sessions: usize,
-    /// In DB but tmux session is gone.
+    /// In DB but runtime session is gone.
     pub missing_sessions: usize,
     pub state_corrections: Vec<StateCorrection>,
 }
@@ -47,14 +46,14 @@ impl fmt::Display for StateCorrection {
     }
 }
 
-/// Reconcile the store's session states against the live tmux backend.
+/// Reconcile the store's session states against the live runtime backend.
 ///
 /// For each session in the DB:
-/// - If the DB says `Running`/`Waiting`/`Idle` but tmux has no such
+/// - If the DB says `Running`/`Waiting`/`Idle` but runtime has no such
 ///   session, update to `Error`.
-/// - If the DB says `Running` but tmux reports `Stopped`, update to
+/// - If the DB says `Running` but runtime reports `Stopped`, update to
 ///   `Stopped`.
-/// - If the DB says `Stopped` but tmux shows the session alive, update
+/// - If the DB says `Stopped` but runtime shows the session alive, update
 ///   to `Running`.
 ///
 /// Sessions already in `Error` state are left alone (they need manual
@@ -64,9 +63,9 @@ impl fmt::Display for StateCorrection {
 ///
 /// Returns [`ConductorError::Store`] if the session list cannot be
 /// fetched or a state update fails.
-pub async fn reconcile(
+pub async fn reconcile<R: SessionRuntime>(
     store: &Arc<Store>,
-    runtime: &Arc<TmuxRuntime>,
+    runtime: &Arc<R>,
 ) -> Result<ReconcileResult, ConductorError> {
     let sessions = store.list_sessions().await?;
     let mut result = ReconcileResult {
@@ -90,7 +89,7 @@ pub async fn reconcile(
         let live_state = match runtime.status(&handle).await {
             Ok(state) => state,
             Err(_) => {
-                // tmux session doesn't exist or is unreachable.
+                // Runtime session doesn't exist or is unreachable.
                 SessionState::Error
             }
         };
@@ -111,7 +110,7 @@ fn detect_mismatch(
     title: &str,
 ) -> Option<StateCorrection> {
     match (stored, live) {
-        // DB thinks it's alive, but tmux says it's gone.
+        // DB thinks it's alive, but runtime says it's gone.
         (
             SessionState::Running | SessionState::Waiting | SessionState::Idle,
             SessionState::Error,
@@ -119,18 +118,18 @@ fn detect_mismatch(
             session_title: title.to_owned(),
             old_state: stored,
             new_state: SessionState::Error,
-            reason: "tmux session not found".into(),
+            reason: "runtime session not found".into(),
         }),
 
-        // DB thinks it's running, but tmux says stopped.
+        // DB thinks it's running, but runtime says stopped.
         (SessionState::Running, SessionState::Stopped) => Some(StateCorrection {
             session_title: title.to_owned(),
             old_state: stored,
             new_state: SessionState::Stopped,
-            reason: "tmux reports session stopped".into(),
+            reason: "runtime reports session stopped".into(),
         }),
 
-        // DB thinks it's stopped, but tmux shows it alive.
+        // DB thinks it's stopped, but runtime shows it alive.
         (
             SessionState::Stopped,
             SessionState::Running | SessionState::Waiting | SessionState::Idle,
@@ -138,7 +137,7 @@ fn detect_mismatch(
             session_title: title.to_owned(),
             old_state: SessionState::Stopped,
             new_state: SessionState::Running,
-            reason: "tmux session is alive but DB says stopped".into(),
+            reason: "runtime session is alive but DB says stopped".into(),
         }),
 
         // Already in error or states agree — no correction needed.
@@ -207,12 +206,12 @@ mod tests {
             session_title: "my-session".into(),
             old_state: SessionState::Running,
             new_state: SessionState::Error,
-            reason: "tmux session not found".into(),
+            reason: "runtime session not found".into(),
         };
         assert_eq!(c.session_title, "my-session");
         assert_eq!(c.old_state, SessionState::Running);
         assert_eq!(c.new_state, SessionState::Error);
-        assert_eq!(c.reason, "tmux session not found");
+        assert_eq!(c.reason, "runtime session not found");
     }
 
     #[test]
@@ -221,7 +220,7 @@ mod tests {
             session_title: "api-server".into(),
             old_state: SessionState::Running,
             new_state: SessionState::Stopped,
-            reason: "tmux reports session stopped".into(),
+            reason: "runtime reports session stopped".into(),
         };
         let display = format!("{c}");
         assert!(display.contains("api-server"));
