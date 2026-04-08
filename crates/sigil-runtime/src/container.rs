@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 
 use crate::adapter;
 use crate::error::RuntimeError;
+use crate::mcp_socket::{self, McpHandle, McpSpawner, McpSpawnerImpl};
 use crate::proxy::DomainProxy;
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,11 @@ pub struct ContainerRuntime {
     config: ContainerConfig,
     audit: Option<Arc<AuditLogWriter>>,
     proxy_handles: Mutex<HashMap<String, ProxyHandle>>,
+    /// Type-erased MCP server spawner. When present, `launch()` auto-
+    /// starts an MCP server on a Unix socket published into the container.
+    mcp_spawner: Option<Arc<dyn McpSpawner>>,
+    /// Running MCP server handles, keyed by session title.
+    mcp_handles: Mutex<HashMap<String, McpHandle>>,
 }
 
 impl ContainerRuntime {
@@ -128,6 +134,8 @@ impl ContainerRuntime {
             config,
             audit: None,
             proxy_handles: Mutex::new(HashMap::new()),
+            mcp_spawner: None,
+            mcp_handles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -138,6 +146,8 @@ impl ContainerRuntime {
             config,
             audit: Some(audit),
             proxy_handles: Mutex::new(HashMap::new()),
+            mcp_spawner: None,
+            mcp_handles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -145,6 +155,21 @@ impl ContainerRuntime {
     #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(ContainerConfig::default())
+    }
+
+    /// Enable MCP server support with the given grant store.
+    ///
+    /// When enabled, `launch()` will automatically start an MCP server
+    /// on a Unix socket published into each container. The agent inside
+    /// the container connects to `/tmp/sigil-mcp.sock` and sends
+    /// JSON-RPC requests through the policy evaluator.
+    #[must_use]
+    pub fn with_mcp<G: sigil_policy::grants::GrantStore + 'static>(
+        mut self,
+        grants: Arc<G>,
+    ) -> Self {
+        self.mcp_spawner = Some(Arc::new(McpSpawnerImpl::new(grants)));
+        self
     }
 
     /// Return the host-side proxy socket path for a session.
@@ -189,6 +214,21 @@ impl ContainerRuntime {
 
         info!(session = session_title, path = %socket_path.display(), "started proxy");
         Ok(socket_path)
+    }
+
+    /// Stop the MCP server for a session (if one is running).
+    async fn stop_mcp(&self, session_title: &str) {
+        let handle = self.mcp_handles.lock().await.remove(session_title);
+
+        if let Some(handle) = handle {
+            // Signal shutdown.
+            let _ = handle.shutdown.send(true);
+            // Wait for the task to finish (with a timeout).
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle.task).await;
+            // Clean up socket just in case.
+            let _ = tokio::fs::remove_file(&handle.socket_path).await;
+            debug!(session = session_title, "stopped MCP server");
+        }
     }
 
     /// Stop the proxy for a session (if one is running).
@@ -281,6 +321,7 @@ impl ContainerRuntime {
         &self,
         session_config: &SessionConfig,
         proxy_socket: Option<&PathBuf>,
+        mcp_socket: Option<&PathBuf>,
     ) -> Result<Vec<String>, CoreError> {
         let worktree = session_config
             .path
@@ -318,7 +359,7 @@ impl ContainerRuntime {
         }
 
         // MCP socket publishing.
-        if let Some(ref socket_path) = self.config.mcp_socket_path {
+        if let Some(socket_path) = mcp_socket.or(self.config.mcp_socket_path.as_ref()) {
             let socket_str = socket_path
                 .to_str()
                 .ok_or_else(|| CoreError::InvalidConfig {
@@ -329,6 +370,10 @@ impl ContainerRuntime {
                 })?;
             args.push("--publish-socket".to_owned());
             args.push(format!("{socket_str}:{MCP_SOCKET_CONTAINER_PATH}"));
+
+            // Tell the agent where the MCP socket lives inside the container.
+            args.push("-e".to_owned());
+            args.push(format!("SIGIL_MCP_SOCKET={MCP_SOCKET_CONTAINER_PATH}"));
         }
 
         // Proxy socket publishing (for Filtered network mode).
@@ -474,7 +519,22 @@ impl SessionRuntime for ContainerRuntime {
             None
         };
 
-        let run_args = self.build_run_args(config, proxy_socket.as_ref())?;
+        // Start the MCP server if a grant store was provided.
+        // The spawner waits for the socket to be bound before returning.
+        let mcp_socket = if let Some(ref spawner) = self.mcp_spawner {
+            let socket_path = mcp_socket::mcp_socket_path(&config.title);
+            let handle = spawner.spawn(socket_path.clone()).await?;
+            self.mcp_handles
+                .lock()
+                .await
+                .insert(config.title.clone(), handle);
+            info!(session = %config.title, path = %socket_path.display(), "started MCP server");
+            Some(socket_path)
+        } else {
+            None
+        };
+
+        let run_args = self.build_run_args(config, proxy_socket.as_ref(), mcp_socket.as_ref())?;
         let arg_refs: Vec<&str> = run_args.iter().map(String::as_str).collect();
         Self::run_container(&arg_refs).await?;
 
@@ -573,7 +633,8 @@ impl SessionRuntime for ContainerRuntime {
             let _ = Self::run_container(&["kill", &handle.title]).await;
         }
 
-        // Stop the proxy if one is running for this session.
+        // Stop the MCP server and proxy if running for this session.
+        self.stop_mcp(&handle.title).await;
         self.stop_proxy(&handle.title).await;
 
         // Brief delay before cleanup.
@@ -646,7 +707,7 @@ mod tests {
         let rt = ContainerRuntime::with_defaults();
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         // Must contain: run -d --name test-agent-01
@@ -680,7 +741,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         assert!(!args.contains(&"--network".to_owned()));
@@ -698,7 +759,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         assert!(args.contains(&"--mount".to_owned()));
@@ -719,7 +780,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         assert!(args.contains(&"API_KEY=secret123".to_owned()));
@@ -727,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn build_run_args_with_mcp_socket() {
+    fn build_run_args_with_mcp_socket_from_config() {
         let config = ContainerConfig {
             mcp_socket_path: Some(PathBuf::from("/tmp/sigil-mcp.sock")),
             ..ContainerConfig::default()
@@ -735,11 +796,32 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         assert!(args.contains(&"--publish-socket".to_owned()));
         assert!(args.contains(&format!("/tmp/sigil-mcp.sock:{MCP_SOCKET_CONTAINER_PATH}")));
+        assert!(args.contains(&format!("SIGIL_MCP_SOCKET={MCP_SOCKET_CONTAINER_PATH}")));
+    }
+
+    #[test]
+    fn build_run_args_with_mcp_socket_parameter_overrides_config() {
+        let config = ContainerConfig {
+            mcp_socket_path: Some(PathBuf::from("/tmp/config-mcp.sock")),
+            ..ContainerConfig::default()
+        };
+        let rt = ContainerRuntime::new(config);
+        let session = test_session_config();
+        let param_path = PathBuf::from("/tmp/spawned-mcp.sock");
+        let args = rt
+            .build_run_args(&session, None, Some(&param_path))
+            .expect("should build args");
+
+        // Parameter takes priority over config.
+        assert!(args.contains(&format!(
+            "/tmp/spawned-mcp.sock:{MCP_SOCKET_CONTAINER_PATH}"
+        )));
+        assert!(!args.contains(&format!("/tmp/config-mcp.sock:{MCP_SOCKET_CONTAINER_PATH}")));
     }
 
     #[test]
@@ -751,7 +833,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         assert_eq!(args.last().expect("non-empty"), "my-agent:v2");
@@ -766,7 +848,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         assert!(args.contains(&"my-net".to_owned()));
@@ -785,7 +867,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
 
         // Verify all pieces are present.
@@ -804,7 +886,7 @@ mod tests {
         // sandboxed = true by inspecting the code path.
         let rt = ContainerRuntime::with_defaults();
         let session = test_session_config();
-        let args = rt.build_run_args(&session, None);
+        let args = rt.build_run_args(&session, None, None);
         assert!(args.is_ok(), "build_run_args should succeed");
     }
 
@@ -821,7 +903,7 @@ mod tests {
         let rt = ContainerRuntime::new(config);
         let session = test_session_config();
         let args = rt
-            .build_run_args(&session, None)
+            .build_run_args(&session, None, None)
             .expect("should build args");
         assert!(args.contains(&"--network".to_owned()));
         assert!(args.contains(&"sigil-internal".to_owned()));
@@ -839,7 +921,7 @@ mod tests {
         let session = test_session_config();
         let proxy_path = PathBuf::from("/tmp/sigil-proxy-test.sock");
         let args = rt
-            .build_run_args(&session, Some(&proxy_path))
+            .build_run_args(&session, Some(&proxy_path), None)
             .expect("should build args");
 
         // Proxy socket published.

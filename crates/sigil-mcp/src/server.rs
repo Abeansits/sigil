@@ -213,26 +213,34 @@ fn decision_to_tool_result(decision: &PolicyDecision) -> ToolResult {
     }
 }
 
-/// Run the MCP server, reading from stdin and writing to stdout.
+/// Handle JSON-RPC messages from a buffered reader, writing responses
+/// to a writer.
 ///
-/// This is the main entry point for the `sigil mcp` command. It reads
-/// line-delimited JSON-RPC messages from stdin, handles them, and
-/// writes responses to stdout.
+/// This is the transport-agnostic core of the MCP server. It reads
+/// line-delimited JSON-RPC from `reader`, dispatches through the policy
+/// evaluator, and writes responses to `writer`. Returns when the reader
+/// reaches EOF (client disconnected).
+///
+/// Both `run_stdio` and the Unix socket transport in `sigil-runtime`
+/// delegate to this function.
 ///
 /// # Errors
 ///
-/// Returns [`McpError::Io`] if stdin/stdout operations fail.
-pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin);
+/// Returns [`McpError`] on I/O or serialization failure.
+pub async fn handle_stream<G, R, W>(
+    grants: Arc<G>,
+    mut reader: R,
+    mut writer: W,
+) -> Result<(), McpError>
+where
+    G: GrantStore,
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     let mut server = McpServer::with_grants(grants);
     let mut line = String::new();
-
-    tracing::info!("sigil-mcp server starting on stdio");
 
     loop {
         line.clear();
@@ -240,7 +248,6 @@ pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
 
         // EOF — client disconnected.
         if bytes_read == 0 {
-            tracing::info!("stdin closed, shutting down");
             break;
         }
 
@@ -257,8 +264,8 @@ pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
                     JsonRpcResponse::error(None, codes::PARSE_ERROR, format!("invalid JSON: {e}"));
                 let mut out = serde_json::to_vec(&resp)?;
                 out.push(b'\n');
-                stdout.write_all(&out).await?;
-                stdout.flush().await?;
+                writer.write_all(&out).await?;
+                writer.flush().await?;
                 continue;
             }
         };
@@ -270,11 +277,33 @@ pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
         if request.id.is_some() || response.error.is_some() {
             let mut out = serde_json::to_vec(&response)?;
             out.push(b'\n');
-            stdout.write_all(&out).await?;
-            stdout.flush().await?;
+            writer.write_all(&out).await?;
+            writer.flush().await?;
         }
     }
 
+    Ok(())
+}
+
+/// Run the MCP server, reading from stdin and writing to stdout.
+///
+/// This is the main entry point for the `sigil mcp` command. It reads
+/// line-delimited JSON-RPC messages from stdin, handles them, and
+/// writes responses to stdout.
+///
+/// # Errors
+///
+/// Returns [`McpError::Io`] if stdin/stdout operations fail.
+pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
+    use tokio::io::BufReader;
+
+    tracing::info!("sigil-mcp server starting on stdio");
+
+    let reader = BufReader::new(tokio::io::stdin());
+    let writer = tokio::io::stdout();
+    handle_stream(grants, reader, writer).await?;
+
+    tracing::info!("stdin closed, shutting down");
     Ok(())
 }
 
