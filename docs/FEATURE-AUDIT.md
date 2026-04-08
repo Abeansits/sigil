@@ -1,7 +1,7 @@
 # Feature Audit
 
 **Status:** current implementation audit  
-**Date:** 2026-04-07
+**Date:** 2026-04-08
 
 This file records how the original agent-deck feature inventory maps onto the current `sigil` workspace. It is intentionally status-oriented now; the earlier “keep / drop / modify” worksheet is no longer the best description of the code that actually exists.
 
@@ -13,13 +13,14 @@ This file records how the original agent-deck feature inventory maps onto the cu
 | Status tracking | Implemented | Session states, tmux reads, reconciliation, status CLI |
 | Groups and parent links | Partial | Group and parent fields exist in stored session records; management commands are not exposed yet |
 | Conductor loop | Partial | Heartbeat, reconciliation, bridge-style command handling exist; multi-conductor management and policy-driven auto-response are not exposed |
-| Slack / Telegram bridges | Partial | Parsing, identity resolution, routing, rate limiting, and live loops exist at crate level; no top-level bridge runtime command yet |
+| Slack / Telegram bridges | Implemented | Parsing, identity resolution, routing, rate limiting, live loops, and CLI commands (`sigil bridge telegram/slack/all`) |
 | tmux integration | Implemented | Dedicated tmux server label, send, output capture, status checks |
 | Git worktrees | Implemented | Create, list, finish, optional merge, safe branch delete attempt |
-| Approval grants | Partial | Domain model and SQLite storage exist; evaluator lookup is still pending |
-| Audit trail | Implemented | CLI and conductor write HMAC-chained JSONL audit entries |
+| Approval grants | Implemented | Domain model, SQLite storage, evaluator integration, fatigue guard, path boundary checks |
+| Audit trail | Implemented | CLI and conductor write HMAC-chained JSONL audit entries; `sigil audit verify` validates chain integrity |
 | Security normalization | Implemented | Bridge normalization, ANSI stripping, trust zones, tier ceilings |
-| Container sandboxing | Not started | No container runtime exists in the current workspace |
+| MCP server | Implemented | Host-side policy-mediated MCP server for agent actions (`sigil-mcp`) |
+| Container sandboxing | Not started | Research in `docs/CONTAINER-POC.md`; no container runtime backend yet |
 | Profiles / TUI / Web / SSH / Remotes / Cost tracking | Not started | These areas are not present in the current Rust CLI |
 
 ## Implemented Command-Facing Features
@@ -83,17 +84,17 @@ Not implemented:
 
 ### Bridges
 
-Implemented at the crate level:
+Implemented:
 
 - Telegram parsing and long-poll loop
 - Slack parsing and Socket Mode loop
 - sender allowlist resolution
 - per-user rate limiting
 - routing through `MessageSink`
+- CLI commands: `sigil bridge telegram`, `sigil bridge slack`, `sigil bridge all`
 
-Not yet wired into the current CLI:
+Not implemented:
 
-- dedicated bridge runtime command
 - Discord bridge
 - profile-aware bridge routing
 
@@ -109,17 +110,11 @@ Implemented:
 - approval grant persistence
 - HMAC-chained audit trail
 
-Partial:
-
-- fatigue guard exists but is not wired into approval handling
-- approval grants are stored but not consulted by the evaluator yet
-
 Not implemented:
 
 - container sandbox
 - network read/write policy split at runtime
 - content provenance tagging
-- host-side MCP approval transport
 
 ## Explicitly Out Of Scope For The Current CLI
 
