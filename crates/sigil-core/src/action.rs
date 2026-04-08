@@ -315,3 +315,214 @@ mod tests {
         assert_ne!(r1.id, r2.id);
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use std::path::PathBuf;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::id::SessionId;
+    use crate::session::{ConductorConfig, ToolKind};
+    use crate::trust::Tier;
+
+    fn arb_session_id() -> impl Strategy<Value = SessionId> {
+        Just(()).prop_map(|()| SessionId::new())
+    }
+
+    fn arb_path() -> impl Strategy<Value = PathBuf> {
+        "[a-z]{1,8}(/[a-z]{1,8}){0,3}".prop_map(|s| PathBuf::from(format!("/tmp/{s}")))
+    }
+
+    fn arb_name() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,20}"
+    }
+
+    fn arb_tool_kind() -> impl Strategy<Value = ToolKind> {
+        prop_oneof![Just(ToolKind::ClaudeCode), Just(ToolKind::Codex)]
+    }
+
+    fn arb_http_method() -> impl Strategy<Value = HttpMethod> {
+        prop_oneof![
+            Just(HttpMethod::Get),
+            Just(HttpMethod::Post),
+            Just(HttpMethod::Put),
+            Just(HttpMethod::Patch),
+            Just(HttpMethod::Delete),
+        ]
+    }
+
+    fn arb_command_template() -> impl Strategy<Value = CommandTemplate> {
+        arb_path().prop_flat_map(|path| {
+            prop_oneof![
+                Just(CommandTemplate::CargoTest { path: path.clone() }),
+                Just(CommandTemplate::CargoClippy { path: path.clone() }),
+                Just(CommandTemplate::CargoFmt { path: path.clone() }),
+                Just(CommandTemplate::NpmTest { path: path.clone() }),
+                Just(CommandTemplate::NpmInstall { path: path.clone() }),
+                Just(CommandTemplate::NpmBuild { path: path.clone() }),
+                Just(CommandTemplate::PythonTest { path: path.clone() }),
+                Just(CommandTemplate::GitPull { repo: path }),
+            ]
+        })
+    }
+
+    fn arb_git_operation() -> impl Strategy<Value = GitOperation> {
+        prop_oneof![
+            (arb_name(), arb_name())
+                .prop_map(|(remote, branch)| GitOperation::Push { remote, branch }),
+            arb_name().prop_map(|name| GitOperation::CreateBranch { name }),
+            arb_name().prop_map(|name| GitOperation::DeleteBranch { name }),
+            arb_name().prop_map(|branch| GitOperation::Merge { branch }),
+            arb_name().prop_map(|name| GitOperation::Tag { name }),
+        ]
+    }
+
+    fn arb_service_name() -> impl Strategy<Value = ServiceName> {
+        prop_oneof![
+            Just(ServiceName::Bridge),
+            arb_name().prop_map(|name| ServiceName::Conductor { name }),
+        ]
+    }
+
+    fn arb_conductor_config() -> impl Strategy<Value = ConductorConfig> {
+        (
+            arb_name(),
+            any::<bool>(),
+            1u64..3600u64,
+            proptest::collection::vec(arb_name(), 0..3),
+        )
+            .prop_map(
+                |(name, auto_response_enabled, heartbeat_interval_secs, escalation_channels)| {
+                    ConductorConfig {
+                        name,
+                        auto_response_enabled,
+                        heartbeat_interval_secs,
+                        escalation_channels,
+                    }
+                },
+            )
+    }
+
+    /// Strategy that generates every `Action` variant with valid inner data.
+    ///
+    /// Split into groups of ≤10 for `prop_oneof!` (which uses `TupleUnion`
+    /// internally and supports at most 10 branches per call).
+    fn arb_action() -> impl Strategy<Value = Action> {
+        // Group A: T0 (5) + first 5 of T1 = 10
+        let read_operate = prop_oneof![
+            Just(Action::ListSessions),
+            arb_session_id().prop_map(|session_id| Action::GetSessionStatus { session_id }),
+            arb_session_id().prop_map(|session_id| Action::ReadSessionOutput { session_id }),
+            Just(Action::ListGroups),
+            Just(Action::GetSystemStatus),
+            (
+                arb_path(),
+                arb_name(),
+                proptest::option::of(arb_name()),
+                arb_tool_kind(),
+            )
+                .prop_map(|(path, title, group, tool)| Action::CreateSession {
+                    path,
+                    title,
+                    group,
+                    tool,
+                }),
+            (arb_path(), arb_name(), proptest::option::of(arb_name())).prop_map(
+                |(path, title, message)| Action::LaunchSession {
+                    path,
+                    title,
+                    message,
+                }
+            ),
+            arb_session_id().prop_map(|session_id| Action::StartSession { session_id }),
+            arb_session_id().prop_map(|session_id| Action::StopSession { session_id }),
+            arb_session_id().prop_map(|session_id| Action::RestartSession { session_id }),
+        ];
+
+        // Group B: remaining T1 (2) + T2 (6) = 8
+        let operate_infra = prop_oneof![
+            (arb_session_id(), arb_name()).prop_map(|(session_id, message)| {
+                Action::SendMessage {
+                    session_id,
+                    message,
+                }
+            }),
+            arb_session_id().prop_map(|session_id| Action::RemoveSession { session_id }),
+            (arb_session_id(), arb_name())
+                .prop_map(|(session_id, branch)| { Action::CreateWorktree { session_id, branch } }),
+            (arb_session_id(), any::<bool>())
+                .prop_map(|(session_id, merge)| Action::FinishWorktree { session_id, merge }),
+            (arb_session_id(), arb_session_id()).prop_map(|(session_id, parent_id)| {
+                Action::SetSessionParent {
+                    session_id,
+                    parent_id,
+                }
+            }),
+            (arb_session_id(), arb_name()).prop_map(|(session_id, new_title)| {
+                Action::RenameSession {
+                    session_id,
+                    new_title,
+                }
+            }),
+            (arb_session_id(), arb_name()).prop_map(|(session_id, group)| {
+                Action::MoveSessionToGroup { session_id, group }
+            }),
+            (arb_name(), arb_conductor_config())
+                .prop_map(|(name, config)| Action::ConfigureConductor { name, config }),
+        ];
+
+        // Group C: T3 (6) + T3+ (1) = 7
+        let privileged = prop_oneof![
+            arb_path().prop_map(|path| Action::ReadHostFile { path }),
+            (arb_path(), proptest::collection::vec(any::<u8>(), 0..64))
+                .prop_map(|(path, content)| Action::WriteHostFile { path, content }),
+            (arb_path(), arb_git_operation())
+                .prop_map(|(repo, operation)| Action::ModifyGitState { repo, operation }),
+            arb_command_template().prop_map(|template| Action::ExecuteHostCommand { template }),
+            arb_service_name().prop_map(|service| Action::RestartService { service }),
+            (arb_name(), arb_http_method(), arb_name()).prop_map(|(domain, method, path)| {
+                Action::ExternalNetworkWrite {
+                    domain,
+                    method,
+                    path,
+                }
+            },),
+            (
+                proptest::collection::vec(arb_name(), 1..5),
+                arb_path(),
+                arb_name(),
+            )
+                .prop_map(|(command, cwd, justification)| Action::BreakGlass {
+                    command,
+                    cwd,
+                    justification,
+                }),
+        ];
+
+        prop_oneof![read_operate, operate_infra, privileged]
+    }
+
+    proptest! {
+        /// Every generated Action variant maps to a valid Capability
+        /// whose minimum tier is within the defined range.
+        #[test]
+        fn all_actions_have_valid_tier_assignment(action in arb_action()) {
+            let cap = action.required_capability();
+            let tier = cap.minimum_tier();
+            prop_assert!(tier <= Tier::T3Plus, "tier {tier:?} exceeds T3Plus");
+        }
+
+        /// The capability mapping is consistent: calling required_capability
+        /// twice on the same action always returns the same capability.
+        #[test]
+        fn required_capability_is_deterministic(action in arb_action()) {
+            let c1 = action.required_capability();
+            let c2 = action.required_capability();
+            prop_assert_eq!(c1, c2);
+        }
+    }
+}

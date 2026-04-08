@@ -230,3 +230,148 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use proptest::prelude::*;
+
+    use sigil_core::PolicyDecision;
+
+    use super::*;
+
+    fn arb_decision() -> impl Strategy<Value = PolicyDecision> {
+        prop_oneof![
+            Just(PolicyDecision::Allow),
+            "[a-z ]{1,30}".prop_map(|reason| PolicyDecision::Deny { reason }),
+            "[a-z ]{1,30}".prop_map(|desc| PolicyDecision::NeedsApproval { description: desc }),
+        ]
+    }
+
+    fn arb_audit_event() -> impl Strategy<Value = sigil_core::AuditEvent> {
+        ("[a-zA-Z ]{1,30}", "[a-zA-Z ]{1,30}", arb_decision()).prop_map(
+            |(action_summary, origin_summary, decision)| sigil_core::AuditEvent {
+                request_id: sigil_core::RequestId::new(),
+                timestamp: time::OffsetDateTime::now_utc(),
+                action_summary,
+                origin_summary,
+                decision,
+                session_id: None,
+            },
+        )
+    }
+
+    /// Build a valid HMAC chain from a sequence of events.
+    fn build_chain(key: &[u8], events: &[sigil_core::AuditEvent]) -> Vec<ChainedEntry> {
+        let mut entries = Vec::with_capacity(events.len());
+        let mut prev = GENESIS_HASH.to_owned();
+
+        for event in events {
+            let event_bytes = serde_json::to_vec(event).expect("serialize event");
+            let ch = content_hash(&event_bytes);
+            let hmac_val = compute_entry_hmac(key, &ch, &prev).expect("compute hmac");
+            entries.push(ChainedEntry {
+                event: event.clone(),
+                content_hash: ch,
+                prev_hash: prev.clone(),
+                hmac: hmac_val.clone(),
+            });
+            prev = hmac_val;
+        }
+
+        entries
+    }
+
+    proptest! {
+        /// A correctly built chain always verifies.
+        #[test]
+        fn valid_chain_verifies(
+            events in proptest::collection::vec(arb_audit_event(), 1..20),
+            key in proptest::collection::vec(any::<u8>(), 16..64),
+        ) {
+            let entries = build_chain(&key, &events);
+            prop_assert!(
+                verify_chain(&key, &entries).is_ok(),
+                "valid chain should verify"
+            );
+        }
+
+        /// Tampering with any event's action_summary breaks the chain.
+        #[test]
+        fn tampered_event_breaks_chain(
+            events in proptest::collection::vec(arb_audit_event(), 1..10),
+            tamper_offset in any::<usize>(),
+        ) {
+            let key = b"proptest-secret";
+            let mut entries = build_chain(key, &events);
+            let idx = tamper_offset % entries.len();
+            entries[idx].event.action_summary = "TAMPERED".to_owned();
+            prop_assert!(
+                verify_chain(key, &entries).is_err(),
+                "tampered chain at index {idx} should fail verification"
+            );
+        }
+
+        /// Tampering with an entry's prev_hash breaks the chain.
+        #[test]
+        fn tampered_prev_hash_breaks_chain(
+            events in proptest::collection::vec(arb_audit_event(), 2..10),
+            tamper_offset in any::<usize>(),
+        ) {
+            let key = b"proptest-secret";
+            let mut entries = build_chain(key, &events);
+            // Tamper with a non-first entry's prev_hash (first entry
+            // would need genesis hash tampering which is a different case).
+            let idx = 1 + (tamper_offset % (entries.len() - 1));
+            entries[idx].prev_hash = "deadbeef".repeat(8);
+            prop_assert!(
+                verify_chain(key, &entries).is_err(),
+                "tampered prev_hash at index {idx} should fail"
+            );
+        }
+
+        /// Tampering with an entry's HMAC tag breaks the chain.
+        #[test]
+        fn tampered_hmac_breaks_chain(
+            events in proptest::collection::vec(arb_audit_event(), 1..10),
+            tamper_offset in any::<usize>(),
+        ) {
+            let key = b"proptest-secret";
+            let mut entries = build_chain(key, &events);
+            let idx = tamper_offset % entries.len();
+            entries[idx].hmac = "cafebabe".repeat(8);
+            prop_assert!(
+                verify_chain(key, &entries).is_err(),
+                "tampered HMAC at index {idx} should fail"
+            );
+        }
+
+        /// Content hash is deterministic: same bytes always produce
+        /// the same hash.
+        #[test]
+        fn content_hash_deterministic(data in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let h1 = content_hash(&data);
+            let h2 = content_hash(&data);
+            prop_assert_eq!(h1, h2);
+        }
+
+        /// HMAC is deterministic: same key + inputs always produce the
+        /// same tag.
+        #[test]
+        fn hmac_deterministic(
+            key in proptest::collection::vec(any::<u8>(), 16..64),
+            ch in "[0-9a-f]{64}",
+            ph in "[0-9a-f]{64}",
+        ) {
+            let h1 = compute_entry_hmac(&key, &ch, &ph).expect("hmac");
+            let h2 = compute_entry_hmac(&key, &ch, &ph).expect("hmac");
+            prop_assert_eq!(h1, h2);
+        }
+    }
+}

@@ -958,3 +958,216 @@ mod tests {
         assert_matches!(decision, PolicyDecision::Deny { reason } if reason.contains("cooldown"));
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+
+    use sigil_core::action::{Action, ActionRequest, PolicyDecision};
+    use sigil_core::id::SessionId;
+    use sigil_core::origin::ActionOrigin;
+    use sigil_core::principal::resolve_principal;
+    use sigil_core::trust::Tier;
+
+    use crate::grants::NoopGrantStore;
+
+    use super::*;
+
+    fn fresh_eval() -> Evaluator<NoopGrantStore> {
+        Evaluator::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore))
+    }
+
+    /// Compare two `PolicyDecision` values for equality (the type
+    /// doesn't derive `PartialEq`).
+    fn decisions_equal(a: &PolicyDecision, b: &PolicyDecision) -> bool {
+        match (a, b) {
+            (PolicyDecision::Allow, PolicyDecision::Allow) => true,
+            (PolicyDecision::Deny { reason: r1 }, PolicyDecision::Deny { reason: r2 }) => r1 == r2,
+            (
+                PolicyDecision::NeedsApproval { description: d1 },
+                PolicyDecision::NeedsApproval { description: d2 },
+            ) => d1 == d2,
+            _ => false,
+        }
+    }
+
+    // ── Origin strategies ─────────────────────────────────────────
+
+    fn arb_origin() -> impl Strategy<Value = ActionOrigin> {
+        prop_oneof![
+            Just(ActionOrigin::LocalCli),
+            "[0-9]{1,10}".prop_map(|user_id| ActionOrigin::BridgeTelegram { user_id }),
+            ("[A-Z0-9]{1,10}", "[A-Z0-9]{1,10}").prop_map(|(user_id, channel_id)| {
+                ActionOrigin::BridgeSlack {
+                    user_id,
+                    channel_id,
+                }
+            }),
+            Just(()).prop_map(|()| ActionOrigin::AgentGenerated {
+                session_id: SessionId::new(),
+            }),
+            Just(ActionOrigin::SystemHeartbeat),
+        ]
+    }
+
+    /// Origins that resolve to low-ceiling principals (≤ T1).
+    fn arb_low_ceiling_origin() -> impl Strategy<Value = ActionOrigin> {
+        prop_oneof![
+            ("[A-Z0-9]{1,10}", "[A-Z0-9]{1,10}").prop_map(|(uid, cid)| {
+                ActionOrigin::BridgeSlack {
+                    user_id: uid,
+                    channel_id: cid,
+                }
+            }),
+            Just(()).prop_map(|()| ActionOrigin::AgentGenerated {
+                session_id: SessionId::new(),
+            }),
+            Just(ActionOrigin::SystemHeartbeat),
+        ]
+    }
+
+    // ── Action strategies by tier ─────────────────────────────────
+
+    fn arb_t0_action() -> impl Strategy<Value = Action> {
+        prop_oneof![
+            Just(Action::ListSessions),
+            Just(Action::ListGroups),
+            Just(Action::GetSystemStatus),
+        ]
+    }
+
+    fn arb_t3_action() -> impl Strategy<Value = Action> {
+        "[a-z]{1,10}".prop_map(|s| Action::ReadHostFile {
+            path: PathBuf::from(format!("/tmp/{s}")),
+        })
+    }
+
+    fn arb_t3plus_action() -> impl Strategy<Value = Action> {
+        "[a-z]{1,10}".prop_map(|s| Action::BreakGlass {
+            command: vec!["echo".into(), s],
+            cwd: PathBuf::from("/tmp"),
+            justification: "proptest".into(),
+        })
+    }
+
+    proptest! {
+        /// Evaluating the same request on two fresh evaluators (identical
+        /// initial state) always produces the same decision.
+        ///
+        /// Uses T0 actions to avoid fatigue guard state interactions.
+        #[test]
+        fn policy_is_deterministic(
+            origin in arb_origin(),
+            action in arb_t0_action(),
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async {
+                let eval1 = fresh_eval();
+                let eval2 = fresh_eval();
+                let request = ActionRequest::new(action, origin);
+
+                let d1 = eval1.evaluate(&request).await
+                    .unwrap_or_else(|e| PolicyDecision::Deny { reason: e.to_string() });
+                let d2 = eval2.evaluate(&request).await
+                    .unwrap_or_else(|e| PolicyDecision::Deny { reason: e.to_string() });
+
+                prop_assert!(
+                    decisions_equal(&d1, &d2),
+                    "non-deterministic: {d1:?} vs {d2:?}"
+                );
+                Ok(())
+            })?;
+        }
+
+        /// If a principal's tier ceiling is below the required tier,
+        /// the policy always denies (regardless of other factors).
+        ///
+        /// Low-ceiling origins (Slack T1, Agent T1, Heartbeat T1) paired
+        /// with T3 actions must always result in Deny.
+        #[test]
+        fn tier_ceiling_enforces_deny(
+            origin in arb_low_ceiling_origin(),
+            action in arb_t3_action(),
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async {
+                let evaluator = fresh_eval();
+                let request = ActionRequest::new(action, origin);
+                let decision = evaluator.evaluate(&request).await
+                    .unwrap_or_else(|e| PolicyDecision::Deny { reason: e.to_string() });
+
+                prop_assert!(
+                    matches!(decision, PolicyDecision::Deny { .. }),
+                    "expected Deny for low-ceiling origin + T3 action, got {decision:?}"
+                );
+                Ok(())
+            })?;
+        }
+
+        /// AgentGenerated origin + T3+ action always results in Deny
+        /// because the agent's T1 ceiling is below T3+.
+        #[test]
+        fn agent_generated_t3plus_always_denied(action in arb_t3plus_action()) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async {
+                let evaluator = fresh_eval();
+                let origin = ActionOrigin::AgentGenerated {
+                    session_id: SessionId::new(),
+                };
+                let request = ActionRequest::new(action, origin);
+                let decision = evaluator.evaluate(&request).await
+                    .unwrap_or_else(|e| PolicyDecision::Deny { reason: e.to_string() });
+
+                prop_assert!(
+                    matches!(decision, PolicyDecision::Deny { .. }),
+                    "agent + T3+ should always be denied, got {decision:?}"
+                );
+                Ok(())
+            })?;
+        }
+
+        /// For any origin, T0 read actions are always allowed (every
+        /// principal has at least T0 ceiling when active).
+        #[test]
+        fn t0_actions_always_allowed(
+            origin in arb_origin(),
+            action in arb_t0_action(),
+        ) {
+            let principal = resolve_principal(&origin);
+            // Only test active principals (not Revoked).
+            prop_assume!(principal.is_active());
+            prop_assume!(principal.effective_ceiling() >= Tier::T0);
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async {
+                let evaluator = fresh_eval();
+                let request = ActionRequest::new(action, origin);
+                let decision = evaluator.evaluate(&request).await
+                    .unwrap_or_else(|e| PolicyDecision::Deny { reason: e.to_string() });
+
+                prop_assert!(
+                    matches!(decision, PolicyDecision::Allow),
+                    "T0 action should always be allowed for active principal, got {decision:?}"
+                );
+                Ok(())
+            })?;
+        }
+    }
+}
