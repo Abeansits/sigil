@@ -13,12 +13,16 @@
 
 pub mod adapter;
 pub mod config;
+#[cfg(feature = "container")]
+pub mod container;
 pub mod error;
 pub mod tmux;
 pub mod worktree;
 
 pub use adapter::claude_code::ClaudeCodeAdapter;
 pub use config::ToolConfig;
+#[cfg(feature = "container")]
+pub use container::{ContainerConfig, ContainerRuntime, NetworkMode};
 pub use error::RuntimeError;
 pub use tmux::TmuxRuntime;
 pub use worktree::{WorktreeInfo, WorktreeManager};
