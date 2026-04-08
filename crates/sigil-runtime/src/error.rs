@@ -30,6 +30,14 @@ pub enum RuntimeError {
 
     #[error("timeout waiting for session")]
     Timeout,
+
+    #[cfg(feature = "container")]
+    #[error("container CLI not found (need Apple Containers v0.11+)")]
+    ContainerCliNotFound,
+
+    #[cfg(feature = "container")]
+    #[error("container command failed: {command} — {stderr}")]
+    ContainerCommand { command: String, stderr: String },
 }
 
 impl From<RuntimeError> for CoreError {
