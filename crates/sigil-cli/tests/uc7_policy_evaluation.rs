@@ -13,6 +13,7 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use assert_matches::assert_matches;
 
@@ -25,11 +26,12 @@ use sigil_core::trust::{Capability, Tier, TrustZone};
 use sigil_policy::fatigue::{FatigueGuard, FatigueLevel};
 use sigil_policy::grants::ApprovalGrant;
 use sigil_policy::zone::validate_zone_transition;
+use sigil_policy::grants::NoopGrantStore;
 use sigil_policy::{EvaluatorConfig, PolicyService};
 use time::OffsetDateTime;
 
-fn service() -> PolicyService {
-    PolicyService::new(EvaluatorConfig::default())
+fn service() -> PolicyService<NoopGrantStore> {
+    PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore))
 }
 
 // ═══════════════════════════════════════════════════════════════════
