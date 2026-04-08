@@ -50,6 +50,10 @@ pub enum Commands {
         #[arg(long, default_value = "60")]
         interval: u64,
     },
+
+    /// Run bridge adapters (Telegram, Slack, or both).
+    #[command(subcommand)]
+    Bridge(BridgeCommands),
 }
 
 #[derive(Debug, Subcommand)]
@@ -175,6 +179,18 @@ pub enum WorktreeCommands {
     List,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum BridgeCommands {
+    /// Run only the Telegram bridge.
+    Telegram,
+
+    /// Run only the Slack bridge.
+    Slack,
+
+    /// Run both Telegram and Slack bridges concurrently.
+    All,
+}
+
 /// Expand a leading `~` to the user's home directory.
 fn expand_tilde(path: &str) -> Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -203,6 +219,16 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     std::fs::create_dir_all(&data_dir).context("failed to create data directory")?;
 
+    let audit = audit::init_audit_writer(&data_dir)
+        .await
+        .context("failed to initialize audit writer")?;
+
+    // The bridge command only needs the audit writer — skip Store and
+    // TmuxRuntime initialization so it works without SQLite or tmux.
+    if let Commands::Bridge(cmd) = cli.command {
+        return commands::bridge::run(Arc::clone(&audit), cmd).await;
+    }
+
     let db_str = db_path
         .to_str()
         .context("database path is not valid UTF-8")?;
@@ -212,10 +238,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         .context("failed to open database")?;
 
     let runtime = TmuxRuntime::new("sigil");
-
-    let audit = audit::init_audit_writer(&data_dir)
-        .await
-        .context("failed to initialize audit writer")?;
 
     match cli.command {
         Commands::Status { json } => commands::status::run(&store, json).await,
@@ -229,6 +251,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 interval,
             )
             .await
+        }
+        Commands::Bridge(_) => {
+            // Already handled in the early match above.
+            Ok(())
         }
     }
 }
@@ -522,5 +548,48 @@ mod tests {
             cli.command,
             Commands::Worktree(WorktreeCommands::List)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bridge CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_bridge_telegram() {
+        let cli = Cli::try_parse_from(["sigil", "bridge", "telegram"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Bridge(BridgeCommands::Telegram)
+        ));
+    }
+
+    #[test]
+    fn cli_parses_bridge_slack() {
+        let cli = Cli::try_parse_from(["sigil", "bridge", "slack"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Bridge(BridgeCommands::Slack)
+        ));
+    }
+
+    #[test]
+    fn cli_parses_bridge_all() {
+        let cli = Cli::try_parse_from(["sigil", "bridge", "all"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Bridge(BridgeCommands::All)
+        ));
+    }
+
+    #[test]
+    fn cli_bridge_requires_subcommand() {
+        let cli = Cli::try_parse_from(["sigil", "bridge"]);
+        assert!(cli.is_err());
     }
 }

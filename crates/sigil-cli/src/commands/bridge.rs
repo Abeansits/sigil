@@ -1,0 +1,247 @@
+//! The `bridge` command — run Telegram and/or Slack bridge loops.
+
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use secrecy::SecretString;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+use sigil_audit::AuditLogWriter;
+use sigil_bridge::{
+    IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, default_config,
+};
+use sigil_core::CoreError;
+use sigil_core::PolicyDecision;
+use sigil_core::protocol::BridgeMessage;
+use sigil_core::traits::MessageSink;
+
+use crate::BridgeCommands;
+use crate::audit::log_event;
+
+/// A [`MessageSink`] that logs received messages and forwards them to
+/// the store/conductor. For now it logs via tracing — the conductor
+/// integration will come later when `sigil-conductor` exposes a sink.
+struct LoggingSink {
+    audit: Arc<AuditLogWriter>,
+}
+
+impl MessageSink for LoggingSink {
+    async fn accept(&self, message: BridgeMessage) -> Result<(), CoreError> {
+        info!(
+            origin = ?message.origin,
+            text_len = message.text.len(),
+            target = ?message.target_session,
+            "bridge message received"
+        );
+        log_event(
+            &self.audit,
+            &format!("bridge.message_received: {} chars", message.text.len()),
+            &format!("{:?}", message.origin),
+            PolicyDecision::Allow,
+            message.target_session,
+        )
+        .await;
+        Ok(())
+    }
+}
+
+/// Run the bridge subcommand.
+///
+/// # Errors
+///
+/// Returns an error if required environment variables are missing or
+/// if a client fails to initialize.
+#[allow(clippy::print_stdout)]
+pub async fn run(audit: Arc<AuditLogWriter>, cmd: BridgeCommands) -> Result<()> {
+    match cmd {
+        BridgeCommands::Telegram => run_telegram(audit).await,
+        BridgeCommands::Slack => run_slack(audit).await,
+        BridgeCommands::All => run_all(audit).await,
+    }
+}
+
+/// Build a `CancellationToken` that fires on ctrl-c.
+fn make_cancel_token() -> CancellationToken {
+    let cancel = CancellationToken::new();
+    let child = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            child.cancel();
+        }
+    });
+    cancel
+}
+
+/// Load the identity config. Uses [`default_config`] today — will load
+/// from a config file in the future.
+fn load_identity_config() -> IdentityConfig {
+    default_config()
+}
+
+// ── Telegram ────────────────────────────────────────────────────────
+
+#[allow(clippy::print_stdout)]
+async fn run_telegram(audit: Arc<AuditLogWriter>) -> Result<()> {
+    let token = read_env_secret("SIGIL_TELEGRAM_TOKEN")?;
+    let client =
+        TelegramClient::new(&token).context("failed to build Telegram client")?;
+    let identity = load_identity_config();
+    let mut bridge = TelegramBridge::new(client, identity);
+    let sink = LoggingSink {
+        audit: Arc::clone(&audit),
+    };
+    let cancel = make_cancel_token();
+
+    log_event(
+        &audit,
+        "bridge.telegram.start",
+        "bridge",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
+    info!("telegram bridge starting");
+    println!("Telegram bridge running. Press Ctrl-C to stop.");
+
+    bridge
+        .run(&sink, cancel)
+        .await
+        .context("telegram bridge loop failed")?;
+
+    log_event(
+        &audit,
+        "bridge.telegram.stop",
+        "bridge",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
+    info!("telegram bridge stopped");
+    println!("\nTelegram bridge stopped.");
+    Ok(())
+}
+
+// ── Slack ────────────────────────────────────────────────────────────
+
+#[allow(clippy::print_stdout)]
+async fn run_slack(audit: Arc<AuditLogWriter>) -> Result<()> {
+    let app_token = read_env_secret("SIGIL_SLACK_APP_TOKEN")?;
+    let bot_token = read_env_secret("SIGIL_SLACK_BOT_TOKEN")?;
+    let client =
+        SlackClient::new(&bot_token, &app_token).context("failed to build Slack client")?;
+    let identity = load_identity_config();
+    let mut bridge = SlackBridge::new(client, identity);
+    let sink = LoggingSink {
+        audit: Arc::clone(&audit),
+    };
+    let cancel = make_cancel_token();
+
+    log_event(
+        &audit,
+        "bridge.slack.start",
+        "bridge",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
+    info!("slack bridge starting");
+    println!("Slack bridge running. Press Ctrl-C to stop.");
+
+    bridge
+        .run(&sink, cancel)
+        .await
+        .context("slack bridge loop failed")?;
+
+    log_event(
+        &audit,
+        "bridge.slack.stop",
+        "bridge",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
+    info!("slack bridge stopped");
+    println!("\nSlack bridge stopped.");
+    Ok(())
+}
+
+// ── Both ─────────────────────────────────────────────────────────────
+
+#[allow(clippy::print_stdout)]
+async fn run_all(audit: Arc<AuditLogWriter>) -> Result<()> {
+    let tg_token = read_env_secret("SIGIL_TELEGRAM_TOKEN")?;
+    let slack_app = read_env_secret("SIGIL_SLACK_APP_TOKEN")?;
+    let slack_bot = read_env_secret("SIGIL_SLACK_BOT_TOKEN")?;
+
+    let tg_client =
+        TelegramClient::new(&tg_token).context("failed to build Telegram client")?;
+    let slack_client =
+        SlackClient::new(&slack_bot, &slack_app).context("failed to build Slack client")?;
+
+    let identity = load_identity_config();
+    let mut tg_bridge = TelegramBridge::new(tg_client, identity.clone());
+    let mut slack_bridge = SlackBridge::new(slack_client, identity);
+
+    let tg_sink = LoggingSink {
+        audit: Arc::clone(&audit),
+    };
+    let slack_sink = LoggingSink {
+        audit: Arc::clone(&audit),
+    };
+
+    let cancel = make_cancel_token();
+
+    log_event(
+        &audit,
+        "bridge.all.start",
+        "bridge",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
+    info!("starting telegram and slack bridges concurrently");
+    println!("Telegram + Slack bridges running. Press Ctrl-C to stop.");
+
+    let tg_cancel = cancel.clone();
+    let slack_cancel = cancel;
+
+    let (tg_result, slack_result) = tokio::join!(
+        tg_bridge.run(&tg_sink, tg_cancel),
+        slack_bridge.run(&slack_sink, slack_cancel),
+    );
+
+    if let Err(e) = &tg_result {
+        tracing::error!(error = %e, "telegram bridge failed");
+    }
+    if let Err(e) = &slack_result {
+        tracing::error!(error = %e, "slack bridge failed");
+    }
+
+    log_event(
+        &audit,
+        "bridge.all.stop",
+        "bridge",
+        PolicyDecision::Allow,
+        None,
+    )
+    .await;
+    info!("all bridges stopped");
+    println!("\nBridges stopped.");
+
+    tg_result.context("telegram bridge failed")?;
+    slack_result.context("slack bridge failed")?;
+    Ok(())
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Read a required secret from an environment variable.
+fn read_env_secret(name: &str) -> Result<SecretString> {
+    let val = std::env::var(name)
+        .with_context(|| format!("{name} environment variable is required"))?;
+    if val.is_empty() {
+        bail!("{name} environment variable must not be empty");
+    }
+    Ok(SecretString::from(val))
+}
