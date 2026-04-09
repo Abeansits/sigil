@@ -15,8 +15,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use sigil_core::error::CoreError;
 use sigil_core::protocol::ConductorMessage;
+use sigil_core::session::IdentitySpec;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionState};
-use sigil_core::traits::SessionRuntime;
+use sigil_core::traits::{LifecycleHooks, SessionRuntime};
 #[cfg(feature = "container")]
 use sigil_runtime::ContainerRuntime;
 use sigil_runtime::TmuxRuntime;
@@ -79,6 +80,10 @@ pub enum Commands {
     /// Audit log operations.
     #[command(subcommand)]
     Audit(AuditCommands),
+
+    /// Identity file management.
+    #[command(subcommand)]
+    Identity(IdentityCommands),
 }
 
 #[derive(Debug, Subcommand)]
@@ -225,6 +230,21 @@ pub enum BridgeCommands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum IdentityCommands {
+    /// Reload identity files into an active session.
+    Reload {
+        /// Session name or ID.
+        name: String,
+    },
+
+    /// Tell a session to snapshot state before compaction.
+    Snapshot {
+        /// Session name or ID.
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum AuditCommands {
     /// Verify the HMAC chain in an audit log file.
     Verify {
@@ -313,6 +333,23 @@ impl SessionRuntime for RuntimeBackend {
     }
 }
 
+impl LifecycleHooks for RuntimeBackend {
+    async fn register_identity_hooks(
+        &self,
+        handle: &SessionHandle,
+        spec: &IdentitySpec,
+    ) -> Result<(), CoreError> {
+        match self {
+            Self::Tmux(r) => r.register_identity_hooks(handle, spec).await,
+            #[cfg(feature = "container")]
+            Self::Container(_) => {
+                // Containers don't support lifecycle hooks in Phase 1.
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Construct the runtime backend based on the user's choice.
 #[allow(clippy::unnecessary_wraps)]
 fn build_runtime(choice: RuntimeChoice) -> Result<RuntimeBackend> {
@@ -390,6 +427,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::Identity(cmd) => commands::identity::run(&store, &runtime, &audit, cmd).await,
         Commands::Bridge(_) | Commands::Audit(_) => {
             // Already handled in the early match above.
             Ok(())
@@ -837,6 +875,48 @@ mod tests {
     #[test]
     fn cli_audit_requires_subcommand() {
         let cli = Cli::try_parse_from(["sigil", "audit"]);
+        assert!(cli.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_identity_reload() {
+        let cli = Cli::try_parse_from(["sigil", "identity", "reload", "my-session"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Identity(IdentityCommands::Reload { name }) => {
+                assert_eq!(name, "my-session");
+            }
+            other => panic!("expected Identity Reload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_identity_snapshot() {
+        let cli = Cli::try_parse_from(["sigil", "identity", "snapshot", "my-session"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Identity(IdentityCommands::Snapshot { name }) => {
+                assert_eq!(name, "my-session");
+            }
+            other => panic!("expected Identity Snapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_identity_requires_subcommand() {
+        let cli = Cli::try_parse_from(["sigil", "identity"]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn cli_identity_reload_requires_name() {
+        let cli = Cli::try_parse_from(["sigil", "identity", "reload"]);
         assert!(cli.is_err());
     }
 }

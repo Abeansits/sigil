@@ -143,7 +143,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// Simulates a crash between ALTER TABLE and schema_version INSERT:
+    /// Simulates a crash between ALTER TABLE and `schema_version` INSERT:
     /// the column exists but V002 is not recorded. Re-running migrations
     /// must succeed (idempotent ALTER).
     #[tokio::test]
