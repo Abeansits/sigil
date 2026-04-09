@@ -4,6 +4,7 @@
 //! and routes subcommands to the appropriate handler in `commands/`.
 
 pub mod audit;
+pub mod banner;
 pub mod commands;
 
 use std::path::PathBuf;
@@ -33,7 +34,7 @@ pub enum RuntimeChoice {
 
 /// AI agent session orchestration.
 #[derive(Parser)]
-#[command(name = "sigil", about = "AI agent session orchestration")]
+#[command(name = "sigil", about = "AI agent session orchestration", version, long_version = banner::LONG_VERSION)]
 pub struct Cli {
     /// `SQLite` database path.
     #[arg(long, default_value = "~/.sigil/sigil.db", env = "SIGIL_DB")]
