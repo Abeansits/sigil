@@ -9,6 +9,9 @@ license.workspace = true
 name = "sigil"
 path = "src/main.rs"
 
+[features]
+container = ["sigil-runtime/container"]
+
 [dependencies]
 sigil-core = { path = "../sigil-core" }
 sigil-audit = { path = "../sigil-audit" }

@@ -15,7 +15,6 @@ use sigil_core::protocol::ConductorMessage;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionRecord, SessionState, ToolKind};
 use sigil_core::traits::SessionRuntime;
 use sigil_core::trust::ExecutionClass;
-use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
 use crate::SessionCommands;
@@ -27,9 +26,9 @@ use crate::audit::log_event;
 ///
 /// Returns an error if any session operation fails.
 #[allow(clippy::print_stdout)]
-pub async fn run(
+pub async fn run<R: SessionRuntime>(
     store: &Store,
-    runtime: &TmuxRuntime,
+    runtime: &R,
     audit: &Arc<AuditLogWriter>,
     cmd: SessionCommands,
 ) -> Result<()> {
@@ -264,9 +263,9 @@ async fn create(
 }
 
 #[allow(clippy::too_many_arguments, clippy::print_stdout)]
-async fn launch(
+async fn launch<R: SessionRuntime>(
     store: &Store,
-    runtime: &TmuxRuntime,
+    runtime: &R,
     audit: &AuditLogWriter,
     path: &str,
     title: &str,
@@ -318,9 +317,9 @@ async fn launch(
 }
 
 #[allow(clippy::print_stdout)]
-async fn start(
+async fn start<R: SessionRuntime>(
     store: &Store,
-    runtime: &TmuxRuntime,
+    runtime: &R,
     audit: &AuditLogWriter,
     name: &str,
 ) -> Result<()> {
@@ -363,9 +362,9 @@ async fn start(
 }
 
 #[allow(clippy::print_stdout)]
-async fn stop(
+async fn stop<R: SessionRuntime>(
     store: &Store,
-    runtime: &TmuxRuntime,
+    runtime: &R,
     audit: &AuditLogWriter,
     name: &str,
 ) -> Result<()> {
@@ -389,9 +388,9 @@ async fn stop(
 }
 
 #[allow(clippy::print_stdout)]
-async fn restart(
+async fn restart<R: SessionRuntime>(
     store: &Store,
-    runtime: &TmuxRuntime,
+    runtime: &R,
     audit: &AuditLogWriter,
     name: &str,
 ) -> Result<()> {
@@ -434,9 +433,9 @@ async fn restart(
 }
 
 #[allow(clippy::print_stdout)]
-async fn send(
+async fn send<R: SessionRuntime>(
     store: &Store,
-    runtime: &TmuxRuntime,
+    runtime: &R,
     audit: &AuditLogWriter,
     name: &str,
     message: &str,
@@ -504,7 +503,12 @@ async fn send(
 }
 
 #[allow(clippy::print_stdout)]
-async fn output(store: &Store, runtime: &TmuxRuntime, name: &str, quiet: bool) -> Result<()> {
+async fn output<R: SessionRuntime>(
+    store: &Store,
+    runtime: &R,
+    name: &str,
+    quiet: bool,
+) -> Result<()> {
     let session = resolve_session(store, name).await?;
     let handle = record_to_handle(&session);
 

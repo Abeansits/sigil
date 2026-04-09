@@ -10,10 +10,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
+use sigil_core::error::CoreError;
+use sigil_core::protocol::ConductorMessage;
+use sigil_core::session::{SessionConfig, SessionHandle, SessionState};
+use sigil_core::traits::SessionRuntime;
+#[cfg(feature = "container")]
+use sigil_runtime::ContainerRuntime;
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
+
+/// Selects the session runtime backend.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum RuntimeChoice {
+    /// tmux-based sessions (default).
+    #[default]
+    Tmux,
+    /// Apple Container VM sessions.
+    Container,
+}
 
 /// AI agent session orchestration.
 #[derive(Parser)]
@@ -22,6 +38,10 @@ pub struct Cli {
     /// `SQLite` database path.
     #[arg(long, default_value = "~/.sigil/sigil.db", env = "SIGIL_DB")]
     pub db: String,
+
+    /// Session runtime backend.
+    #[arg(long, value_enum, default_value_t, env = "SIGIL_RUNTIME")]
+    pub runtime: RuntimeChoice,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -218,6 +238,95 @@ pub(crate) fn expand_tilde(path: &str) -> Result<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Runtime backend dispatch
+// ---------------------------------------------------------------------------
+
+/// Runtime backend that delegates to the chosen session runtime.
+pub(crate) enum RuntimeBackend {
+    Tmux(TmuxRuntime),
+    #[cfg(feature = "container")]
+    Container(Box<ContainerRuntime>),
+}
+
+impl RuntimeBackend {
+    /// Verify that the chosen runtime's prerequisites are met.
+    async fn preflight_check(&self) -> Result<()> {
+        match self {
+            Self::Tmux(_) => TmuxRuntime::check_tmux().await.context("tmux is required"),
+            #[cfg(feature = "container")]
+            Self::Container(_) => ContainerRuntime::check_container_cli()
+                .await
+                .context("Apple Containers CLI is required"),
+        }
+    }
+}
+
+impl SessionRuntime for RuntimeBackend {
+    async fn launch(&self, config: &SessionConfig) -> Result<SessionHandle, CoreError> {
+        match self {
+            Self::Tmux(r) => r.launch(config).await,
+            #[cfg(feature = "container")]
+            Self::Container(r) => r.launch(config).await,
+        }
+    }
+
+    async fn send(&self, handle: &SessionHandle, msg: ConductorMessage) -> Result<(), CoreError> {
+        match self {
+            Self::Tmux(r) => r.send(handle, msg).await,
+            #[cfg(feature = "container")]
+            Self::Container(r) => r.send(handle, msg).await,
+        }
+    }
+
+    async fn read_output(&self, handle: &SessionHandle) -> Result<String, CoreError> {
+        match self {
+            Self::Tmux(r) => r.read_output(handle).await,
+            #[cfg(feature = "container")]
+            Self::Container(r) => r.read_output(handle).await,
+        }
+    }
+
+    async fn status(&self, handle: &SessionHandle) -> Result<SessionState, CoreError> {
+        match self {
+            Self::Tmux(r) => r.status(handle).await,
+            #[cfg(feature = "container")]
+            Self::Container(r) => r.status(handle).await,
+        }
+    }
+
+    async fn stop(&self, handle: &SessionHandle) -> Result<(), CoreError> {
+        match self {
+            Self::Tmux(r) => r.stop(handle).await,
+            #[cfg(feature = "container")]
+            Self::Container(r) => r.stop(handle).await,
+        }
+    }
+}
+
+/// Construct the runtime backend based on the user's choice.
+#[allow(clippy::unnecessary_wraps)]
+fn build_runtime(choice: RuntimeChoice) -> Result<RuntimeBackend> {
+    match choice {
+        RuntimeChoice::Tmux => Ok(RuntimeBackend::Tmux(TmuxRuntime::new("sigil"))),
+        RuntimeChoice::Container => {
+            #[cfg(feature = "container")]
+            {
+                Ok(RuntimeBackend::Container(Box::new(
+                    ContainerRuntime::with_defaults(),
+                )))
+            }
+            #[cfg(not(feature = "container"))]
+            {
+                anyhow::bail!(
+                    "container runtime requires the 'container' feature \
+                     (rebuild with --features container)"
+                )
+            }
+        }
+    }
+}
+
 /// Run the CLI, routing to the appropriate subcommand handler.
 ///
 /// # Errors
@@ -238,12 +347,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         .context("failed to initialize audit writer")?;
 
     // The bridge command only needs the audit writer — skip Store and
-    // TmuxRuntime initialization so it works without SQLite or tmux.
+    // runtime initialization so it works without SQLite or tmux.
     if let Commands::Bridge(cmd) = cli.command {
         return commands::bridge::run(Arc::clone(&audit), cmd).await;
     }
 
-    // The audit command is self-contained — no Store or TmuxRuntime needed.
+    // The audit command is self-contained — no Store or runtime needed.
     if let Commands::Audit(cmd) = cli.command {
         return commands::audit::run(cmd).await;
     }
@@ -256,13 +365,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         .await
         .context("failed to open database")?;
 
-    let runtime = TmuxRuntime::new("sigil");
+    let runtime = build_runtime(cli.runtime)?;
 
     match cli.command {
         Commands::Status { json } => commands::status::run(&store, json).await,
         Commands::Session(cmd) => commands::session::run(&store, &runtime, &audit, cmd).await,
         Commands::Worktree(cmd) => commands::worktree::run(&store, cmd).await,
         Commands::Conductor { interval } => {
+            runtime.preflight_check().await?;
             commands::conductor::run(
                 Arc::new(store),
                 Arc::new(runtime),
@@ -456,6 +566,36 @@ mod tests {
         assert!(cli.is_ok());
         let cli = cli.expect("parse should succeed");
         assert!(matches!(cli.command, Commands::Conductor { interval: 60 }));
+    }
+
+    #[test]
+    fn cli_runtime_defaults_to_tmux() {
+        let cli = Cli::try_parse_from(["sigil", "status"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(cli.runtime, RuntimeChoice::Tmux));
+    }
+
+    #[test]
+    fn cli_parses_runtime_tmux_explicit() {
+        let cli = Cli::try_parse_from(["sigil", "--runtime", "tmux", "status"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(cli.runtime, RuntimeChoice::Tmux));
+    }
+
+    #[test]
+    fn cli_parses_runtime_container() {
+        let cli = Cli::try_parse_from(["sigil", "--runtime", "container", "status"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(cli.runtime, RuntimeChoice::Container));
+    }
+
+    #[test]
+    fn cli_rejects_invalid_runtime() {
+        let cli = Cli::try_parse_from(["sigil", "--runtime", "docker", "status"]);
+        assert!(cli.is_err());
     }
 
     #[test]

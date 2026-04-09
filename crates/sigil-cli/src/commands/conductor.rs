@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use sigil_audit::AuditLogWriter;
 use sigil_conductor::Conductor;
 use sigil_core::PolicyDecision;
-use sigil_runtime::TmuxRuntime;
+use sigil_core::traits::SessionRuntime;
 use sigil_store::Store;
 use tracing::{error, info};
 
@@ -24,16 +24,12 @@ use crate::audit::log_event;
 ///
 /// Returns an error if the initial tmux check fails.
 #[allow(clippy::print_stdout)]
-pub async fn run(
+pub async fn run<R: SessionRuntime>(
     store: Arc<Store>,
-    runtime: Arc<TmuxRuntime>,
+    runtime: Arc<R>,
     audit: Arc<AuditLogWriter>,
     interval: u64,
 ) -> Result<()> {
-    TmuxRuntime::check_tmux()
-        .await
-        .context("tmux is required for the conductor")?;
-
     let conductor = Conductor::new(
         Arc::clone(&store),
         Arc::clone(&runtime),
