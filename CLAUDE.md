@@ -7,7 +7,9 @@
 - typed authority (`ActionRequest`, `Action`, `ActionOrigin`)
 - policy evaluation and trust-zone checks
 - HMAC-chained audit logging
-- tmux-backed session runtime
+- tmux and container-backed session runtimes
+- domain-filtering network proxy for containers
+- MCP-based policy-mediated agent IPC
 - supporting bridge and conductor crates
 
 `docs/ARCHITECTURE.md` is the current architecture reference.
@@ -26,7 +28,7 @@ sigil/
     sigil-audit/       # Append-only JSONL audit writer + verifier
     sigil-policy/      # Tier/zone evaluation, normalization, fatigue guard, grant model
     sigil-store/       # SQLite store for sessions and approval grants
-    sigil-runtime/     # tmux runtime, tool adapters, worktree manager
+    sigil-runtime/     # tmux + container runtimes, domain proxy, MCP socket, tool adapters, worktree manager
     sigil-conductor/   # Heartbeat, reconciliation, bridge message handling
     sigil-bridge/      # Slack/Telegram parsing, identity resolution, routing, live loops
     sigil-mcp/         # Host-side MCP server for policy-mediated agent actions
@@ -44,7 +46,7 @@ sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-core, sigil-runt
 sigil-conductor → sigil-audit, sigil-core, sigil-policy, sigil-runtime, sigil-store
 sigil-bridge → sigil-audit, sigil-core, sigil-policy
 sigil-mcp → sigil-core, sigil-policy
-sigil-runtime → sigil-core, sigil-mcp [container], sigil-policy
+sigil-runtime → sigil-core, sigil-policy, sigil-audit [container], sigil-mcp [container]
 sigil-store → sigil-core, sigil-policy
 sigil-policy → sigil-audit, sigil-core
 sigil-audit → sigil-core
@@ -57,11 +59,16 @@ Notes:
 - `sigil-cli` has test-only dependencies on `sigil-policy`.
 - `sigil-bridge` and `sigil-conductor` still do not depend on each other directly.
 - `sigil-store` depends on `sigil-policy` because it implements the approval-grant store trait.
-- `sigil-runtime` depends on `sigil-mcp` behind the `container` feature gate (MCP socket server for containers).
+- `sigil-runtime` depends on `sigil-mcp` and `sigil-audit` behind the `container` feature gate (MCP socket server and audit-logged proxy for containers).
 
 ## Current Implementation Notes
 
-- Runtime backend is tmux-only today. Container runtime research exists in `docs/CONTAINER-POC.md` but no container backend is implemented.
+- Two runtime backends: `TmuxRuntime` (default) and `ContainerRuntime` (Apple Containers, behind the `container` feature gate).
+- `ContainerRuntime` launches sessions in Apple Container VMs with VirtioFS-mounted worktrees, injected env vars, and optional MCP/proxy sockets.
+- `NetworkMode` supports `Internal` (no internet), `Full`, and `Filtered { allowlist }` (domain-level proxy).
+- `DomainProxy` runs on the host, listens on a Unix socket published into the container, and enforces a domain allowlist (HTTP + CONNECT). Raw IPs are always denied.
+- MCP socket server (`mcp_socket.rs`) auto-starts when `ContainerRuntime` launches with MCP enabled. Agent connects via `/tmp/sigil-mcp.sock` inside the container; JSON-RPC requests pass through the policy evaluator on the host.
+- Agent container image defined in `container/Dockerfile` (Node.js 22, Claude Code CLI, Codex CLI, git). Build with `scripts/build-agent-image.sh`.
 - The CLI exposes six top-level commands: `status`, `session`, `worktree`, `conductor`, `bridge`, and `audit`.
 - `sigil bridge` subcommands: `telegram`, `slack`, `all`.
 - `sigil audit verify` validates HMAC chain integrity from the CLI.
@@ -71,7 +78,7 @@ Notes:
 - The conductor is generic over `SessionRuntime` (not hardcoded to `TmuxRuntime`).
 - `strip_ansi` panics on malformed input rather than silently falling back.
 - Grant prefix matching includes path boundary checks.
-- `sigil-mcp` provides a host-side MCP server for policy-mediated agent actions (JSON-RPC over stdin/stdout).
+- `sigil-mcp` provides a host-side MCP server for policy-mediated agent actions (JSON-RPC over stdin/stdout or Unix socket).
 
 ## Design Rules That Still Hold
 
@@ -102,7 +109,8 @@ Workspace lint highlights:
 
 - Unit tests live primarily in `#[cfg(test)]` modules inside each crate.
 - Integration tests currently live in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
-- The workspace currently registers 411 tests.
+- Property-based tests using `proptest` cover `sigil-core` (action protocol), `sigil-audit` (HMAC chain), and `sigil-policy` (evaluator, grants, normalization, zones).
+- The workspace currently registers 439 tests.
 
 Run these before shipping changes:
 

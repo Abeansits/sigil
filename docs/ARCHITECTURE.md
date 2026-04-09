@@ -30,13 +30,13 @@ sigil/
 | `sigil-audit` | HMAC-chained JSONL writer and read-only verifier |
 | `sigil-policy` | Tier and zone evaluation, normalization, fatigue guard, grant domain model |
 | `sigil-store` | SQLite migrations, session CRUD, approval grant persistence and cleanup |
-| `sigil-runtime` | tmux-backed `SessionRuntime`, Claude Code adapter, worktree manager |
+| `sigil-runtime` | tmux + container `SessionRuntime` backends, domain proxy, MCP socket, Claude Code adapter, worktree manager |
 | `sigil-conductor` | Heartbeat scans, reconciliation, status formatting, bridge message handling |
 | `sigil-bridge` | Telegram/Slack parsing, identity allowlisting, rate limiting, routing, live loops |
 | `sigil-mcp` | Host-side MCP server for policy-mediated agent actions (JSON-RPC over stdin/stdout) |
 | `sigil-cli` | `sigil` binary, clap commands, bridge runner, audit verification, conductor runner |
 
-Container-backed runtime research exists in `docs/CONTAINER-POC.md` but no container backend crate is implemented yet.
+`ContainerRuntime` (feature-gated behind `container`) runs sessions in Apple Container VMs. The domain-filtering proxy and MCP socket server live in the same crate. The agent container image is defined in `container/Dockerfile`.
 
 ## Dependency Graph
 
@@ -47,7 +47,7 @@ sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-core, sigil-runt
 sigil-conductor → sigil-audit, sigil-core, sigil-policy, sigil-runtime, sigil-store
 sigil-bridge → sigil-audit, sigil-core, sigil-policy
 sigil-mcp → sigil-core, sigil-policy
-sigil-runtime → sigil-core, sigil-policy
+sigil-runtime → sigil-core, sigil-policy, sigil-audit [container], sigil-mcp [container]
 sigil-store → sigil-core, sigil-policy
 sigil-policy → sigil-audit, sigil-core
 sigil-audit → sigil-core
@@ -60,7 +60,7 @@ Notes:
 - `sigil-cli` has test-only dependencies on `sigil-policy`.
 - `sigil-bridge` and `sigil-conductor` remain decoupled at compile time; bridge code targets `MessageSink`.
 - `sigil-store` depends on `sigil-policy` because it implements the `GrantStore` trait and stores approval grants.
-- `sigil-mcp` is a standalone library; nothing in the workspace depends on it yet.
+- `sigil-runtime` depends on `sigil-mcp` and `sigil-audit` behind the `container` feature gate (MCP socket server + audit-logged proxy).
 
 ## Core Runtime Model
 
@@ -115,6 +115,53 @@ Current principal defaults:
 - agent-generated requests resolve to `T1`
 - system heartbeat resolves to `T1`
 
+## Container Runtime
+
+### ContainerRuntime
+
+`ContainerRuntime` implements `SessionRuntime` using the Apple `container` CLI. Each session gets an isolated VM with:
+
+- VirtioFS-mounted worktree at `/workspace`
+- Injected environment variables (API keys, session ID)
+- Optional Unix socket mounts for proxy and MCP IPC
+
+Feature-gated behind `container` in `sigil-runtime`.
+
+### Network Isolation
+
+Three modes via `NetworkMode`:
+
+- `Internal` — no internet (default). Container runs on `--internal` network.
+- `Full` — unrestricted internet access.
+- `Filtered { allowlist }` — internal network with a host-side domain-filtering proxy.
+
+### Domain Proxy
+
+`DomainProxy` runs on the host, listens on a Unix socket published into the container at `/tmp/proxy.sock`. The container's `HTTP_PROXY`/`HTTPS_PROXY` env vars point to this socket. The proxy:
+
+- Supports HTTP CONNECT (HTTPS tunneling) and plain HTTP forwarding
+- Checks each outbound connection against a `DomainAllowlist`
+- Denies raw IP addresses to prevent allowlist bypass
+- Logs every connection attempt as an auditable event
+- Enforces concurrent connection limits (128)
+
+### MCP Socket IPC
+
+When `ContainerRuntime` is configured with `.with_mcp(grants)`, launching a session auto-starts an MCP server on a Unix socket at `/tmp/sigil-mcp-{title}.sock` (host side), published into the container at `/tmp/sigil-mcp.sock`.
+
+```text
+Agent in container
+  → /tmp/sigil-mcp.sock (Unix socket)
+  → host-side MCP server (tokio task)
+  → sigil-mcp handle_stream (JSON-RPC → policy evaluator → response)
+```
+
+The `McpSpawner` trait type-erases the `GrantStore` generic so `ContainerRuntime` stays non-generic.
+
+### Agent Image
+
+The agent container image (`container/Dockerfile`) provides Node.js 22, Claude Code CLI, Codex CLI, git, curl, python3, and build-essential. No secrets are baked in — API keys are injected at runtime. Build with `scripts/build-agent-image.sh`, smoke-test with `scripts/test-agent-image.sh`.
+
 ## Current Data Flow
 
 ### CLI Path
@@ -128,14 +175,26 @@ sigil command
   -> logs session/conductor audit events
 ```
 
-### Session Path
+### Session Path (tmux)
 
 ```text
 sigil-cli session <subcommand>
-  -> sigil-store resolves SessionRecord
-  -> sigil-runtime::TmuxRuntime launches/sends/reads/stops
-  -> session state persists in SQLite
-  -> audit event appended to audit.jsonl
+  → sigil-store resolves SessionRecord
+  → sigil-runtime::TmuxRuntime launches/sends/reads/stops
+  → session state persists in SQLite
+  → audit event appended to audit.jsonl
+```
+
+### Session Path (container)
+
+```text
+ContainerRuntime::launch()
+  → start domain proxy (if Filtered) on Unix socket
+  → start MCP server (if enabled) on Unix socket
+  → `container run` with VirtioFS mount, socket publishes, env injection
+  → agent connects to MCP socket for policy-mediated actions
+  → agent routes HTTP through proxy socket for domain-filtered internet
+  → stop: shuts down proxy + MCP, stops container, cleans up
 ```
 
 ### Bridge Library Path
@@ -237,17 +296,21 @@ Implemented subcommands:
 - grant prefix matching with path boundary checks
 - `strip_ansi` panics on malformed input (no silent fallback)
 - host-side MCP server for policy-mediated agent actions (`sigil-mcp`)
+- container runtime backend (`ContainerRuntime` for Apple Containers, behind `container` feature gate)
+- domain-filtering forward proxy for container network isolation (`DomainProxy`)
+- MCP Unix socket IPC wired into container lifecycle
+- agent container image (`container/Dockerfile`) with Claude Code + Codex
+- property-based tests with `proptest` across core, audit, and policy crates
 
 ### Not implemented in this workspace
 
-- container runtime backend (research in `docs/CONTAINER-POC.md`)
 - Keychain-backed audit key management
 - workflow-bundle approvals
 - WebFetch/content sanitization pipeline
 
 ## Verification Snapshot
 
-The workspace currently registers 411 tests across unit and integration suites in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
+The workspace currently registers 439 tests across unit and integration suites in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
 
 Recommended verification commands:
 

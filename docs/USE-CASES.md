@@ -163,6 +163,72 @@ sigil audit verify
 - exits successfully when the audit log chain is intact
 - reports a clear error when the log has been tampered with or truncated
 
+## UC9 — Container Session Lifecycle
+
+Requires macOS 26.0+ with Apple Silicon and `container` CLI installed.
+
+```bash
+# Build the agent image (one-time)
+scripts/build-agent-image.sh
+
+# The ContainerRuntime is used programmatically via the library.
+# Example: launch a container session with domain-filtered networking
+# and MCP-based policy mediation.
+
+use sigil_runtime::{ContainerRuntime, ContainerConfig, NetworkMode};
+
+let config = ContainerConfig {
+    image: "sigil-agent:latest".into(),
+    network: NetworkMode::Filtered {
+        allowlist: vec![".anthropic.com".into(), ".github.com".into()],
+    },
+    ..Default::default()
+};
+
+let runtime = ContainerRuntime::with_audit(config, audit.clone())
+    .with_mcp(grants.clone());
+
+// launch(), send(), output(), stop() work through SessionRuntime trait
+```
+
+**Verify:**
+
+- container VM starts with VirtioFS-mounted worktree at `/workspace`
+- domain proxy rejects connections to unlisted domains
+- domain proxy denies raw IP addresses
+- MCP socket is reachable inside the container at `/tmp/sigil-mcp.sock`
+- agent tool calls go through the policy evaluator (T0 allowed, T3 denied for agents)
+- `stop` shuts down proxy, MCP server, and container; cleans up sockets
+
+## UC10 — MCP Policy-Mediated Agent Actions
+
+Within a container session with MCP enabled:
+
+```bash
+# Inside the container, the agent connects to the MCP socket:
+#   /tmp/sigil-mcp.sock
+
+# JSON-RPC initialize handshake
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"session_id":"agent-01"}}
+
+# List available tools
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+
+# Call an allowed tool (T0 — list_sessions)
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_sessions"}}
+
+# Call a denied tool (T3 — ReadHostFile, agent ceiling is T1)
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"request_approval","arguments":{"action":"ReadHostFile","path":"/etc/shadow"}}}
+```
+
+**Verify:**
+
+- `initialize` returns server capabilities and tool schemas
+- `tools/list` returns `request_approval`, `list_sessions`, `get_session_status`, `send_message`, `read_session_output`
+- `list_sessions` (T0) succeeds with `status: "Allowed"`
+- `request_approval` for `ReadHostFile` (T3) is denied by agent ceiling
+- calls without `initialize` return a JSON-RPC error
+
 ## Current Notes
 
 - The CLI exposes `status`, `session`, `worktree`, `conductor`, `bridge`, and `audit`.
@@ -171,3 +237,5 @@ sigil audit verify
 - Bridge loops are exposed through `sigil bridge telegram/slack/all`.
 - The policy evaluator consults stored approval grants and the `FatigueGuard` is wired into the approval flow.
 - The conductor is generic over `SessionRuntime`.
+- `ContainerRuntime` implements `SessionRuntime` for Apple Containers (behind `container` feature gate).
+- Container sessions support domain-filtered networking via `DomainProxy` and MCP-based policy mediation via Unix socket IPC.
