@@ -143,6 +143,25 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Simulates a crash between ALTER TABLE and schema_version INSERT:
+    /// the column exists but V002 is not recorded. Re-running migrations
+    /// must succeed (idempotent ALTER).
+    #[tokio::test]
+    async fn v002_migration_is_idempotent_after_partial_apply() {
+        let store = Store::new_in_memory().await.expect("init");
+
+        // Simulate crash: delete the V002 version record so next startup
+        // retries the migration while the column already exists.
+        sqlx::query("DELETE FROM schema_version WHERE version = 2")
+            .execute(&store.pool)
+            .await
+            .expect("delete v002 record");
+
+        // Re-run migrations — should not fail on duplicate column.
+        let result = migrate::run_migrations(&store.pool).await;
+        assert!(result.is_ok());
+    }
+
     // -- Session CRUD tests --
 
     #[tokio::test]
