@@ -1,6 +1,19 @@
 # sigil
 
+```
+     _       _ _
+ ___(_) __ _(_) |
+/ __| |/ _` | | |
+\__ \ | (_| | | |
+|___/_|\__, |_|_|
+       |___/
+```
+
 A security-first Rust workspace for managing AI agent sessions. It replaces the older Go + Python split with one typed, testable workspace built around policy checks, audit logging, and sandboxed orchestration via tmux or Apple Containers.
+
+## The Name
+
+*Sigil* comes from Latin *sigillum* — a seal of authority. In sigil, every orchestrated action carries typed authority through `ActionRequest`, and every decision is sealed into an HMAC-chained audit trail. The name reflects what the tool enforces: nothing runs without a seal of approval.
 
 ## Getting Started
 

@@ -30,6 +30,8 @@ pub async fn run<R: SessionRuntime>(
     audit: Arc<AuditLogWriter>,
     interval: u64,
 ) -> Result<()> {
+    println!("{}\n", crate::banner::BANNER);
+
     let conductor = Conductor::new(
         Arc::clone(&store),
         Arc::clone(&runtime),
