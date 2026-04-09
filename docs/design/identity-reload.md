@@ -153,30 +153,30 @@ Context compaction happens
 - Does not handle memory consolidation (that's the Dreamer, separate concern)
 - Does not add embedding retrieval or vector search
 
-## Open Questions
+## Design Decisions (Resolved Apr 9, 2026)
 
-1. **Hook installation location:** `.claude/settings.local.json` in the project dir? Or the user-level `~/.claude/settings.json`? Project-level is cleaner (scoped to the session) but requires write access to the project directory.
+1. **Hook installation location:** Project-level (`.claude/settings.local.json`). Committable with the repo — the feature travels with the project. Investigate how agent-deck handles hooks for reference.
 
-2. **Session ID stability:** The hook needs a stable session identifier. Currently sessions have ULIDs in the store. If the store is recreated, the ID changes. Should the hook use session title instead?
+2. **Session identifier:** ULID from the sigil store. Stable in any normal scenario (SQLite persists on disk). Only lost if the database is manually deleted, which is an edge case. Hook is written at session creation time when the ULID is known. Multiple sessions per path is a valid pattern (research + build, review + implement), so path alone is not sufficient.
 
-3. **Reload message format:** Should the reload message be configurable, or is a hardcoded imperative message good enough? Leaning toward hardcoded — simpler.
+3. **Reload message format:** Hardcoded imperative message. Simple and easy. The agent just needs a clear instruction, not a custom prompt. Less to configure, less to break.
 
-4. **PreCompact snapshot:** Should we also register a PreCompact hook that snapshots `state.json` before compaction? The research suggests this is valuable — capture current state while it's still in context. This pairs naturally with identity reload.
+4. **PreCompact snapshot:** Yes, included in Phase 1. Capture current state to disk while the agent still has full context, then reload the fresh snapshot after compaction.
 
 ## Implementation Plan
 
-### Phase 1: Core + Claude Code backend
+### Phase 1: Core + Claude Code backend + PreCompact
 - Add `IdentitySpec` and `LifecycleEvent` to `sigil-core`
 - Add `identity` field to `SessionConfig` and `SessionRecord`
 - Implement `LifecycleHooks` for `TmuxRuntime` (writes Claude Code hooks)
-- Add `sigil identity reload` CLI subcommand
+- Add `sigil identity reload` CLI subcommand (uses ULID)
+- Add `sigil identity snapshot` CLI subcommand (PreCompact state capture)
+- Register both PostCompact (reload) and PreCompact (snapshot) hooks
 - Add `.sigil/config.toml` parsing
-- Integration test: create session with identity spec, simulate PostCompact, verify reload message sent
+- Integration test: create session with identity spec, simulate PreCompact + PostCompact, verify snapshot written and reload message sent
 
-### Phase 2: Container backend + PreCompact
+### Phase 2: Container backend
 - Implement identity reload for `ContainerRuntime`
-- Add PreCompact state snapshot hook
-- Add `sigil identity snapshot` CLI subcommand
 
 ### Phase 3: Evaluate
 - Does the reload actually work reliably?
