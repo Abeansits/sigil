@@ -112,6 +112,10 @@ pub enum SessionCommands {
         /// Group name.
         #[arg(short, long)]
         group: Option<String>,
+        /// Comma-separated identity files (e.g., SOUL.md,OPS.md,state.json).
+        /// Overrides .sigil/config.toml [identity] section.
+        #[arg(long)]
+        identity: Option<String>,
     },
 
     /// Create, start, and send initial message.
@@ -130,6 +134,10 @@ pub enum SessionCommands {
         /// Initial message to send.
         #[arg(short, long)]
         message: Option<String>,
+        /// Comma-separated identity files (e.g., SOUL.md,OPS.md,state.json).
+        /// Overrides .sigil/config.toml [identity] section.
+        #[arg(long)]
+        identity: Option<String>,
     },
 
     /// Start a stopped session.
@@ -471,11 +479,35 @@ mod tests {
                 title,
                 tool,
                 group,
+                identity,
             }) => {
                 assert_eq!(path, "/tmp/project");
                 assert_eq!(title, "my-session");
                 assert_eq!(tool, "claude");
                 assert_eq!(group.as_deref(), Some("dev"));
+                assert!(identity.is_none());
+            }
+            other => panic!("expected Session Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_session_create_with_identity() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "session",
+            "create",
+            "/tmp/project",
+            "-t",
+            "my-session",
+            "--identity",
+            "SOUL.md,OPS.md,state.json",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Session(SessionCommands::Create { identity, .. }) => {
+                assert_eq!(identity.as_deref(), Some("SOUL.md,OPS.md,state.json"));
             }
             other => panic!("expected Session Create, got {other:?}"),
         }
@@ -505,6 +537,28 @@ mod tests {
                 assert_eq!(path, "/tmp/project");
                 assert_eq!(title, "launcher");
                 assert_eq!(message.as_deref(), Some("build the thing"));
+            }
+            other => panic!("expected Session Launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_session_launch_with_identity() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "session",
+            "launch",
+            "/tmp/project",
+            "-t",
+            "launcher",
+            "--identity",
+            "SOUL.md,OPS.md",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Session(SessionCommands::Launch { identity, .. }) => {
+                assert_eq!(identity.as_deref(), Some("SOUL.md,OPS.md"));
             }
             other => panic!("expected Session Launch, got {other:?}"),
         }

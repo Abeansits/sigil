@@ -87,6 +87,7 @@ async fn container_session_lifecycle() {
             title: title.to_owned(),
             tool: "claude".into(),
             group: None,
+            identity: None,
         },
     )
     .await

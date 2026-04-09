@@ -58,6 +58,7 @@ async fn create_and_start_sessions(
                 title: name.clone(),
                 tool: "claude".into(),
                 group: None,
+                identity: None,
             },
         )
         .await
