@@ -44,4 +44,4 @@ ENV NO_PROXY=localhost,127.0.0.1
 
 # The conductor sends commands via `container exec`; the container
 # itself just stays alive.
-ENTRYPOINT ["sleep", "infinity"]
+CMD ["sleep", "infinity"]
