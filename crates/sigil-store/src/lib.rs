@@ -86,7 +86,7 @@ mod tests {
     use assert_matches::assert_matches;
 
     use sigil_core::id::{GroupId, SessionId};
-    use sigil_core::session::{SessionRecord, SessionState};
+    use sigil_core::session::{IdentitySpec, LifecycleEvent, SessionRecord, SessionState};
     use sigil_core::trust::{Capability, ExecutionClass};
     use sigil_policy::grants::{ApprovalGrant, GrantStore};
 
@@ -139,6 +139,25 @@ mod tests {
     async fn double_init_is_idempotent() {
         let store = Store::new_in_memory().await.expect("first init");
         // Running migrations again on the same pool should be fine.
+        let result = migrate::run_migrations(&store.pool).await;
+        assert!(result.is_ok());
+    }
+
+    /// Simulates a crash between ALTER TABLE and schema_version INSERT:
+    /// the column exists but V002 is not recorded. Re-running migrations
+    /// must succeed (idempotent ALTER).
+    #[tokio::test]
+    async fn v002_migration_is_idempotent_after_partial_apply() {
+        let store = Store::new_in_memory().await.expect("init");
+
+        // Simulate crash: delete the V002 version record so next startup
+        // retries the migration while the column already exists.
+        sqlx::query("DELETE FROM schema_version WHERE version = 2")
+            .execute(&store.pool)
+            .await
+            .expect("delete v002 record");
+
+        // Re-run migrations — should not fail on duplicate column.
         let result = migrate::run_migrations(&store.pool).await;
         assert!(result.is_ok());
     }
@@ -244,6 +263,130 @@ mod tests {
         let id = SessionId::new();
         let result = store.get_session(&id).await;
         assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
+    }
+
+    // -- Identity persistence tests --
+
+    #[tokio::test]
+    async fn create_session_with_identity_round_trips() {
+        let store = Store::new_in_memory().await.expect("init");
+        let mut record = make_session("with-identity");
+        record.identity = Some(IdentitySpec {
+            files: vec![
+                PathBuf::from("SOUL.md"),
+                PathBuf::from("OPS.md"),
+                PathBuf::from("state.json"),
+            ],
+            reload_on: vec![LifecycleEvent::PostCompact, LifecycleEvent::Restart],
+        });
+
+        store.create_session(&record).await.expect("create");
+        let fetched = store.get_session(&record.id).await.expect("get");
+
+        let identity = fetched.identity.expect("identity should be Some");
+        assert_eq!(identity.files.len(), 3);
+        assert_eq!(identity.files[0], PathBuf::from("SOUL.md"));
+        assert_eq!(identity.files[1], PathBuf::from("OPS.md"));
+        assert_eq!(identity.files[2], PathBuf::from("state.json"));
+        assert_eq!(identity.reload_on.len(), 2);
+        assert_eq!(identity.reload_on[0], LifecycleEvent::PostCompact);
+        assert_eq!(identity.reload_on[1], LifecycleEvent::Restart);
+    }
+
+    #[tokio::test]
+    async fn create_session_with_none_identity_reads_back_as_none() {
+        let store = Store::new_in_memory().await.expect("init");
+        let record = make_session("no-identity");
+        assert!(record.identity.is_none());
+
+        store.create_session(&record).await.expect("create");
+        let fetched = store.get_session(&record.id).await.expect("get");
+
+        assert!(fetched.identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_session_identity_sets_spec() {
+        let store = Store::new_in_memory().await.expect("init");
+        let record = make_session("update-identity");
+        store.create_session(&record).await.expect("create");
+
+        let spec = IdentitySpec {
+            files: vec![PathBuf::from("SOUL.md")],
+            reload_on: vec![LifecycleEvent::SessionStart],
+        };
+
+        store
+            .update_session_identity(&record.id, Some(&spec))
+            .await
+            .expect("update identity");
+
+        let fetched = store.get_session(&record.id).await.expect("get");
+        let identity = fetched.identity.expect("identity should be Some");
+        assert_eq!(identity.files, vec![PathBuf::from("SOUL.md")]);
+        assert_eq!(identity.reload_on, vec![LifecycleEvent::SessionStart]);
+    }
+
+    #[tokio::test]
+    async fn update_session_identity_clears_spec() {
+        let store = Store::new_in_memory().await.expect("init");
+        let mut record = make_session("clear-identity");
+        record.identity = Some(IdentitySpec {
+            files: vec![PathBuf::from("SOUL.md")],
+            reload_on: vec![LifecycleEvent::PostCompact],
+        });
+        store.create_session(&record).await.expect("create");
+
+        store
+            .update_session_identity(&record.id, None)
+            .await
+            .expect("clear identity");
+
+        let fetched = store.get_session(&record.id).await.expect("get");
+        assert!(fetched.identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_session_identity_nonexistent_returns_not_found() {
+        let store = Store::new_in_memory().await.expect("init");
+        let id = SessionId::new();
+        let spec = IdentitySpec::default();
+
+        let result = store.update_session_identity(&id, Some(&spec)).await;
+        assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_preserves_identity() {
+        let store = Store::new_in_memory().await.expect("init");
+
+        let mut with_id = make_session("has-identity");
+        with_id.identity = Some(IdentitySpec {
+            files: vec![PathBuf::from("SOUL.md")],
+            reload_on: vec![],
+        });
+        let without_id = make_session("no-identity");
+
+        store.create_session(&with_id).await.expect("create with");
+        store
+            .create_session(&without_id)
+            .await
+            .expect("create without");
+
+        let sessions = store.list_sessions().await.expect("list");
+        assert_eq!(sessions.len(), 2);
+
+        let found_with = sessions
+            .iter()
+            .find(|s| s.title == "has-identity")
+            .expect("find with");
+        let found_without = sessions
+            .iter()
+            .find(|s| s.title == "no-identity")
+            .expect("find without");
+
+        assert!(found_with.identity.is_some());
+        assert!(found_without.identity.is_none());
     }
 
     // -- Grant tests --
