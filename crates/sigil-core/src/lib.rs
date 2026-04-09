@@ -10,6 +10,7 @@
 //! - Every function that does anything takes a policy context.
 
 pub mod action;
+pub mod config;
 pub mod error;
 pub mod id;
 pub mod origin;

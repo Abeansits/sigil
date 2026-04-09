@@ -1,7 +1,7 @@
 //! Session subcommands — list, show, create, launch, start, stop,
 //! restart, send, output, remove.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,9 +10,13 @@ use anyhow::{Context, Result, bail};
 
 use sigil_audit::AuditLogWriter;
 use sigil_core::PolicyDecision;
+use sigil_core::config::ProjectConfig;
 use sigil_core::id::{GroupId, SessionId};
 use sigil_core::protocol::ConductorMessage;
-use sigil_core::session::{SessionConfig, SessionHandle, SessionRecord, SessionState, ToolKind};
+use sigil_core::session::{
+    IdentitySpec, LifecycleEvent, SessionConfig, SessionHandle, SessionRecord, SessionState,
+    ToolKind,
+};
 use sigil_core::traits::SessionRuntime;
 use sigil_core::trust::ExecutionClass;
 use sigil_store::Store;
@@ -40,13 +44,26 @@ pub async fn run<R: SessionRuntime>(
             title,
             tool,
             group,
-        } => create(store, audit, &path, &title, &tool, group.as_deref()).await,
+            identity,
+        } => {
+            create(
+                store,
+                audit,
+                &path,
+                &title,
+                &tool,
+                group.as_deref(),
+                identity.as_deref(),
+            )
+            .await
+        }
         SessionCommands::Launch {
             path,
             title,
             tool,
             group,
             message,
+            identity,
         } => {
             launch(
                 store,
@@ -57,6 +74,7 @@ pub async fn run<R: SessionRuntime>(
                 &tool,
                 group.as_deref(),
                 message.as_deref(),
+                identity.as_deref(),
             )
             .await
         }
@@ -166,6 +184,46 @@ async fn log_session_event(audit: &AuditLogWriter, action: &str, session_id: Ses
     .await;
 }
 
+// -- Identity resolution --
+
+/// Resolve an `IdentitySpec` from CLI flag or project config.
+///
+/// Priority: CLI `--identity` flag > `.sigil/config.toml` > `None`.
+///
+/// The CLI flag is a comma-separated list of file paths. When provided,
+/// it uses default `reload_on` events (`PostCompact`, `PreCompact`).
+fn resolve_identity_spec(
+    cli_flag: Option<&str>,
+    project_dir: &Path,
+) -> Result<Option<IdentitySpec>> {
+    // 1. CLI flag (highest priority)
+    if let Some(flag) = cli_flag {
+        let files: Vec<PathBuf> = flag
+            .split(',')
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+
+        return Ok(Some(IdentitySpec {
+            files,
+            reload_on: vec![LifecycleEvent::PostCompact, LifecycleEvent::PreCompact],
+        }));
+    }
+
+    // 2. .sigil/config.toml [identity] section
+    let config = ProjectConfig::load(project_dir).context("failed to load project config")?;
+
+    if let Some(config) = config {
+        if let Some(section) = config.identity {
+            let spec = section.into_spec().context("invalid identity config")?;
+            return Ok(Some(spec));
+        }
+    }
+
+    // 3. None
+    Ok(None)
+}
+
 // -- Subcommand handlers --
 
 #[allow(clippy::print_stdout)]
@@ -237,20 +295,23 @@ async fn create(
     title: &str,
     tool: &str,
     group: Option<&str>,
+    identity_flag: Option<&str>,
 ) -> Result<()> {
     let tool_kind = parse_tool(tool)?;
+    let project_dir = PathBuf::from(path);
+    let identity = resolve_identity_spec(identity_flag, &project_dir)?;
 
     let record = SessionRecord {
         id: SessionId::new(),
         title: title.to_owned(),
-        path: PathBuf::from(path),
+        path: project_dir,
         tool: tool_kind,
         group: group.map(GroupId::new),
         parent: None,
         execution_class: ExecutionClass::OfflineWorker,
         sandboxed: true,
         state: SessionState::Stopped,
-        identity: None,
+        identity,
     };
 
     store
@@ -274,11 +335,14 @@ async fn launch<R: SessionRuntime>(
     tool: &str,
     group: Option<&str>,
     message: Option<&str>,
+    identity_flag: Option<&str>,
 ) -> Result<()> {
     let tool_kind = parse_tool(tool)?;
+    let project_dir = PathBuf::from(path);
+    let identity = resolve_identity_spec(identity_flag, &project_dir)?;
 
     let config = SessionConfig {
-        path: PathBuf::from(path),
+        path: project_dir,
         title: title.to_owned(),
         tool: tool_kind,
         group: group.map(GroupId::new),
@@ -287,7 +351,7 @@ async fn launch<R: SessionRuntime>(
         sandboxed: true,
         initial_message: message.map(ToOwned::to_owned),
         worktree_branch: None,
-        identity: None,
+        identity,
     };
 
     let handle = runtime
@@ -678,5 +742,123 @@ mod tests {
         let found = resolve_session(&store, prefix).await;
         assert!(found.is_ok());
         assert_eq!(found.expect("should resolve").id, record.id);
+    }
+
+    // -------------------------------------------------------------------
+    // resolve_identity_spec tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn resolve_identity_cli_flag_comma_separated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = resolve_identity_spec(Some("SOUL.md,OPS.md,state.json"), dir.path());
+        let spec = result.expect("should succeed").expect("should be Some");
+        assert_eq!(
+            spec.files,
+            vec![
+                PathBuf::from("SOUL.md"),
+                PathBuf::from("OPS.md"),
+                PathBuf::from("state.json"),
+            ]
+        );
+        assert_eq!(
+            spec.reload_on,
+            vec![LifecycleEvent::PostCompact, LifecycleEvent::PreCompact,]
+        );
+    }
+
+    #[test]
+    fn resolve_identity_cli_flag_with_spaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = resolve_identity_spec(Some(" SOUL.md , OPS.md "), dir.path());
+        let spec = result.expect("should succeed").expect("should be Some");
+        assert_eq!(
+            spec.files,
+            vec![PathBuf::from("SOUL.md"), PathBuf::from("OPS.md"),]
+        );
+    }
+
+    #[test]
+    fn resolve_identity_cli_flag_trailing_comma() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = resolve_identity_spec(Some("SOUL.md,"), dir.path());
+        let spec = result.expect("should succeed").expect("should be Some");
+        assert_eq!(spec.files, vec![PathBuf::from("SOUL.md")]);
+    }
+
+    #[test]
+    fn resolve_identity_cli_flag_empty_string() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = resolve_identity_spec(Some(""), dir.path());
+        let spec = result.expect("should succeed").expect("should be Some");
+        assert!(spec.files.is_empty());
+    }
+
+    #[test]
+    fn resolve_identity_from_config_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sigil_dir = dir.path().join(".sigil");
+        std::fs::create_dir_all(&sigil_dir).expect("mkdir");
+        std::fs::write(
+            sigil_dir.join("config.toml"),
+            r#"
+[identity]
+files = ["SOUL.md", "state.json"]
+reload_on = ["Restart"]
+"#,
+        )
+        .expect("write config");
+
+        let result = resolve_identity_spec(None, dir.path());
+        let spec = result.expect("should succeed").expect("should be Some");
+        assert_eq!(
+            spec.files,
+            vec![PathBuf::from("SOUL.md"), PathBuf::from("state.json"),]
+        );
+        assert_eq!(spec.reload_on, vec![LifecycleEvent::Restart]);
+    }
+
+    #[test]
+    fn resolve_identity_cli_flag_overrides_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sigil_dir = dir.path().join(".sigil");
+        std::fs::create_dir_all(&sigil_dir).expect("mkdir");
+        std::fs::write(
+            sigil_dir.join("config.toml"),
+            r#"
+[identity]
+files = ["config-file.md"]
+reload_on = ["Restart"]
+"#,
+        )
+        .expect("write config");
+
+        let result = resolve_identity_spec(Some("cli-override.md"), dir.path());
+        let spec = result.expect("should succeed").expect("should be Some");
+        assert_eq!(spec.files, vec![PathBuf::from("cli-override.md")]);
+        // CLI flag uses default reload_on, not the config file's
+        assert_eq!(
+            spec.reload_on,
+            vec![LifecycleEvent::PostCompact, LifecycleEvent::PreCompact,]
+        );
+    }
+
+    #[test]
+    fn resolve_identity_no_flag_no_config_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = resolve_identity_spec(None, dir.path());
+        assert!(result.expect("should succeed").is_none());
+    }
+
+    #[test]
+    fn resolve_identity_config_without_identity_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sigil_dir = dir.path().join(".sigil");
+        std::fs::create_dir_all(&sigil_dir).expect("mkdir");
+        std::fs::write(sigil_dir.join("config.toml"), "# no identity section\n")
+            .expect("write config");
+
+        let result = resolve_identity_spec(None, dir.path());
+        assert!(result.expect("should succeed").is_none());
     }
 }

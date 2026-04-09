@@ -73,6 +73,7 @@ async fn full_session_lifecycle() {
             title: title.clone(),
             tool: "claude".into(),
             group: None,
+            identity: None,
         },
     )
     .await
@@ -224,6 +225,7 @@ async fn session_restart_returns_to_running() {
             title: title.clone(),
             tool: "claude".into(),
             group: None,
+            identity: None,
         },
     )
     .await
@@ -300,6 +302,7 @@ async fn session_launch_combines_create_start_send() {
             tool: "codex".into(),
             group: Some("test-group".into()),
             message: Some("echo launched".into()),
+            identity: None,
         },
     )
     .await

@@ -75,6 +75,7 @@ async fn meta_session_echo_roundtrip() {
             title: title.clone(),
             tool: "claude".into(),
             group: None,
+            identity: None,
         },
     )
     .await

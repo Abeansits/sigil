@@ -63,6 +63,7 @@ async fn conductor_heartbeat_two_cycles() {
                 title: (*name).to_owned(),
                 tool: "claude".into(),
                 group: None,
+                identity: None,
             },
         )
         .await

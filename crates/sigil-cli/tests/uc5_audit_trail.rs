@@ -76,6 +76,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
             title: title.clone(),
             tool: "claude".into(),
             group: None,
+            identity: None,
         },
     )
     .await
@@ -237,6 +238,7 @@ async fn audit_events_for_non_tmux_operations() {
             title: "uc5-notmux".into(),
             tool: "claude".into(),
             group: None,
+            identity: None,
         },
     )
     .await

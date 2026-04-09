@@ -155,6 +155,7 @@ async fn status_updates_after_lifecycle_transitions() {
                 title: (*name).to_owned(),
                 tool: "claude".into(),
                 group: None,
+                identity: None,
             },
         )
         .await
