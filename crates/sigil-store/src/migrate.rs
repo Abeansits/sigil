@@ -174,11 +174,7 @@ async fn record_migration(
 }
 
 /// Check whether a column exists on a table via `PRAGMA table_info`.
-async fn column_exists(
-    pool: &SqlitePool,
-    table: &str,
-    column: &str,
-) -> Result<bool, StoreError> {
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, StoreError> {
     // PRAGMA doesn't support parameter binding, but table/column names
     // are compile-time constants in our migration code, not user input.
     let sql = format!("PRAGMA table_info({table})");

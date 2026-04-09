@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod bridge;
 pub mod conductor;
+pub mod identity;
 pub mod session;
 pub mod status;
 pub mod worktree;
