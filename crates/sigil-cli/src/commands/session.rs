@@ -408,7 +408,7 @@ async fn launch<R: SessionRuntime + LifecycleHooks>(
 }
 
 #[allow(clippy::print_stdout)]
-async fn start<R: SessionRuntime + LifecycleHooks>(
+async fn start<R: SessionRuntime>(
     store: &Store,
     runtime: &R,
     audit: &AuditLogWriter,
@@ -437,20 +437,12 @@ async fn start<R: SessionRuntime + LifecycleHooks>(
         identity: session.identity.clone(),
     };
 
-    let handle = runtime
+    runtime
         .launch(&config)
         .await
         .context("failed to start session")?;
 
-    // Register identity hooks on (re-)start.
-    if let Some(ref spec) = session.identity {
-        if !spec.reload_on.is_empty() {
-            runtime
-                .register_identity_hooks(&handle, spec)
-                .await
-                .context("failed to register identity hooks")?;
-        }
-    }
+    // Hooks are already on disk from create/launch — no re-registration needed.
 
     store
         .update_session_state(&session.id, SessionState::Running)
@@ -490,7 +482,7 @@ async fn stop<R: SessionRuntime>(
 }
 
 #[allow(clippy::print_stdout)]
-async fn restart<R: SessionRuntime + LifecycleHooks>(
+async fn restart<R: SessionRuntime>(
     store: &Store,
     runtime: &R,
     audit: &AuditLogWriter,
@@ -519,20 +511,12 @@ async fn restart<R: SessionRuntime + LifecycleHooks>(
         identity: session.identity.clone(),
     };
 
-    let handle = runtime
+    runtime
         .launch(&config)
         .await
         .context("failed to relaunch session")?;
 
-    // Register identity hooks on restart.
-    if let Some(ref spec) = session.identity {
-        if !spec.reload_on.is_empty() {
-            runtime
-                .register_identity_hooks(&handle, spec)
-                .await
-                .context("failed to register identity hooks")?;
-        }
-    }
+    // Hooks are already on disk from create/launch — no re-registration needed.
 
     store
         .update_session_state(&session.id, SessionState::Running)
