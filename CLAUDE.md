@@ -69,6 +69,7 @@ Notes:
 - `DomainProxy` runs on the host, listens on a Unix socket published into the container, and enforces a domain allowlist (HTTP + CONNECT). Raw IPs are always denied.
 - MCP socket server (`mcp_socket.rs`) auto-starts when `ContainerRuntime` launches with MCP enabled. Agent connects via `/tmp/sigil-mcp.sock` inside the container; JSON-RPC requests pass through the policy evaluator on the host.
 - Agent container image defined in `container/Dockerfile` (Node.js 22, Claude Code CLI, Codex CLI, git). Build with `scripts/build-agent-image.sh`.
+- The CLI accepts a global `--runtime` flag (`tmux` | `container`, default `tmux`, env `SIGIL_RUNTIME`). `RuntimeBackend` enum dispatches to the chosen runtime.
 - The CLI exposes six top-level commands: `status`, `session`, `worktree`, `conductor`, `bridge`, and `audit`.
 - `sigil bridge` subcommands: `telegram`, `slack`, `all`.
 - `sigil audit verify` validates HMAC chain integrity from the CLI.
@@ -108,9 +109,10 @@ Workspace lint highlights:
 ## Testing
 
 - Unit tests live primarily in `#[cfg(test)]` modules inside each crate.
-- Integration tests currently live in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
+- Integration tests currently live in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests) (UC1–UC10).
 - Property-based tests using `proptest` cover `sigil-core` (action protocol), `sigil-audit` (HMAC chain), and `sigil-policy` (evaluator, grants, normalization, zones).
-- The workspace currently registers 439 tests.
+- UC9 (stress test, 10 sessions + kill detection) and UC10 (meta-test) are gated behind `#[ignore]` — run with `cargo test -- --ignored`.
+- The workspace currently registers 443 tests.
 
 Run these before shipping changes:
 
