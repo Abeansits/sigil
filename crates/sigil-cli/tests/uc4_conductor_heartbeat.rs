@@ -56,7 +56,7 @@ async fn conductor_heartbeat_two_cycles() {
     for name in &["uc4-alpha", "uc4-beta"] {
         sigil_cli::commands::session::run(
             &store,
-            &runtime,
+            &*runtime,
             &audit,
             SessionCommands::Create {
                 path: work_dir.clone(),
@@ -72,7 +72,7 @@ async fn conductor_heartbeat_two_cycles() {
     // Start only one session.
     sigil_cli::commands::session::run(
         &store,
-        &runtime,
+        &*runtime,
         &audit,
         SessionCommands::Start {
             name: "uc4-alpha".into(),
@@ -140,7 +140,7 @@ async fn conductor_heartbeat_two_cycles() {
     // ── CLEANUP ─────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
         &store,
-        &runtime,
+        &*runtime,
         &audit,
         SessionCommands::Stop {
             name: "uc4-alpha".into(),
