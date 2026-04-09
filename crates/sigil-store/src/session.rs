@@ -20,6 +20,10 @@ impl Store {
     ///
     /// Returns [`StoreError::Database`] if the insert fails (e.g. duplicate ID)
     /// or [`StoreError::Serialization`] if enum serialization fails.
+    // TODO(PR2): persist `record.identity` as `identity_json` column
+    // once the store migration adds it. Until then, the field is
+    // accepted but not written to the DB.
+    // See docs/design/identity-reload-plan.md (PR2).
     pub async fn create_session(&self, record: &SessionRecord) -> Result<(), StoreError> {
         let id = record.id.to_string();
         let title = &record.title;
@@ -216,5 +220,9 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord, StoreE
         execution_class,
         sandboxed,
         state,
+        // TODO(PR2): deserialize from `identity_json` column once the
+        // store migration adds it. Until then, no column exists so we
+        // return None. See docs/design/identity-reload-plan.md (PR2).
+        identity: None,
     })
 }

@@ -26,9 +26,12 @@ pub use id::{GroupId, RequestId, SessionId};
 pub use origin::ActionOrigin;
 pub use principal::Principal;
 pub use protocol::{AgentSignal, BridgeMessage, ConductorMessage};
-pub use session::{SessionConfig, SessionHandle, SessionRecord, SessionState, ToolKind};
+pub use session::{
+    IdentitySpec, LifecycleEvent, SessionConfig, SessionHandle, SessionRecord, SessionState,
+    ToolKind,
+};
 pub use traits::{
-    ActionRouter, AuditEvent, AuditWriter, MessageSink, MessageSource, PolicyEngine,
-    SessionRuntime, ToolAdapter,
+    ActionRouter, AuditEvent, AuditWriter, LifecycleHooks, MessageSink, MessageSource,
+    PolicyEngine, SessionRuntime, ToolAdapter,
 };
 pub use trust::{Capability, ExecutionClass, Tier, TrustZone};

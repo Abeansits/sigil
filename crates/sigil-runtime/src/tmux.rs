@@ -110,6 +110,7 @@ impl SessionRuntime for TmuxRuntime {
             container_id: None,
             execution_class: config.execution_class,
             sandboxed: config.sandboxed,
+            identity: config.identity.clone(),
         })
     }
 
@@ -243,6 +244,7 @@ mod tests {
             container_id: None,
             execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
             sandboxed: false,
+            identity: None,
         };
 
         // status() returns Error when the session doesn't exist,

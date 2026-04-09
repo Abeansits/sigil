@@ -569,6 +569,7 @@ impl SessionRuntime for ContainerRuntime {
             container_id: Some(config.title.clone()),
             execution_class: config.execution_class,
             sandboxed: true, // Containers are always sandboxed.
+            identity: config.identity.clone(),
         })
     }
 
@@ -679,6 +680,7 @@ mod tests {
             sandboxed: true,
             initial_message: None,
             worktree_branch: None,
+            identity: None,
         }
     }
 

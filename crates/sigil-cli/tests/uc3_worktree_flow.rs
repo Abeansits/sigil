@@ -96,6 +96,7 @@ async fn worktree_create_list_finish() {
         execution_class: ExecutionClass::OfflineWorker,
         sandboxed: true,
         state: SessionState::Stopped,
+        identity: None,
     };
     store.create_session(&record).await.expect("create session");
 
@@ -248,6 +249,7 @@ async fn worktree_cli_create_and_list() {
         execution_class: ExecutionClass::OfflineWorker,
         sandboxed: true,
         state: SessionState::Stopped,
+        identity: None,
     };
     store.create_session(&record).await.expect("create session");
 

@@ -26,6 +26,7 @@ fn make_session(title: &str) -> SessionRecord {
         execution_class: ExecutionClass::OfflineWorker,
         sandboxed: true,
         state: SessionState::Stopped,
+        identity: None,
     }
 }
 
@@ -197,6 +198,7 @@ async fn session_preserves_all_fields() {
         execution_class: ExecutionClass::Builder,
         sandboxed: false,
         state: SessionState::Stopped,
+        identity: None,
     };
 
     store
