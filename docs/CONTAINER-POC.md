@@ -380,9 +380,40 @@ The custom Rust proxy remains the right call. Even when Apple adds nftables supp
 
 Design the proxy interface so it can be made optional when upstream catches up.
 
+## Image Build & Smoke Test Results
+
+**Date:** 2026-04-09
+**Image:** `sigil-agent:latest` (linux/arm64)
+**Base:** `node:22-slim` (Debian bookworm)
+**Size:** ~280 MB (294,092,560 bytes)
+
+### Build
+
+Built with `scripts/build-agent-image.sh` using `container build`. Layers cached after first build — rebuilds that only change the `CMD`/`ENTRYPOINT` complete in ~3 seconds.
+
+### Smoke Test Results
+
+All 4 checks pass via `scripts/test-agent-image.sh`:
+
+| Component   | Result | Version / Path           |
+|-------------|--------|--------------------------|
+| Node.js     | PASS   | v22.22.0                 |
+| git         | PASS   | 2.39.5                   |
+| Claude Code | PASS   | 2.1.97                   |
+| Codex       | PASS   | /usr/local/bin/codex     |
+
+### Fix Applied
+
+The original Dockerfile used `ENTRYPOINT ["sleep", "infinity"]`. This prevents `container run --rm sigil-agent:latest <cmd>` from overriding the command — the arguments get appended to `sleep infinity` instead of replacing it. Changed to `CMD ["sleep", "infinity"]` so:
+
+- `container run sigil-agent:latest` → runs `sleep infinity` (stays alive for `exec`)
+- `container run --rm sigil-agent:latest node --version` → runs `node --version` (CMD overridden)
+
+The base image's `docker-entrypoint.sh` (from `node:22-slim`) transparently passes through to the specified command.
+
 ## Next Steps
 
-1. Build a minimal `sigil-agent` container image (Dockerfile with Claude Code + git + node)
+1. ~~Build a minimal `sigil-agent` container image (Dockerfile with Claude Code + git + node)~~ **Done** — see above
 2. Implement the Rust forward proxy in `sigil-runtime` (Option C)
 3. Add `ContainerRuntime` trait implementation alongside `TmuxRuntime`
 4. Wire socket-based IPC for the MCP approval protocol
