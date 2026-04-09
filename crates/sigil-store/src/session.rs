@@ -7,7 +7,7 @@ use sqlx::Row;
 
 use sigil_core::ToolKind;
 use sigil_core::id::{GroupId, SessionId};
-use sigil_core::session::{SessionRecord, SessionState};
+use sigil_core::session::{IdentitySpec, SessionRecord, SessionState};
 use sigil_core::trust::ExecutionClass;
 
 use crate::Store;
@@ -20,10 +20,6 @@ impl Store {
     ///
     /// Returns [`StoreError::Database`] if the insert fails (e.g. duplicate ID)
     /// or [`StoreError::Serialization`] if enum serialization fails.
-    // TODO(PR2): persist `record.identity` as `identity_json` column
-    // once the store migration adds it. Until then, the field is
-    // accepted but not written to the DB.
-    // See docs/design/identity-reload-plan.md (PR2).
     pub async fn create_session(&self, record: &SessionRecord) -> Result<(), StoreError> {
         let id = record.id.to_string();
         let title = &record.title;
@@ -34,11 +30,16 @@ impl Store {
         let execution_class = serde_json::to_string(&record.execution_class)?;
         let sandboxed = record.sandboxed;
         let state = serde_json::to_string(&record.state)?;
+        let identity_json = record
+            .identity
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
 
         sqlx::query(
             "INSERT INTO sessions (id, title, path, tool, group_id, parent_id, \
-             execution_class, sandboxed, state) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             execution_class, sandboxed, state, identity_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(title)
@@ -49,6 +50,7 @@ impl Store {
         .bind(&execution_class)
         .bind(sandboxed)
         .bind(&state)
+        .bind(&identity_json)
         .execute(&self.pool)
         .await?;
 
@@ -154,6 +156,36 @@ impl Store {
         Ok(())
     }
 
+    /// Update the identity spec of a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] if the session does not exist,
+    /// [`StoreError::Serialization`] if the spec cannot be serialized,
+    /// or [`StoreError::Database`] on query failure.
+    pub async fn update_session_identity(
+        &self,
+        id: &SessionId,
+        spec: Option<&IdentitySpec>,
+    ) -> Result<(), StoreError> {
+        let id_str = id.to_string();
+        let identity_json = spec.map(serde_json::to_string).transpose()?;
+
+        let result = sqlx::query(
+            "UPDATE sessions SET identity_json = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&identity_json)
+        .bind(&id_str)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SessionNotFound { id: id_str });
+        }
+
+        Ok(())
+    }
+
     /// Delete a session by ID.
     ///
     /// # Errors
@@ -210,6 +242,11 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord, StoreE
     let state_str: String = row.get("state");
     let state: SessionState = serde_json::from_str(&state_str)?;
 
+    let identity_json: Option<String> = row.get("identity_json");
+    let identity = identity_json
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?;
+
     Ok(SessionRecord {
         id,
         title,
@@ -220,9 +257,6 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord, StoreE
         execution_class,
         sandboxed,
         state,
-        // TODO(PR2): deserialize from `identity_json` column once the
-        // store migration adds it. Until then, no column exists so we
-        // return None. See docs/design/identity-reload-plan.md (PR2).
-        identity: None,
+        identity,
     })
 }

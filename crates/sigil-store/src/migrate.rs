@@ -8,7 +8,10 @@ use sqlx::SqlitePool;
 use crate::error::StoreError;
 
 /// All migrations in order. Each entry is `(version, description, sql)`.
-const MIGRATIONS: &[(i64, &str, &str)] = &[(1, "initial schema", V001)];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "initial schema", V001),
+    (2, "add identity_json to sessions", V002),
+];
 
 const V001: &str = r"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -59,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_grants_expires ON approval_grants(expires_at);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_index(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_index(session_id);
 ";
+
+const V002: &str = "ALTER TABLE sessions ADD COLUMN identity_json TEXT";
 
 /// Run all pending migrations against the given pool.
 ///
