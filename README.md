@@ -92,10 +92,16 @@ For sandboxed sessions in Apple Container VMs (macOS 26.0+, Apple Silicon):
 # Build the agent image (one-time)
 scripts/build-agent-image.sh
 
-# Container sessions are used via the library API (ContainerRuntime).
-# They support domain-filtered networking and MCP-based policy mediation.
-# See docs/ARCHITECTURE.md for the full container runtime flow.
+# Create and run a container session (requires --features container)
+sigil --runtime container session create ~/Projects/my-app --title sandboxed
+sigil --runtime container session start sandboxed
+
+# Or set via env var
+export SIGIL_RUNTIME=container
+sigil session create ~/Projects/my-app --title sandboxed
 ```
+
+Container sessions support domain-filtered networking and MCP-based policy mediation. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full container runtime flow.
 
 ## Workspace
 
@@ -129,7 +135,7 @@ The workspace is a 9-crate DAG with `sigil-core` at the bottom and no internal d
 
 ```bash
 cargo build --release     # current macOS arm64 build: 5.7M
-cargo test               # 439 tests (includes proptest property-based tests)
+cargo test               # 443 tests (includes proptest property-based tests)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -143,7 +149,6 @@ Remaining gaps:
 
 - audit key management still uses env var or dev fallback, not Keychain-backed storage
 - content sanitization pipeline for fetched web/media inputs is not implemented
-- container sessions are library-level only (no CLI subcommands yet)
 
 ## Docs
 
