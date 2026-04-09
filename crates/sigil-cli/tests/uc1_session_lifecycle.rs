@@ -331,6 +331,7 @@ async fn session_launch_combines_create_start_send() {
         container_id: None,
         execution_class: rec.execution_class,
         sandboxed: rec.sandboxed,
+        identity: None,
     };
     let _ = sigil_core::traits::SessionRuntime::stop(&runtime, &handle).await;
 

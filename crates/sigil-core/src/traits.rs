@@ -3,7 +3,7 @@ use std::future::Future;
 use crate::action::{ActionRequest, PolicyDecision};
 use crate::error::CoreError;
 use crate::protocol::{AgentSignal, BridgeMessage, ConductorMessage, HookFormat, StatusPattern};
-use crate::session::{SessionConfig, SessionHandle, SessionState};
+use crate::session::{IdentitySpec, SessionConfig, SessionHandle, SessionState};
 
 // ---------------------------------------------------------------------------
 // Session runtime — implemented by tmux backend (and later container backend)
@@ -34,6 +34,23 @@ pub trait SessionRuntime: Send + Sync {
     ) -> impl Future<Output = Result<SessionState, CoreError>> + Send;
 
     fn stop(&self, handle: &SessionHandle) -> impl Future<Output = Result<(), CoreError>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle hooks — optional extension for runtimes that support them
+// ---------------------------------------------------------------------------
+
+/// Extension trait for runtimes that support lifecycle hook registration.
+/// Separate from `SessionRuntime` because not all backends support hooks
+/// (e.g., containers don't in Phase 1).
+pub trait LifecycleHooks: Send + Sync {
+    /// Register hooks for the given identity spec.
+    /// Called once during session creation.
+    fn register_identity_hooks(
+        &self,
+        handle: &SessionHandle,
+        spec: &IdentitySpec,
+    ) -> impl Future<Output = Result<(), CoreError>> + Send;
 }
 
 // ---------------------------------------------------------------------------

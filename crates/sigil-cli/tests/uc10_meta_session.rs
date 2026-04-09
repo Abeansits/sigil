@@ -124,6 +124,7 @@ async fn meta_session_echo_roundtrip() {
         container_id: None,
         execution_class: rec.execution_class,
         sandboxed: rec.sandboxed,
+        identity: None,
     };
     let output = sigil_core::traits::SessionRuntime::read_output(&runtime, &handle)
         .await

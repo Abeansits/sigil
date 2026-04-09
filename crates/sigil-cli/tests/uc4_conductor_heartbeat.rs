@@ -182,6 +182,7 @@ async fn reconciliation_corrects_stale_running_state() {
         execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
         sandboxed: true,
         state: SessionState::Running,
+        identity: None,
     };
     store.create_session(&record).await.expect("insert");
 

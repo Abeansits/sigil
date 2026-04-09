@@ -103,6 +103,7 @@ mod tests {
             execution_class: ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
+            identity: None,
         }
     }
 

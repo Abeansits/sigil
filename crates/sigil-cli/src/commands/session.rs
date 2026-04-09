@@ -149,6 +149,7 @@ fn record_to_handle(record: &SessionRecord) -> SessionHandle {
         container_id: None,
         execution_class: record.execution_class,
         sandboxed: record.sandboxed,
+        identity: record.identity.clone(),
     }
 }
 
@@ -249,6 +250,7 @@ async fn create(
         execution_class: ExecutionClass::OfflineWorker,
         sandboxed: true,
         state: SessionState::Stopped,
+        identity: None,
     };
 
     store
@@ -285,6 +287,7 @@ async fn launch<R: SessionRuntime>(
         sandboxed: true,
         initial_message: message.map(ToOwned::to_owned),
         worktree_branch: None,
+        identity: None,
     };
 
     let handle = runtime
@@ -303,6 +306,7 @@ async fn launch<R: SessionRuntime>(
         execution_class: handle.execution_class,
         sandboxed: handle.sandboxed,
         state: handle.state,
+        identity: handle.identity.clone(),
     };
 
     store
@@ -343,6 +347,7 @@ async fn start<R: SessionRuntime>(
         sandboxed: session.sandboxed,
         initial_message: None,
         worktree_branch: None,
+        identity: session.identity.clone(),
     };
 
     runtime
@@ -414,6 +419,7 @@ async fn restart<R: SessionRuntime>(
         sandboxed: session.sandboxed,
         initial_message: None,
         worktree_branch: None,
+        identity: session.identity.clone(),
     };
 
     runtime
@@ -602,6 +608,7 @@ mod tests {
             execution_class: ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
+            identity: None,
         };
         store
             .create_session(&record)
@@ -629,6 +636,7 @@ mod tests {
             execution_class: ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
+            identity: None,
         };
         store
             .create_session(&record)
@@ -657,6 +665,7 @@ mod tests {
             execution_class: ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
+            identity: None,
         };
         store
             .create_session(&record)

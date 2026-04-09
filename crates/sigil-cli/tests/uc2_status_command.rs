@@ -38,6 +38,7 @@ fn make_record(title: &str, path: &str, state: SessionState) -> SessionRecord {
         execution_class: ExecutionClass::OfflineWorker,
         sandboxed: true,
         state,
+        identity: None,
     }
 }
 

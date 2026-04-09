@@ -216,5 +216,6 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord, StoreE
         execution_class,
         sandboxed,
         state,
+        identity: None,
     })
 }

@@ -263,6 +263,7 @@ fn session_to_handle(
         container_id: None,
         execution_class: session.execution_class,
         sandboxed: session.sandboxed,
+        identity: session.identity.clone(),
     }
 }
 
