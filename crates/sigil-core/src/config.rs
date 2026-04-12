@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
 use crate::session::{IdentitySpec, LifecycleEvent};
@@ -12,6 +12,62 @@ use crate::session::{IdentitySpec, LifecycleEvent};
 pub struct ProjectConfig {
     /// Identity file configuration.
     pub identity: Option<IdentityConfigSection>,
+
+    /// Memory system configuration.
+    pub memory: Option<MemoryConfig>,
+}
+
+/// Configuration for the memory subsystem (episodic capture and consolidation).
+///
+/// All fields have sensible defaults. A missing `[memory]` section in
+/// `.sigil/config.toml` is equivalent to `MemoryConfig::default()`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Minimum distinct sessions a candidate learning must appear in
+    /// before promotion to `LEARNINGS.md`.
+    #[serde(default = "default_promotion_threshold")]
+    pub promotion_threshold: u32,
+
+    /// Days after which episodes are archived.
+    #[serde(default = "default_episode_retention_days")]
+    pub episode_retention_days: u32,
+
+    /// Days without reinforcement before a learning is marked stale.
+    #[serde(default = "default_staleness_days")]
+    pub staleness_days: u32,
+
+    /// Enable episodic capture (append episodes on lifecycle events).
+    #[serde(default = "default_true")]
+    pub episodes_enabled: bool,
+
+    /// Enable mechanical consolidation in conductor idle loop.
+    #[serde(default = "default_true")]
+    pub consolidation_enabled: bool,
+}
+
+fn default_promotion_threshold() -> u32 {
+    3
+}
+fn default_episode_retention_days() -> u32 {
+    90
+}
+fn default_staleness_days() -> u32 {
+    180
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            promotion_threshold: 3,
+            episode_retention_days: 90,
+            staleness_days: 180,
+            episodes_enabled: true,
+            consolidation_enabled: true,
+        }
+    }
 }
 
 /// The `[identity]` section of `.sigil/config.toml`.
@@ -62,10 +118,14 @@ fn parse_lifecycle_event(s: &str) -> Result<LifecycleEvent, CoreError> {
         "PreCompact" => Ok(LifecycleEvent::PreCompact),
         "Restart" => Ok(LifecycleEvent::Restart),
         "SessionStart" => Ok(LifecycleEvent::SessionStart),
+        "PostAction" => Ok(LifecycleEvent::PostAction),
+        "SessionEnd" => Ok(LifecycleEvent::SessionEnd),
+        "Idle" => Ok(LifecycleEvent::Idle),
         _ => Err(CoreError::InvalidConfig {
             message: format!(
                 "unknown lifecycle event '{s}' \
-                 (expected PostCompact, PreCompact, Restart, or SessionStart)"
+                 (expected PostCompact, PreCompact, Restart, SessionStart, \
+                 PostAction, SessionEnd, or Idle)"
             ),
         }),
     }
@@ -258,5 +318,124 @@ reload_on = ["PostCompact"]
         assert!(parse_lifecycle_event("postcompact").is_err());
         assert!(parse_lifecycle_event("POSTCOMPACT").is_err());
         assert!(parse_lifecycle_event("post_compact").is_err());
+    }
+
+    // -- New lifecycle event variants -----------------------------------------
+
+    #[test]
+    fn parse_new_lifecycle_events() {
+        assert_eq!(
+            parse_lifecycle_event("PostAction").unwrap(),
+            LifecycleEvent::PostAction
+        );
+        assert_eq!(
+            parse_lifecycle_event("SessionEnd").unwrap(),
+            LifecycleEvent::SessionEnd
+        );
+        assert_eq!(parse_lifecycle_event("Idle").unwrap(), LifecycleEvent::Idle);
+    }
+
+    #[test]
+    fn new_lifecycle_events_in_config() {
+        let toml_str = r#"
+[identity]
+files = ["SOUL.md"]
+reload_on = ["PostCompact", "PostAction", "SessionEnd", "Idle"]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let section = config.identity.unwrap();
+        let spec = section.into_spec().unwrap();
+        assert_eq!(spec.reload_on.len(), 4);
+        assert_eq!(spec.reload_on[0], LifecycleEvent::PostCompact);
+        assert_eq!(spec.reload_on[1], LifecycleEvent::PostAction);
+        assert_eq!(spec.reload_on[2], LifecycleEvent::SessionEnd);
+        assert_eq!(spec.reload_on[3], LifecycleEvent::Idle);
+    }
+
+    // -- MemoryConfig ---------------------------------------------------------
+
+    #[test]
+    fn memory_config_default_values() {
+        let config = MemoryConfig::default();
+        assert_eq!(config.promotion_threshold, 3);
+        assert_eq!(config.episode_retention_days, 90);
+        assert_eq!(config.staleness_days, 180);
+        assert!(config.episodes_enabled);
+        assert!(config.consolidation_enabled);
+    }
+
+    #[test]
+    fn memory_config_serde_round_trip() {
+        let config = MemoryConfig {
+            promotion_threshold: 5,
+            episode_retention_days: 60,
+            staleness_days: 120,
+            episodes_enabled: false,
+            consolidation_enabled: true,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: MemoryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn parse_memory_section_from_toml() {
+        let toml_str = r"
+[memory]
+promotion_threshold = 5
+episode_retention_days = 60
+staleness_days = 120
+episodes_enabled = false
+consolidation_enabled = true
+";
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let memory = config.memory.unwrap();
+        assert_eq!(memory.promotion_threshold, 5);
+        assert_eq!(memory.episode_retention_days, 60);
+        assert_eq!(memory.staleness_days, 120);
+        assert!(!memory.episodes_enabled);
+        assert!(memory.consolidation_enabled);
+    }
+
+    #[test]
+    fn missing_memory_section_returns_none() {
+        let toml_str = r#"
+[identity]
+files = ["SOUL.md"]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.memory.is_none());
+    }
+
+    #[test]
+    fn memory_section_with_defaults() {
+        let toml_str = r"
+[memory]
+";
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let memory = config.memory.unwrap();
+        assert_eq!(memory, MemoryConfig::default());
+    }
+
+    #[test]
+    fn memory_section_partial_override() {
+        let toml_str = r"
+[memory]
+promotion_threshold = 10
+";
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let memory = config.memory.unwrap();
+        assert_eq!(memory.promotion_threshold, 10);
+        // Other fields should be defaults.
+        assert_eq!(memory.episode_retention_days, 90);
+        assert_eq!(memory.staleness_days, 180);
+        assert!(memory.episodes_enabled);
+        assert!(memory.consolidation_enabled);
     }
 }

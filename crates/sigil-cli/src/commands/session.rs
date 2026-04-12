@@ -365,6 +365,7 @@ async fn launch<R: SessionRuntime + LifecycleHooks>(
         initial_message: message.map(ToOwned::to_owned),
         worktree_branch: None,
         identity,
+        memory: None,
     };
 
     let handle = runtime
@@ -435,6 +436,7 @@ async fn start<R: SessionRuntime>(
         initial_message: None,
         worktree_branch: None,
         identity: session.identity.clone(),
+        memory: None,
     };
 
     runtime
@@ -509,6 +511,7 @@ async fn restart<R: SessionRuntime>(
         initial_message: None,
         worktree_branch: None,
         identity: session.identity.clone(),
+        memory: None,
     };
 
     runtime

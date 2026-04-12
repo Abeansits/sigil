@@ -681,6 +681,7 @@ mod tests {
             initial_message: None,
             worktree_branch: None,
             identity: None,
+            memory: None,
         }
     }
 
