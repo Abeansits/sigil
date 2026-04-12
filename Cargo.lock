@@ -1821,6 +1821,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-memory"
+version = "0.1.0"
+dependencies = [
+ "assert_matches",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sigil-core",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sigil-policy"
 version = "0.1.0"
 dependencies = [

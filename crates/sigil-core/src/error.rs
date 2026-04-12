@@ -37,4 +37,7 @@ pub enum CoreError {
 
     #[error("store error: {message}")]
     Store { message: String },
+
+    #[error("memory error: {message}")]
+    Memory { message: String },
 }
