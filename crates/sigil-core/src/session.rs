@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::MemoryConfig;
 use crate::id::{GroupId, SessionId};
 use crate::trust::ExecutionClass;
 
@@ -29,7 +30,8 @@ pub enum SessionState {
     Stopped,
 }
 
-/// Which lifecycle events trigger an identity reload.
+/// Lifecycle events that trigger identity reloads, memory capture, or
+/// consolidation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LifecycleEvent {
@@ -41,6 +43,12 @@ pub enum LifecycleEvent {
     Restart,
     /// On fresh session start.
     SessionStart,
+    /// After a conductor-mediated action completes.
+    PostAction,
+    /// When a session stops (clean shutdown).
+    SessionEnd,
+    /// When all sessions are idle for a sustained period.
+    Idle,
 }
 
 /// Files that define an agent session's identity and operating context.
@@ -68,6 +76,8 @@ pub struct SessionConfig {
     pub initial_message: Option<String>,
     pub worktree_branch: Option<String>,
     pub identity: Option<IdentitySpec>,
+    /// Memory subsystem configuration for this session.
+    pub memory: Option<MemoryConfig>,
 }
 
 /// Handle to a live session. Opaque reference used by `SessionRuntime`.
@@ -119,8 +129,25 @@ mod tests {
         assert_eq!(LifecycleEvent::PreCompact, LifecycleEvent::PreCompact);
         assert_eq!(LifecycleEvent::Restart, LifecycleEvent::Restart);
         assert_eq!(LifecycleEvent::SessionStart, LifecycleEvent::SessionStart);
+        assert_eq!(LifecycleEvent::PostAction, LifecycleEvent::PostAction);
+        assert_eq!(LifecycleEvent::SessionEnd, LifecycleEvent::SessionEnd);
+        assert_eq!(LifecycleEvent::Idle, LifecycleEvent::Idle);
         assert_ne!(LifecycleEvent::PostCompact, LifecycleEvent::PreCompact);
         assert_ne!(LifecycleEvent::Restart, LifecycleEvent::SessionStart);
+        assert_ne!(LifecycleEvent::PostAction, LifecycleEvent::SessionEnd);
+    }
+
+    #[test]
+    fn new_lifecycle_events_serde_round_trip() {
+        let events = vec![
+            LifecycleEvent::PostAction,
+            LifecycleEvent::SessionEnd,
+            LifecycleEvent::Idle,
+        ];
+
+        let json = serde_json::to_string(&events).unwrap();
+        let deserialized: Vec<LifecycleEvent> = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, events);
     }
 
     #[test]
@@ -166,11 +193,13 @@ mod tests {
             initial_message: None,
             worktree_branch: None,
             identity: None,
+            memory: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: SessionConfig = serde_json::from_str(&json).unwrap();
         assert!(deserialized.identity.is_none());
+        assert!(deserialized.memory.is_none());
     }
 
     #[test]
@@ -190,6 +219,7 @@ mod tests {
             initial_message: None,
             worktree_branch: None,
             identity: Some(spec),
+            memory: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
