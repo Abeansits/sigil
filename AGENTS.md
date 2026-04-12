@@ -1,4 +1,4 @@
-# CLAUDE.md - sigil
+# AGENTS.md - sigil
 
 ## What This Is
 
