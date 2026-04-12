@@ -49,7 +49,7 @@ Everything between those two points is unaddressed:
 
 ### New Crate: `sigil-memory`
 
-Follows the same pattern as `sigil-audit`: a JSONL writer crate that depends only on `sigil-core`. Follows the [Rust Workspace Style Guide](../../../.agent-deck/conductor/ops/RUST-STYLE-GUIDE.md) for crate structure, error handling, lint configuration, and testing conventions.
+Follows the same pattern as `sigil-audit`: a JSONL writer crate that depends only on `sigil-core`. Follows the [Rust Workspace Style Guide](../RUST-STYLE-GUIDE.md) for crate structure, error handling, lint configuration, and testing conventions.
 
 ```text
 sigil-memory/
@@ -523,7 +523,7 @@ PR4  Conductor wiring (episode capture)    PR5  CLI subcommands
 
 - [ ] No new external dependencies (uses existing `serde`, `time`, ULID from `sigil-core`)
 - [ ] `LifecycleEvent` enum extension is backwards-compatible (`#[non_exhaustive]`)
-- [ ] New types have doc comments per [style guide](../../../.agent-deck/conductor/ops/RUST-STYLE-GUIDE.md) section 10
+- [ ] New types have doc comments per [style guide](../RUST-STYLE-GUIDE.md) section 10
 - [ ] `cargo test -p sigil-core`
 
 ---
@@ -562,7 +562,7 @@ PR4  Conductor wiring (episode capture)    PR5  CLI subcommands
 - `thiserror` (existing workspace dep)
 - `tracing` (existing workspace dep)
 
-**Crate setup per [Rust Style Guide](../../../.agent-deck/conductor/ops/RUST-STYLE-GUIDE.md):**
+**Crate setup per [Rust Style Guide](../RUST-STYLE-GUIDE.md):**
 
 - `Cargo.toml` uses `edition.workspace = true`, `rust-version.workspace = true`, `[lints] workspace = true`.
 - All workspace dependencies referenced with `.workspace = true`.
@@ -682,7 +682,7 @@ PR4  Conductor wiring (episode capture)    PR5  CLI subcommands
 
 ## Style Guide Compliance
 
-The `sigil-memory` crate follows the [Rust Workspace Style Guide](../../../.agent-deck/conductor/ops/RUST-STYLE-GUIDE.md). Key compliance points:
+The `sigil-memory` crate follows the [Rust Workspace Style Guide](../RUST-STYLE-GUIDE.md). Key compliance points:
 
 | Style Guide Section | How It Applies |
 |---------------------|----------------|
