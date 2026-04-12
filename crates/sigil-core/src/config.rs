@@ -14,7 +14,7 @@ pub struct ProjectConfig {
     pub identity: Option<IdentityConfigSection>,
 
     /// Memory system configuration.
-    pub memory: Option<MemoryConfig>,
+    pub memory: Option<MemoryConfigSection>,
 }
 
 /// Configuration for the memory subsystem (episodic capture and consolidation).
@@ -67,6 +67,74 @@ impl Default for MemoryConfig {
             episodes_enabled: true,
             consolidation_enabled: true,
         }
+    }
+}
+
+/// The `[memory]` section of `.sigil/config.toml`.
+///
+/// All fields have sensible defaults. A missing `[memory]` section is
+/// equivalent to `MemoryConfig::default()` (callers should use
+/// `Option::unwrap_or_default` on `ProjectConfig::memory` after calling
+/// [`into_memory_config`](Self::into_memory_config)).
+#[derive(Debug, Deserialize)]
+pub struct MemoryConfigSection {
+    /// Minimum distinct sessions a candidate learning must appear in
+    /// before promotion to `LEARNINGS.md`.
+    #[serde(default = "default_promotion_threshold")]
+    pub promotion_threshold: u32,
+
+    /// Days after which episodes are archived.
+    #[serde(default = "default_episode_retention_days")]
+    pub episode_retention_days: u32,
+
+    /// Days without reinforcement before a learning is marked stale.
+    #[serde(default = "default_staleness_days")]
+    pub staleness_days: u32,
+
+    /// Enable episodic capture (append episodes on lifecycle events).
+    #[serde(default = "default_true")]
+    pub episodes_enabled: bool,
+
+    /// Enable mechanical consolidation in conductor idle loop.
+    #[serde(default = "default_true")]
+    pub consolidation_enabled: bool,
+}
+
+impl MemoryConfigSection {
+    /// Convert this config section into a validated [`MemoryConfig`].
+    ///
+    /// Validates that numeric thresholds are within acceptable ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InvalidConfig`] if any value fails validation:
+    /// - `promotion_threshold` must be at least 1.
+    /// - `episode_retention_days` must be at least 1.
+    /// - `staleness_days` must be at least 1.
+    pub fn into_memory_config(self) -> Result<MemoryConfig, CoreError> {
+        if self.promotion_threshold == 0 {
+            return Err(CoreError::InvalidConfig {
+                message: "promotion_threshold must be at least 1".into(),
+            });
+        }
+        if self.episode_retention_days == 0 {
+            return Err(CoreError::InvalidConfig {
+                message: "episode_retention_days must be at least 1".into(),
+            });
+        }
+        if self.staleness_days == 0 {
+            return Err(CoreError::InvalidConfig {
+                message: "staleness_days must be at least 1".into(),
+            });
+        }
+
+        Ok(MemoryConfig {
+            promotion_threshold: self.promotion_threshold,
+            episode_retention_days: self.episode_retention_days,
+            staleness_days: self.staleness_days,
+            episodes_enabled: self.episodes_enabled,
+            consolidation_enabled: self.consolidation_enabled,
+        })
     }
 }
 
@@ -380,8 +448,10 @@ reload_on = ["PostCompact", "PostAction", "SessionEnd", "Idle"]
         assert_eq!(config, deserialized);
     }
 
+    // -- MemoryConfigSection (PR3) -------------------------------------------
+
     #[test]
-    fn parse_memory_section_from_toml() {
+    fn parse_valid_memory_section() {
         let toml_str = r"
 [memory]
 promotion_threshold = 5
@@ -392,7 +462,8 @@ consolidation_enabled = true
 ";
 
         let config: ProjectConfig = toml::from_str(toml_str).unwrap();
-        let memory = config.memory.unwrap();
+        let section = config.memory.unwrap();
+        let memory = section.into_memory_config().unwrap();
         assert_eq!(memory.promotion_threshold, 5);
         assert_eq!(memory.episode_retention_days, 60);
         assert_eq!(memory.staleness_days, 120);
@@ -412,13 +483,31 @@ files = ["SOUL.md"]
     }
 
     #[test]
-    fn memory_section_with_defaults() {
+    fn missing_memory_section_defaults() {
+        let toml_str = r#"
+[identity]
+files = ["SOUL.md"]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        // Callers use unwrap_or_default when section is absent.
+        let memory = config
+            .memory
+            .map(MemoryConfigSection::into_memory_config)
+            .transpose()
+            .unwrap()
+            .unwrap_or_default();
+        assert_eq!(memory, MemoryConfig::default());
+    }
+
+    #[test]
+    fn memory_section_with_all_defaults() {
         let toml_str = r"
 [memory]
 ";
 
         let config: ProjectConfig = toml::from_str(toml_str).unwrap();
-        let memory = config.memory.unwrap();
+        let memory = config.memory.unwrap().into_memory_config().unwrap();
         assert_eq!(memory, MemoryConfig::default());
     }
 
@@ -430,12 +519,113 @@ promotion_threshold = 10
 ";
 
         let config: ProjectConfig = toml::from_str(toml_str).unwrap();
-        let memory = config.memory.unwrap();
+        let memory = config.memory.unwrap().into_memory_config().unwrap();
         assert_eq!(memory.promotion_threshold, 10);
         // Other fields should be defaults.
         assert_eq!(memory.episode_retention_days, 90);
         assert_eq!(memory.staleness_days, 180);
         assert!(memory.episodes_enabled);
         assert!(memory.consolidation_enabled);
+    }
+
+    #[test]
+    fn into_memory_config_rejects_zero_promotion_threshold() {
+        let section = MemoryConfigSection {
+            promotion_threshold: 0,
+            episode_retention_days: 90,
+            staleness_days: 180,
+            episodes_enabled: true,
+            consolidation_enabled: true,
+        };
+
+        let err = section.into_memory_config().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("promotion_threshold"),
+            "error should mention the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn into_memory_config_rejects_zero_episode_retention_days() {
+        let section = MemoryConfigSection {
+            promotion_threshold: 3,
+            episode_retention_days: 0,
+            staleness_days: 180,
+            episodes_enabled: true,
+            consolidation_enabled: true,
+        };
+
+        let err = section.into_memory_config().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("episode_retention_days"),
+            "error should mention the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn into_memory_config_rejects_zero_staleness_days() {
+        let section = MemoryConfigSection {
+            promotion_threshold: 3,
+            episode_retention_days: 90,
+            staleness_days: 0,
+            episodes_enabled: true,
+            consolidation_enabled: true,
+        };
+
+        let err = section.into_memory_config().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("staleness_days"),
+            "error should mention the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn invalid_memory_toml_values_return_error() {
+        // TOML parse error: string where u32 expected.
+        let toml_str = r#"
+[memory]
+promotion_threshold = "not_a_number"
+"#;
+
+        let result: Result<ProjectConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_config_with_both_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let sigil_dir = dir.path().join(".sigil");
+        std::fs::create_dir_all(&sigil_dir).unwrap();
+        std::fs::write(
+            sigil_dir.join("config.toml"),
+            r#"
+[identity]
+files = ["SOUL.md", "OPS.md", "state.json", "LEARNINGS.md"]
+reload_on = ["PostCompact", "Restart"]
+
+[memory]
+promotion_threshold = 5
+episode_retention_days = 30
+staleness_days = 90
+episodes_enabled = true
+consolidation_enabled = false
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
+
+        let spec = config.identity.unwrap().into_spec().unwrap();
+        assert_eq!(spec.files.len(), 4);
+
+        let memory = config.memory.unwrap().into_memory_config().unwrap();
+        assert_eq!(memory.promotion_threshold, 5);
+        assert_eq!(memory.episode_retention_days, 30);
+        assert_eq!(memory.staleness_days, 90);
+        assert!(memory.episodes_enabled);
+        assert!(!memory.consolidation_enabled);
     }
 }
