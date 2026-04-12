@@ -6,12 +6,7 @@
 //!
 //! Each test gets its own `tempdir` for `--db` and audit isolation.
 
-#![allow(
-    clippy::expect_used,
-    clippy::print_stdout,
-    clippy::print_stderr,
-    clippy::indexing_slicing
-)]
+#![allow(clippy::expect_used, clippy::indexing_slicing)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -82,7 +77,7 @@ fn run_sigil_raw(args: &[&str]) -> Output {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn version_flag_exits_zero_and_shows_version() {
+fn version_flag_shows_version_string() {
     let out = run_sigil_raw(&["--version"]);
     assert!(out.status.success(), "exit code should be 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -93,7 +88,7 @@ fn version_flag_exits_zero_and_shows_version() {
 }
 
 #[test]
-fn help_flag_exits_zero_and_shows_usage() {
+fn help_flag_shows_usage_and_subcommands() {
     let out = run_sigil_raw(&["--help"]);
     assert!(out.status.success(), "exit code should be 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -108,7 +103,7 @@ fn help_flag_exits_zero_and_shows_usage() {
 }
 
 #[test]
-fn unknown_subcommand_exits_nonzero() {
+fn unknown_subcommand_returns_error() {
     let out = run_sigil_raw(&["definitely-not-a-command"]);
     assert!(
         !out.status.success(),
@@ -122,7 +117,7 @@ fn unknown_subcommand_exits_nonzero() {
 }
 
 #[test]
-fn status_plain_text_exits_zero() {
+fn status_empty_store_shows_zero_sessions() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = run_sigil(tmp.path(), &["status"]);
     assert!(
@@ -138,7 +133,7 @@ fn status_plain_text_exits_zero() {
 }
 
 #[test]
-fn status_json_exits_zero_with_valid_json() {
+fn status_json_empty_store_returns_zero_counts() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = run_sigil(tmp.path(), &["status", "--json"]);
     assert!(
@@ -155,7 +150,7 @@ fn status_json_exits_zero_with_valid_json() {
 }
 
 #[test]
-fn session_list_empty_store() {
+fn session_list_empty_store_shows_no_sessions() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = run_sigil(tmp.path(), &["session", "list"]);
     assert!(
@@ -171,7 +166,7 @@ fn session_list_empty_store() {
 }
 
 #[test]
-fn session_list_json_empty_store() {
+fn session_list_json_empty_store_returns_empty_array() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = run_sigil(tmp.path(), &["session", "list", "--json"]);
     assert!(
@@ -191,7 +186,7 @@ fn session_list_json_empty_store() {
 }
 
 #[test]
-fn session_create_and_list_shows_session() {
+fn session_create_then_list_includes_new_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let work_dir = tmp.path().to_str().expect("valid path");
 
@@ -230,7 +225,7 @@ fn session_create_and_list_shows_session() {
 }
 
 #[test]
-fn session_show_json_returns_session_details() {
+fn session_show_json_returns_correct_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let work_dir = tmp.path().to_str().expect("valid path");
 
@@ -267,7 +262,7 @@ fn session_show_json_returns_session_details() {
 }
 
 #[test]
-fn session_create_and_remove_then_list_is_empty() {
+fn session_remove_then_list_returns_empty() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let work_dir = tmp.path().to_str().expect("valid path");
 
@@ -302,7 +297,7 @@ fn session_create_and_remove_then_list_is_empty() {
 }
 
 #[test]
-fn session_show_nonexistent_exits_nonzero() {
+fn session_show_nonexistent_returns_not_found() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = run_sigil(tmp.path(), &["session", "show", "does-not-exist"]);
     assert!(
@@ -317,7 +312,7 @@ fn session_show_nonexistent_exits_nonzero() {
 }
 
 #[test]
-fn audit_verify_on_fresh_log() {
+fn audit_verify_fresh_log_reports_valid_chain() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Run a command that writes audit events to create the log file.
@@ -349,7 +344,7 @@ fn audit_verify_on_fresh_log() {
 }
 
 #[test]
-fn runtime_flag_tmux_explicit() {
+fn runtime_flag_accepts_tmux() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = run_sigil(tmp.path(), &["--runtime", "tmux", "status"]);
     // This simply checks the flag is accepted and the command runs.
@@ -362,7 +357,7 @@ fn runtime_flag_tmux_explicit() {
 }
 
 #[test]
-fn runtime_flag_invalid_value_exits_nonzero() {
+fn runtime_flag_rejects_invalid_value() {
     let out = run_sigil_raw(&["--runtime", "docker", "status"]);
     assert!(
         !out.status.success(),
@@ -376,7 +371,7 @@ fn runtime_flag_invalid_value_exits_nonzero() {
 }
 
 #[test]
-fn session_create_with_identity_flag() {
+fn session_create_with_identity_persists_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let work_dir = tmp.path().to_str().expect("valid path");
 
@@ -433,7 +428,7 @@ fn session_create_with_identity_flag() {
 }
 
 #[test]
-fn status_counts_update_after_session_create() {
+fn status_json_after_creates_reflects_correct_counts() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let work_dir = tmp.path().to_str().expect("valid path");
 
