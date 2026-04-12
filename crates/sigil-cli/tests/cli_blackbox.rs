@@ -10,33 +10,36 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Once;
+use std::sync::OnceLock;
 
-static BUILD_ONCE: Once = Once::new();
+/// Cached binary path — built once, reused across all tests in the process.
+static SIGIL_BIN: OnceLock<PathBuf> = OnceLock::new();
 
-/// Build the sigil binary once per test run and return its path.
-fn sigil_bin() -> PathBuf {
-    BUILD_ONCE.call_once(|| {
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "sigil"])
-            .status()
+/// Build the sigil binary and return its path.
+///
+/// Uses `cargo build --message-format=json` to parse the actual executable
+/// path from compiler artifacts, so it works with custom `CARGO_TARGET_DIR`,
+/// cross-compilation `--target` triples, and platform suffixes (`.exe`).
+fn sigil_bin() -> &'static Path {
+    SIGIL_BIN.get_or_init(|| {
+        let output = Command::new("cargo")
+            .args(["build", "--bin", "sigil", "--message-format=json"])
+            .output()
             .expect("failed to run cargo build");
-        assert!(status.success(), "cargo build failed");
-    });
+        assert!(
+            output.status.success(),
+            "cargo build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    // Locate the binary in the target directory.
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // crates/
-    path.pop(); // workspace root
-    path.push("target");
-    path.push("debug");
-    path.push("sigil");
-    assert!(
-        path.exists(),
-        "sigil binary not found at {}",
-        path.display()
-    );
-    path
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|msg| msg["reason"] == "compiler-artifact")
+            .filter_map(|msg| msg["executable"].as_str().map(PathBuf::from))
+            .next_back()
+            .expect("cargo build should produce an executable artifact")
+    })
 }
 
 /// Run the sigil binary with the given args, pointing `--db` at the
@@ -47,9 +50,8 @@ fn sigil_bin() -> PathBuf {
 fn run_sigil(tmp: &Path, args: &[&str]) -> Output {
     let sigil_dir = tmp.join(".sigil");
     let db_path = sigil_dir.join("sigil.db");
-    let bin = sigil_bin();
 
-    Command::new(&bin)
+    Command::new(sigil_bin())
         .arg("--db")
         .arg(&db_path)
         .args(args)
@@ -64,9 +66,7 @@ fn run_sigil(tmp: &Path, args: &[&str]) -> Output {
 
 /// Run sigil without injecting `--db` (for flag-level tests like --version).
 fn run_sigil_raw(args: &[&str]) -> Output {
-    let bin = sigil_bin();
-
-    Command::new(&bin)
+    Command::new(sigil_bin())
         .args(args)
         .output()
         .expect("failed to execute sigil binary")
