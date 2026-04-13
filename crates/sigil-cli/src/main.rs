@@ -13,5 +13,5 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = sigil_cli::Cli::parse();
-    sigil_cli::run(cli).await
+    Box::pin(sigil_cli::run(cli)).await
 }
