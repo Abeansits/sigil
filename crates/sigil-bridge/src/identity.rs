@@ -72,19 +72,25 @@ pub fn resolve_identity(
     }
 }
 
-/// Default identity config with placeholder IDs.
+/// Build identity config from environment variables with hardcoded fallbacks.
 ///
-/// In production these come from a config file; this provides a
-/// starting point for development and tests.
+/// Env vars (comma-separated `id:name:tier` triples):
+///   - `SIGIL_TELEGRAM_USERS` — e.g. `7279215778:Sebastian:T3`
+///   - `SIGIL_SLACK_USERS` — e.g. `U123:Sebastian:T3,U456:Paul:T1`
+///
+/// Falls back to compiled defaults if env vars are absent.
 #[must_use]
 pub fn default_config() -> IdentityConfig {
-    IdentityConfig {
-        allowed_telegram_ids: vec![AllowedUser {
+    let telegram_ids = parse_users_env("SIGIL_TELEGRAM_USERS").unwrap_or_else(|| {
+        vec![AllowedUser {
             platform_id: "7279215778".into(),
             display_name: "Sebastian".into(),
             tier_ceiling: Tier::T3,
-        }],
-        allowed_slack_ids: vec![
+        }]
+    });
+
+    let slack_ids = parse_users_env("SIGIL_SLACK_USERS").unwrap_or_else(|| {
+        vec![
             AllowedUser {
                 platform_id: "SEBASTIAN_SLACK_ID".into(),
                 display_name: "Sebastian".into(),
@@ -95,8 +101,42 @@ pub fn default_config() -> IdentityConfig {
                 display_name: "Paul".into(),
                 tier_ceiling: Tier::T1,
             },
-        ],
+        ]
+    });
+
+    IdentityConfig {
+        allowed_telegram_ids: telegram_ids,
+        allowed_slack_ids: slack_ids,
     }
+}
+
+/// Parse a comma-separated list of `id:name:tier` triples from an env var.
+///
+/// Returns `None` if the env var is absent. Skips malformed entries.
+fn parse_users_env(var: &str) -> Option<Vec<AllowedUser>> {
+    let val = std::env::var(var).ok()?;
+    let users = val
+        .split(',')
+        .filter_map(|entry| {
+            let mut parts = entry.trim().splitn(3, ':');
+            let platform_id = parts.next()?.to_owned();
+            let display_name = parts.next()?.to_owned();
+            let tier_str = parts.next()?;
+            let tier = match tier_str.to_uppercase().as_str() {
+                "T0" => Tier::T0,
+                "T2" => Tier::T2,
+                "T3" => Tier::T3,
+                // T1 is the default for any unrecognized tier
+                _ => Tier::T1,
+            };
+            Some(AllowedUser {
+                platform_id,
+                display_name,
+                tier_ceiling: tier,
+            })
+        })
+        .collect::<Vec<_>>();
+    if users.is_empty() { None } else { Some(users) }
 }
 
 #[cfg(test)]

@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn valid_message_produces_bridge_message() {
         let config = default_config();
-        let update = make_update("SEBASTIAN_TG_ID", "hello conductor");
+        let update = make_update("7279215778", "hello conductor");
         let result = process_telegram_update(&update, &config)
             .expect("should succeed")
             .expect("should have a message");
@@ -146,7 +146,7 @@ mod tests {
     fn oversized_message_is_rejected() {
         let config = default_config();
         let huge_text = "x".repeat(MAX_MESSAGE_BYTES + 1);
-        let update = make_update("SEBASTIAN_TG_ID", &huge_text);
+        let update = make_update("7279215778", &huge_text);
         let err = process_telegram_update(&update, &config).expect_err("should fail");
         assert!(matches!(err, BridgeError::MessageTooLarge { .. }));
     }
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn command_detection_works() {
         let config = default_config();
-        let update = make_update("SEBASTIAN_TG_ID", "/status");
+        let update = make_update("7279215778", "/status");
         let result = process_telegram_update(&update, &config)
             .expect("should succeed")
             .expect("should have a message");
@@ -165,7 +165,7 @@ mod tests {
     fn input_normalization_strips_invisible_chars() {
         let config = default_config();
         // Zero-width space injected into "hello"
-        let update = make_update("SEBASTIAN_TG_ID", "hel\u{200B}lo");
+        let update = make_update("7279215778", "hel\u{200B}lo");
         let result = process_telegram_update(&update, &config)
             .expect("should succeed")
             .expect("should have a message");

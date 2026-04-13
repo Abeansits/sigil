@@ -195,7 +195,7 @@ mod tests {
             update_id: 1,
             message: Some(TelegramMessage {
                 message_id: 100,
-                from_user_id: "SEBASTIAN_TG_ID".into(),
+                from_user_id: "7279215778".into(),
                 chat_id: 42,
                 text: "hello".into(),
                 date: 1_700_000_000,
