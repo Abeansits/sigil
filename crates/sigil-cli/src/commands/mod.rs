@@ -2,6 +2,7 @@ pub mod audit;
 pub mod bridge;
 pub mod conductor;
 pub mod identity;
+pub mod memory;
 pub mod run;
 pub mod session;
 pub mod status;
