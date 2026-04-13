@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use sigil_audit::AuditLogWriter;
 use sigil_core::error::CoreError;
 use sigil_core::protocol::ConductorMessage;
+use sigil_core::session::IdentitySpec;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionState, ToolKind};
-use sigil_core::traits::{SessionRuntime, ToolAdapter};
+use sigil_core::traits::{LifecycleHooks, SessionRuntime, ToolAdapter};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -494,6 +495,17 @@ fn parse_inspect_status(json_str: &str) -> SessionState {
         Some("stopped" | "exited" | "created") => SessionState::Stopped,
         // "unknown" and anything else map to Error.
         _ => SessionState::Error,
+    }
+}
+
+impl LifecycleHooks for ContainerRuntime {
+    /// Containers don't support lifecycle hooks in Phase 1.
+    async fn register_identity_hooks(
+        &self,
+        _handle: &SessionHandle,
+        _spec: &IdentitySpec,
+    ) -> Result<(), CoreError> {
+        Ok(())
     }
 }
 

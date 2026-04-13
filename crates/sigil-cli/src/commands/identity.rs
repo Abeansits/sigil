@@ -48,7 +48,7 @@ async fn reload<R: SessionRuntime>(
         .ok_or_else(|| anyhow::anyhow!("session '{name}' has no identity spec configured"))?;
 
     let message = build_reload_message(spec);
-    let handle = super::session::record_to_handle(&session);
+    let handle = sigil_conductor::action_service::record_to_handle(&session);
 
     runtime
         .send(
@@ -89,7 +89,7 @@ async fn snapshot<R: SessionRuntime>(
     }
 
     let message = build_snapshot_message();
-    let handle = super::session::record_to_handle(&session);
+    let handle = sigil_conductor::action_service::record_to_handle(&session);
 
     runtime
         .send(

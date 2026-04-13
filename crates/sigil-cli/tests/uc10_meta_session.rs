@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use sigil_audit::AuditLogWriter;
 use sigil_cli::SessionCommands;
+use sigil_conductor::action_service::ActionService;
 use sigil_core::session::SessionState;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -37,7 +39,10 @@ async fn cleanup(server: &str) {
         .await;
 }
 
-async fn setup(dir: &tempfile::TempDir, server: &str) -> (Store, TmuxRuntime, Arc<AuditLogWriter>) {
+async fn setup(
+    dir: &tempfile::TempDir,
+    server: &str,
+) -> (Arc<Store>, Arc<TmuxRuntime>, Arc<AuditLogWriter>) {
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
     let store = Store::new(db_str).await.expect("store should init");
@@ -47,7 +52,21 @@ async fn setup(dir: &tempfile::TempDir, server: &str) -> (Store, TmuxRuntime, Ar
     let writer = AuditLogWriter::new(&audit_path, key)
         .await
         .expect("audit writer should init");
-    (store, runtime, Arc::new(writer))
+    (Arc::new(store), Arc::new(runtime), Arc::new(writer))
+}
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
 }
 
 #[tokio::test]
@@ -61,15 +80,14 @@ async fn meta_session_echo_roundtrip() {
     cleanup(SERVER).await;
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, SERVER).await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid path").to_owned();
     let title = "uc10-meta".to_owned();
     let marker = format!("hello-from-sigil-uc10-{}", std::process::id());
 
     // ── CREATE + START ─────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir.clone(),
             title: title.clone(),
@@ -82,9 +100,7 @@ async fn meta_session_echo_roundtrip() {
     .expect("create should succeed");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: title.clone(),
         },
@@ -99,9 +115,7 @@ async fn meta_session_echo_roundtrip() {
 
     // ── SEND echo ───────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Send {
             name: title.clone(),
             message: format!("echo {marker}"),
@@ -127,7 +141,7 @@ async fn meta_session_echo_roundtrip() {
         sandboxed: rec.sandboxed,
         identity: None,
     };
-    let output = sigil_core::traits::SessionRuntime::read_output(&runtime, &handle)
+    let output = sigil_core::traits::SessionRuntime::read_output(runtime.as_ref(), &handle)
         .await
         .expect("read_output should succeed");
     println!("--- captured output ---\n{output}\n--- end ---");
@@ -138,9 +152,7 @@ async fn meta_session_echo_roundtrip() {
 
     // ── STOP + REMOVE ─────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: title.clone(),
         },
@@ -149,9 +161,7 @@ async fn meta_session_echo_roundtrip() {
     .expect("stop should succeed");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Remove {
             name: title.clone(),
         },

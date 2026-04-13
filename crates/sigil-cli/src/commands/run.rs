@@ -61,11 +61,14 @@ pub async fn run<R: SessionRuntime>(
 ) -> Result<()> {
     println!("{}\n", crate::banner::BANNER);
 
-    let conductor = Arc::new(Conductor::new(
-        Arc::clone(&store),
-        Arc::clone(&runtime),
-        Duration::from_secs(interval),
-    ));
+    let conductor = Arc::new(
+        Conductor::new(
+            Arc::clone(&store),
+            Arc::clone(&runtime),
+            Duration::from_secs(interval),
+        )
+        .with_audit(Arc::clone(&audit)),
+    );
 
     // Reconcile DB state with live runtime before entering the loop.
     do_reconcile(&conductor, &audit).await;

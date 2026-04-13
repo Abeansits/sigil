@@ -28,7 +28,7 @@ pub use episode::{EpisodeEvent, EpisodeId, EpisodeKind};
 pub use error::CoreError;
 pub use id::{GroupId, RequestId, SessionId};
 pub use origin::ActionOrigin;
-pub use principal::Principal;
+pub use principal::{PlatformIdentity, Principal};
 pub use protocol::{AgentSignal, BridgeMessage, ConductorMessage, ReplyContext};
 pub use session::{
     IdentitySpec, LifecycleEvent, SessionConfig, SessionHandle, SessionRecord, SessionState,
