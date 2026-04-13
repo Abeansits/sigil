@@ -51,12 +51,17 @@ cat > "$WRAPPER" <<SCRIPT
 
 set -euo pipefail
 
-export SIGIL_TELEGRAM_TOKEN="\$(
+SIGIL_TELEGRAM_TOKEN="\$(
   security find-generic-password -s sigil-telegram-token -a "\$USER" -w 2>/dev/null
-)" || {
+)"
+
+if [[ -z "\$SIGIL_TELEGRAM_TOKEN" ]]; then
   echo "Error: could not read sigil-telegram-token from Keychain." >&2
+  echo "Store it with: security add-generic-password -s sigil-telegram-token -a \\\$USER -w <token>" >&2
   exit 1
-}
+fi
+
+export SIGIL_TELEGRAM_TOKEN
 
 exec "$SIGIL_BIN" run --bridge telegram --interval 30
 SCRIPT
