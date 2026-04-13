@@ -106,7 +106,11 @@ where
                     message: format!("policy evaluation failed: {e}"),
                 })?;
 
-        // 2. Dispatch if allowed, building the outcome.
+        // 2. Audit — log the real decision before dispatch so the
+        //    decision is recorded even if dispatch fails.
+        self.audit_decision(&request, &decision).await;
+
+        // 3. Dispatch if allowed, building the outcome.
         let outcome = match &decision {
             PolicyDecision::Allow => {
                 let result = self.dispatch(&request).await?;
@@ -119,9 +123,6 @@ where
                 description: description.clone(),
             },
         };
-
-        // 3. Audit — log the real decision (not hardcoded Allow).
-        self.audit_decision(&request, &decision).await;
 
         Ok(outcome)
     }
