@@ -80,7 +80,7 @@ pub fn resolve_identity(
 pub fn default_config() -> IdentityConfig {
     IdentityConfig {
         allowed_telegram_ids: vec![AllowedUser {
-            platform_id: "SEBASTIAN_TG_ID".into(),
+            platform_id: "7279215778".into(),
             display_name: "Sebastian".into(),
             tier_ceiling: Tier::T3,
         }],
@@ -109,7 +109,7 @@ mod tests {
     fn known_telegram_sender_resolves_correctly() {
         let config = default_config();
         let origin = ActionOrigin::BridgeTelegram {
-            user_id: "SEBASTIAN_TG_ID".into(),
+            user_id: "7279215778".into(),
         };
         let user = resolve_identity(&config, &origin).expect("should resolve");
         assert_eq!(user.display_name, "Sebastian");
