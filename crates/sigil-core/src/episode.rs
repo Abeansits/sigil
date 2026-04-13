@@ -83,6 +83,42 @@ pub enum EpisodeKind {
     StateCheckpoint,
 }
 
+impl fmt::Display for EpisodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::ActionCompleted => "ActionCompleted",
+            Self::ToolOutcome => "ToolOutcome",
+            Self::ApprovalDecision => "ApprovalDecision",
+            Self::UserCorrection => "UserCorrection",
+            Self::CandidateLearning => "CandidateLearning",
+            Self::SessionSummary => "SessionSummary",
+            Self::StateCheckpoint => "StateCheckpoint",
+        };
+        f.write_str(s)
+    }
+}
+
+impl FromStr for EpisodeKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ActionCompleted" => Ok(Self::ActionCompleted),
+            "ToolOutcome" => Ok(Self::ToolOutcome),
+            "ApprovalDecision" => Ok(Self::ApprovalDecision),
+            "UserCorrection" => Ok(Self::UserCorrection),
+            "CandidateLearning" => Ok(Self::CandidateLearning),
+            "SessionSummary" => Ok(Self::SessionSummary),
+            "StateCheckpoint" => Ok(Self::StateCheckpoint),
+            _ => Err(format!(
+                "unknown episode kind '{s}' (expected ActionCompleted, ToolOutcome, \
+                 ApprovalDecision, UserCorrection, CandidateLearning, SessionSummary, \
+                 or StateCheckpoint)"
+            )),
+        }
+    }
+}
+
 /// A single episode captured during a session.
 ///
 /// Episodes are the raw material for memory consolidation. They are
@@ -204,6 +240,35 @@ mod tests {
         let deserialized: EpisodeEvent = serde_json::from_str(&json).unwrap();
         assert!(deserialized.details.is_none());
         assert!(deserialized.tags.is_empty());
+    }
+
+    #[test]
+    fn episode_kind_display_round_trips_through_from_str() {
+        let kinds = [
+            EpisodeKind::ActionCompleted,
+            EpisodeKind::ToolOutcome,
+            EpisodeKind::ApprovalDecision,
+            EpisodeKind::UserCorrection,
+            EpisodeKind::CandidateLearning,
+            EpisodeKind::SessionSummary,
+            EpisodeKind::StateCheckpoint,
+        ];
+        for kind in &kinds {
+            let s = kind.to_string();
+            let parsed: EpisodeKind = s.parse().unwrap();
+            assert_eq!(*kind, parsed);
+        }
+    }
+
+    #[test]
+    fn episode_kind_from_str_rejects_unknown() {
+        let result = "Unknown".parse::<EpisodeKind>();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Unknown"),
+            "error should mention the bad value: {err}"
+        );
     }
 
     #[test]
