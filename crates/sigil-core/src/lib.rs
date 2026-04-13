@@ -23,7 +23,10 @@ pub mod trust;
 
 // Re-export the most commonly used types at crate root for ergonomics.
 pub use action::{Action, ActionRequest, CommandTemplate, GitOperation, PolicyDecision};
-pub use config::{MemoryConfig, MemoryConfigSection};
+pub use config::{
+    BridgeConfigSection, BridgePlatformConfig, BridgeUserEntry, MemoryConfig, MemoryConfigSection,
+    parse_tier,
+};
 pub use episode::{EpisodeEvent, EpisodeId, EpisodeKind};
 pub use error::CoreError;
 pub use id::{GroupId, RequestId, SessionId};
