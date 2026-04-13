@@ -18,22 +18,28 @@ use sigil_bridge::{
 use sigil_conductor::Conductor;
 use sigil_core::CoreError;
 use sigil_core::PolicyDecision;
-use sigil_core::protocol::BridgeMessage;
+use sigil_core::protocol::{BridgeMessage, ReplyContext};
 use sigil_core::traits::{MessageSink, SessionRuntime};
+use tokio::sync::mpsc;
 
 use crate::BridgeCommands;
 use crate::audit::log_event;
+
+/// Channel capacity for bridge response delivery.
+const REPLY_CHANNEL_CAPACITY: usize = 64;
 
 /// A [`MessageSink`] that routes bridge messages through the conductor.
 ///
 /// On each accepted message the sink:
 /// 1. Forwards to [`Conductor::handle_message`] for command routing and
 ///    session dispatch.
-/// 2. Logs the conductor's response via tracing.
+/// 2. Sends the conductor's response (with [`ReplyContext`]) back
+///    through the reply channel so the bridge loop can deliver it.
 /// 3. Records an audit event.
 pub(crate) struct ConductorSink<R: SessionRuntime> {
     conductor: Arc<Conductor<R>>,
     audit: Arc<AuditLogWriter>,
+    reply_tx: mpsc::Sender<(ReplyContext, String)>,
 }
 
 impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
@@ -45,9 +51,14 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
             "bridge message received"
         );
 
+        let reply_context = message.reply_context.clone();
         let response = self.conductor.handle_message(&message).await?;
 
         info!(response = %response, "conductor response");
+
+        if let Err(e) = self.reply_tx.send((reply_context, response)).await {
+            tracing::warn!(error = %e, "failed to enqueue bridge reply");
+        }
 
         log_event(
             &self.audit,
@@ -128,9 +139,12 @@ async fn run_telegram<R: SessionRuntime>(
     let client = TelegramClient::new(&token).context("failed to build Telegram client")?;
     let identity = load_identity_config();
     let mut bridge = TelegramBridge::new(client, identity);
+
+    let (reply_tx, mut reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
     let sink = ConductorSink {
         conductor,
         audit: Arc::clone(&audit),
+        reply_tx,
     };
 
     log_event(
@@ -145,7 +159,7 @@ async fn run_telegram<R: SessionRuntime>(
     println!("Telegram bridge running. Press Ctrl-C to stop.");
 
     bridge
-        .run(&sink, cancel)
+        .run(&sink, cancel, &mut reply_rx)
         .await
         .context("telegram bridge loop failed")?;
 
@@ -176,9 +190,12 @@ async fn run_slack<R: SessionRuntime>(
         SlackClient::new(&bot_token, &app_token).context("failed to build Slack client")?;
     let identity = load_identity_config();
     let mut bridge = SlackBridge::new(client, identity);
+
+    let (reply_tx, mut reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
     let sink = ConductorSink {
         conductor,
         audit: Arc::clone(&audit),
+        reply_tx,
     };
 
     log_event(
@@ -193,7 +210,7 @@ async fn run_slack<R: SessionRuntime>(
     println!("Slack bridge running. Press Ctrl-C to stop.");
 
     bridge
-        .run(&sink, cancel)
+        .run(&sink, cancel, &mut reply_rx)
         .await
         .context("slack bridge loop failed")?;
 
@@ -230,13 +247,18 @@ async fn run_all<R: SessionRuntime>(
     let mut tg_bridge = TelegramBridge::new(tg_client, identity.clone());
     let mut slack_bridge = SlackBridge::new(slack_client, identity);
 
+    let (tg_reply_tx, mut tg_reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
+    let (slack_reply_tx, mut slack_reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
+
     let tg_sink = ConductorSink {
         conductor: Arc::clone(&conductor),
         audit: Arc::clone(&audit),
+        reply_tx: tg_reply_tx,
     };
     let slack_sink = ConductorSink {
         conductor,
         audit: Arc::clone(&audit),
+        reply_tx: slack_reply_tx,
     };
 
     log_event(
@@ -254,8 +276,8 @@ async fn run_all<R: SessionRuntime>(
     let slack_cancel = cancel;
 
     let (tg_result, slack_result) = tokio::join!(
-        tg_bridge.run(&tg_sink, tg_cancel),
-        slack_bridge.run(&slack_sink, slack_cancel),
+        tg_bridge.run(&tg_sink, tg_cancel, &mut tg_reply_rx),
+        slack_bridge.run(&slack_sink, slack_cancel, &mut slack_reply_rx),
     );
 
     if let Err(e) = &tg_result {

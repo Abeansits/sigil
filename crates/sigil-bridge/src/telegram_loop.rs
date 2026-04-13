@@ -6,12 +6,14 @@
 
 use std::time::Duration;
 
+use sigil_core::protocol::ReplyContext;
 use sigil_core::traits::MessageSink;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::BridgeError;
 use crate::identity::IdentityConfig;
-use crate::telegram::process_telegram_update;
+use crate::telegram::{TelegramUpdate, process_telegram_update};
 use crate::telegram_client::TelegramClient;
 
 /// Delay before retrying after a poll error.
@@ -35,6 +37,11 @@ impl TelegramBridge {
 
     /// Run the poll-process-route loop until cancelled.
     ///
+    /// Continuously:
+    /// 1. Polls Telegram for new updates and routes them to the sink.
+    /// 2. Receives conductor responses from `reply_rx` and sends them
+    ///    back to the originating Telegram chat.
+    ///
     /// - On poll errors: logs a warning, sleeps [`RETRY_DELAY`], and
     ///   retries.
     /// - On processing errors (unknown sender, oversized message):
@@ -49,32 +56,54 @@ impl TelegramBridge {
         &mut self,
         sink: &S,
         cancel: CancellationToken,
+        reply_rx: &mut mpsc::Receiver<(ReplyContext, String)>,
     ) -> Result<(), BridgeError> {
+        // Use an enum so the select block only captures data, avoiding
+        // mutable borrow conflicts between `self.client.poll()` and
+        // `self.client.send_message()`.
+        enum Action {
+            Shutdown,
+            Reply(ReplyContext, String),
+            Poll(Result<Vec<TelegramUpdate>, BridgeError>),
+        }
+
         loop {
-            tokio::select! {
+            let action = tokio::select! {
                 biased;
 
-                () = cancel.cancelled() => {
+                () = cancel.cancelled() => Action::Shutdown,
+
+                Some((ctx, text)) = reply_rx.recv() => Action::Reply(ctx, text),
+
+                result = self.client.poll() => Action::Poll(result),
+            };
+
+            match action {
+                Action::Shutdown => {
                     tracing::info!("telegram bridge: shutting down");
                     return Ok(());
                 }
-
-                result = self.client.poll() => {
-                    match result {
-                        Ok(updates) => {
-                            self.process_updates(sink, &updates).await;
+                Action::Reply(ctx, text) => {
+                    if let Some(chat_id) = ctx.chat_id {
+                        if let Err(e) = self.client.send_message(chat_id, &text).await {
+                            tracing::warn!(
+                                error = %e,
+                                chat_id,
+                                "telegram bridge: failed to send reply"
+                            );
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "telegram poll failed, retrying");
-                            // Use select so we can still honour cancellation
-                            // during the retry delay.
-                            tokio::select! {
-                                () = tokio::time::sleep(RETRY_DELAY) => {}
-                                () = cancel.cancelled() => {
-                                    tracing::info!("telegram bridge: shutting down during retry");
-                                    return Ok(());
-                                }
-                            }
+                    }
+                }
+                Action::Poll(Ok(updates)) => {
+                    self.process_updates(sink, &updates).await;
+                }
+                Action::Poll(Err(e)) => {
+                    tracing::warn!(error = %e, "telegram poll failed, retrying");
+                    tokio::select! {
+                        () = tokio::time::sleep(RETRY_DELAY) => {}
+                        () = cancel.cancelled() => {
+                            tracing::info!("telegram bridge: shutting down during retry");
+                            return Ok(());
                         }
                     }
                 }
@@ -83,11 +112,7 @@ impl TelegramBridge {
     }
 
     /// Process a batch of updates, routing valid messages to the sink.
-    async fn process_updates<S: MessageSink>(
-        &self,
-        sink: &S,
-        updates: &[crate::telegram::TelegramUpdate],
-    ) {
+    async fn process_updates<S: MessageSink>(&self, sink: &S, updates: &[TelegramUpdate]) {
         for update in updates {
             match process_telegram_update(update, &self.identity_config) {
                 Ok(Some(bridge_msg)) => {
@@ -126,7 +151,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::identity::default_config;
-    use crate::telegram::{TelegramMessage, TelegramUpdate};
+    use crate::telegram::TelegramMessage;
 
     use super::*;
 
@@ -255,11 +280,12 @@ mod tests {
 
         let (sink, _messages) = RecordingSink::new();
         let cancel = CancellationToken::new();
+        let (_reply_tx, mut reply_rx) = mpsc::channel(8);
 
         // Cancel immediately so the loop exits on first select.
         cancel.cancel();
 
-        let result = bridge.run(&sink, cancel).await;
+        let result = bridge.run(&sink, cancel, &mut reply_rx).await;
         assert!(result.is_ok());
     }
 }

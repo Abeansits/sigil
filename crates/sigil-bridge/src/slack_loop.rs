@@ -8,7 +8,9 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use sigil_core::protocol::ReplyContext;
 use sigil_core::traits::MessageSink;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -60,6 +62,11 @@ impl SlackBridge {
 
     /// Run the connect-read-process loop until cancelled.
     ///
+    /// Continuously:
+    /// 1. Reads Slack Socket Mode events and routes them to the sink.
+    /// 2. Receives conductor responses from `reply_rx` and sends them
+    ///    back to the originating Slack channel.
+    ///
     /// On WebSocket disconnect or error the bridge sleeps for
     /// [`RECONNECT_DELAY`], obtains a fresh WSS URL, and reconnects.
     ///
@@ -71,6 +78,7 @@ impl SlackBridge {
         &mut self,
         sink: &S,
         cancel: CancellationToken,
+        reply_rx: &mut mpsc::Receiver<(ReplyContext, String)>,
     ) -> Result<(), BridgeError> {
         loop {
             if cancel.is_cancelled() {
@@ -126,6 +134,18 @@ impl SlackBridge {
                         // Attempt a clean close; ignore errors.
                         let _ = ws_write.send(Message::Close(None)).await;
                         return Ok(());
+                    }
+
+                    Some((ctx, text)) = reply_rx.recv() => {
+                        if let Some(ref channel) = ctx.channel_id {
+                            if let Err(e) = self.client.send_message(channel, &text).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    channel,
+                                    "slack bridge: failed to send reply"
+                                );
+                            }
+                        }
                     }
 
                     frame = ws_read.next() => {
@@ -374,11 +394,12 @@ mod tests {
 
         let (sink, _messages) = RecordingSink::new();
         let cancel = CancellationToken::new();
+        let (_reply_tx, mut reply_rx) = mpsc::channel(8);
 
         // Cancel immediately so the loop exits before connecting.
         cancel.cancel();
 
-        let result = bridge.run(&sink, cancel).await;
+        let result = bridge.run(&sink, cancel, &mut reply_rx).await;
         assert!(result.is_ok());
     }
 }

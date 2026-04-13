@@ -148,6 +148,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use sigil_core::CoreError;
+    use sigil_core::protocol::ReplyContext;
 
     use super::*;
 
@@ -220,6 +221,7 @@ mod tests {
             text: "hello".into(),
             target_session: None,
             is_command: false,
+            reply_context: ReplyContext::default(),
         };
         router.route(msg).await.expect("should succeed");
     }
@@ -235,6 +237,7 @@ mod tests {
             text: "hello".into(),
             target_session: None,
             is_command: false,
+            reply_context: ReplyContext::default(),
         };
         let err = router.route(msg).await.expect_err("should fail");
         assert!(matches!(err, BridgeError::Platform { .. }));
@@ -254,6 +257,7 @@ mod tests {
                 text: "msg".into(),
                 target_session: None,
                 is_command: false,
+                reply_context: ReplyContext::default(),
             };
             router.route(msg).await.expect("should succeed");
         }
@@ -266,6 +270,7 @@ mod tests {
             text: "too many".into(),
             target_session: None,
             is_command: false,
+            reply_context: ReplyContext::default(),
         };
         let err = router.route(msg).await.expect_err("should be rate limited");
         assert!(matches!(err, BridgeError::RateLimited { .. }));
@@ -283,6 +288,7 @@ mod tests {
                 text: "local".into(),
                 target_session: None,
                 is_command: false,
+                reply_context: ReplyContext::default(),
             };
             router
                 .route(msg)
