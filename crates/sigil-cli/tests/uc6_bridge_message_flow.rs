@@ -95,7 +95,7 @@ impl MessageSink for RejectingSink {
 #[test]
 fn known_telegram_sender_resolves_and_routes() {
     let config = default_config();
-    let update = tg_update("SEBASTIAN_TG_ID", "check status");
+    let update = tg_update("7279215778", "check status");
     let result = process_telegram_update(&update, &config)
         .expect("should succeed")
         .expect("should have message");
@@ -104,7 +104,7 @@ fn known_telegram_sender_resolves_and_routes() {
     assert!(!result.is_command);
     assert_matches!(
         result.origin,
-        ActionOrigin::BridgeTelegram { ref user_id } if user_id == "SEBASTIAN_TG_ID"
+        ActionOrigin::BridgeTelegram { ref user_id } if user_id == "7279215778"
     );
 }
 
@@ -144,7 +144,7 @@ fn unknown_slack_sender_is_rejected() {
 #[test]
 fn zero_width_characters_stripped_from_telegram() {
     let config = default_config();
-    let update = tg_update("SEBASTIAN_TG_ID", "/sta\u{200B}tu\u{200C}s");
+    let update = tg_update("7279215778", "/sta\u{200B}tu\u{200C}s");
     let result = process_telegram_update(&update, &config)
         .expect("ok")
         .expect("message");
@@ -166,7 +166,7 @@ fn directional_overrides_stripped_from_slack() {
 #[test]
 fn tag_characters_stripped() {
     let config = default_config();
-    let update = tg_update("SEBASTIAN_TG_ID", "safe\u{E0001}\u{E0065}text");
+    let update = tg_update("7279215778", "safe\u{E0001}\u{E0065}text");
     let result = process_telegram_update(&update, &config)
         .expect("ok")
         .expect("message");
@@ -368,7 +368,7 @@ async fn telegram_end_to_end_pipeline() {
     let router = BridgeRouter::new(Arc::clone(&sink));
 
     // Build a telegram message with invisible chars.
-    let update = tg_update("SEBASTIAN_TG_ID", "/sta\u{200B}tus");
+    let update = tg_update("7279215778", "/sta\u{200B}tus");
     let msg = process_telegram_update(&update, &config)
         .expect("process ok")
         .expect("has message");
@@ -416,7 +416,7 @@ async fn pipeline_with_rate_limiting_cutoff() {
     let router = BridgeRouter::with_rate_limits(Arc::clone(&sink), 3, 100);
 
     for i in 0..3 {
-        let update = tg_update("SEBASTIAN_TG_ID", &format!("msg-{i}"));
+        let update = tg_update("7279215778", &format!("msg-{i}"));
         let msg = process_telegram_update(&update, &config)
             .expect("ok")
             .expect("msg");
@@ -424,7 +424,7 @@ async fn pipeline_with_rate_limiting_cutoff() {
     }
 
     // Fourth message should be rate-limited at the router.
-    let update = tg_update("SEBASTIAN_TG_ID", "msg-3");
+    let update = tg_update("7279215778", "msg-3");
     let msg = process_telegram_update(&update, &config)
         .expect("ok")
         .expect("msg");
@@ -471,7 +471,7 @@ fn custom_identity_config_resolves_additional_users() {
     assert_eq!(result.text, "hello");
 
     // Default config user should NOT resolve with the custom config.
-    let update = tg_update("SEBASTIAN_TG_ID", "hello");
+    let update = tg_update("7279215778", "hello");
     let err = process_telegram_update(&update, &config).expect_err("should reject");
     assert_matches!(err, BridgeError::UnknownSender { .. });
 }
