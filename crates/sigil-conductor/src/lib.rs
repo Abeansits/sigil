@@ -12,19 +12,24 @@
 pub mod error;
 pub mod escalation;
 pub mod heartbeat;
+pub mod memory;
 pub mod reconcile;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sigil_core::MemoryConfig;
 use sigil_core::protocol::BridgeMessage;
 use sigil_core::traits::SessionRuntime;
+use sigil_memory::EpisodeWriter;
 use sigil_store::Store;
 use tracing::{debug, info, warn};
 
 use crate::error::ConductorError;
 use crate::escalation::format_status_report;
 use crate::heartbeat::{HeartbeatResult, scan_sessions};
+use crate::memory::MemoryHandle;
 use crate::reconcile::{ReconcileResult, reconcile};
 
 /// The conductor — orchestrates agent sessions.
@@ -36,10 +41,16 @@ use crate::reconcile::{ReconcileResult, reconcile};
 /// Holds shared references to the store and runtime, plus configuration
 /// for the heartbeat interval. The `sigil-cli` crate wires this into an
 /// async run loop with `CancellationToken` for cooperative shutdown.
+///
+/// When memory is configured via [`with_memory`](Self::with_memory),
+/// the conductor captures episodes on heartbeat state transitions and
+/// bridge sends, and triggers mechanical consolidation after sustained
+/// idle periods.
 pub struct Conductor<R: SessionRuntime> {
     store: Arc<Store>,
     runtime: Arc<R>,
     heartbeat_interval: Duration,
+    memory: Option<MemoryHandle>,
 }
 
 impl<R: SessionRuntime> Conductor<R> {
@@ -50,7 +61,27 @@ impl<R: SessionRuntime> Conductor<R> {
             store,
             runtime,
             heartbeat_interval,
+            memory: None,
         }
+    }
+
+    /// Configure the memory subsystem for episode capture and consolidation.
+    ///
+    /// When set, the conductor will:
+    /// - Append `ActionCompleted` episodes when heartbeat detects state
+    ///   transitions (e.g. `Running` → `Waiting`).
+    /// - Append episodes when bridge messages are sent to sessions.
+    /// - Track consecutive idle heartbeat cycles and trigger mechanical
+    ///   consolidation when the threshold is reached.
+    #[must_use]
+    pub fn with_memory(
+        mut self,
+        writer: Arc<EpisodeWriter>,
+        config: MemoryConfig,
+        learnings_path: PathBuf,
+    ) -> Self {
+        self.memory = Some(MemoryHandle::new(writer, config, learnings_path));
+        self
     }
 
     /// Returns the configured heartbeat interval.
@@ -91,7 +122,8 @@ impl<R: SessionRuntime> Conductor<R> {
     /// Run one heartbeat scan cycle.
     ///
     /// Delegates to [`scan_sessions`] and logs the result. Also runs
-    /// periodic maintenance (expired grant cleanup).
+    /// periodic maintenance (expired grant cleanup), records episodes
+    /// for state transitions, and triggers consolidation on idle.
     ///
     /// # Errors
     ///
@@ -105,6 +137,26 @@ impl<R: SessionRuntime> Conductor<R> {
             Ok(0) => {}
             Ok(n) => info!(removed = n, "cleaned up expired grants"),
             Err(e) => warn!(error = %e, "failed to clean up expired grants"),
+        }
+
+        // Memory: episode capture and idle consolidation.
+        if let Some(ref memory) = self.memory {
+            // Record episodes for actionable state transitions.
+            if let Err(e) = memory.record_state_changes(&result.state_changes).await {
+                warn!(error = %e, "failed to record state change episodes");
+            }
+
+            // Idle detection: no sessions running or errored.
+            if result.running == 0 && result.error == 0 {
+                if memory.consolidation_enabled() && memory.record_idle_cycle() {
+                    if let Err(e) = memory.consolidate().await {
+                        warn!(error = %e, "consolidation failed");
+                    }
+                    memory.reset_idle_cycles();
+                }
+            } else {
+                memory.reset_idle_cycles();
+            }
         }
 
         info!(
@@ -148,6 +200,13 @@ impl<R: SessionRuntime> Conductor<R> {
                 .map_err(|e| ConductorError::Internal {
                     message: format!("failed to send to session {}: {e}", session.title),
                 })?;
+
+            if let Some(ref memory) = self.memory {
+                if let Err(e) = memory.record_bridge_send(session.id, &session.title).await {
+                    warn!(error = %e, "failed to write bridge episode");
+                }
+            }
+
             return Ok(format!("Message sent to {}.", session.title));
         }
 
@@ -233,6 +292,13 @@ impl<R: SessionRuntime> Conductor<R> {
                     .map_err(|e| ConductorError::Internal {
                         message: format!("failed to send to {name}: {e}"),
                     })?;
+
+                if let Some(ref memory) = self.memory {
+                    if let Err(e) = memory.record_bridge_send(session.id, name).await {
+                        warn!(error = %e, "failed to write bridge episode");
+                    }
+                }
+
                 Ok(format!("Sent to {name}."))
             }
 

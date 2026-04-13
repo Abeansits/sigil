@@ -1778,6 +1778,7 @@ dependencies = [
  "serde_json",
  "sigil-audit",
  "sigil-core",
+ "sigil-memory",
  "sigil-policy",
  "sigil-runtime",
  "sigil-store",
