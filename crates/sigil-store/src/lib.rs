@@ -265,6 +265,44 @@ mod tests {
         assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
     }
 
+    #[tokio::test]
+    async fn duplicate_title_rejected_with_clear_error() {
+        let store = Store::new_in_memory().await.expect("init");
+        let first = make_session("same-title");
+        store.create_session(&first).await.expect("create first");
+
+        let second = make_session("same-title");
+        let result = store.create_session(&second).await;
+        assert_matches!(result, Err(StoreError::DuplicateTitle { title }) if title == "same-title");
+    }
+
+    #[tokio::test]
+    async fn duplicate_id_returns_database_error_not_duplicate_title() {
+        let store = Store::new_in_memory().await.expect("init");
+        let first = make_session("title-a");
+        store.create_session(&first).await.expect("create first");
+
+        // Same ID, different title — should be a Database error, not DuplicateTitle.
+        let mut second = make_session("title-b");
+        second.id = first.id;
+        let result = store.create_session(&second).await;
+        assert_matches!(result, Err(StoreError::Database(_)));
+    }
+
+    #[tokio::test]
+    async fn v003_migration_is_idempotent() {
+        let store = Store::new_in_memory().await.expect("init");
+
+        // Delete the V003 record and re-run migrations.
+        sqlx::query("DELETE FROM schema_version WHERE version = 3")
+            .execute(&store.pool)
+            .await
+            .expect("delete v003 record");
+
+        let result = migrate::run_migrations(&store.pool).await;
+        assert!(result.is_ok());
+    }
+
     // -- Identity persistence tests --
 
     #[tokio::test]

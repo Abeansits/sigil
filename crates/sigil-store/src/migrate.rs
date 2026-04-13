@@ -90,6 +90,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StoreError> {
 
     // Phase 2: programmatic migrations that need conditional logic.
     apply_v002_identity_column(pool).await?;
+    apply_v003_unique_session_title(pool).await?;
 
     Ok(())
 }
@@ -145,6 +146,27 @@ async fn apply_v002_identity_column(pool: &SqlitePool) -> Result<(), StoreError>
             .execute(pool)
             .await?;
     }
+
+    record_migration(pool, VERSION, DESCRIPTION).await
+}
+
+/// V003: add UNIQUE index on `sessions.title`.
+///
+/// Uses `CREATE UNIQUE INDEX IF NOT EXISTS` so the migration is idempotent.
+async fn apply_v003_unique_session_title(pool: &SqlitePool) -> Result<(), StoreError> {
+    const VERSION: i64 = 3;
+    const DESCRIPTION: &str = "add unique index on session title";
+
+    if migration_applied(pool, VERSION).await? {
+        tracing::debug!(VERSION, DESCRIPTION, "migration already applied, skipping");
+        return Ok(());
+    }
+
+    tracing::info!(VERSION, DESCRIPTION, "applying migration");
+
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title)")
+        .execute(pool)
+        .await?;
 
     record_migration(pool, VERSION, DESCRIPTION).await
 }

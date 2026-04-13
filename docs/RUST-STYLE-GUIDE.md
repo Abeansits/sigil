@@ -1,6 +1,6 @@
 # Rust Workspace Style Guide
 
-**Target:** Multi-crate workspace (8 crates, async/tokio, SQLite, CLI tool)
+**Target:** Multi-crate workspace (10 crates, async/tokio, SQLite, CLI tool)
 **Rust edition:** 2024 (stable since Rust 1.85.0, February 2025)
 **Minimum Rust version:** 1.85.0
 **Last updated:** 2026-04-03

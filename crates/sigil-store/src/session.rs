@@ -18,7 +18,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Database`] if the insert fails (e.g. duplicate ID)
+    /// Returns [`StoreError::DuplicateTitle`] if a session with the same
+    /// title already exists, [`StoreError::Database`] if the insert fails,
     /// or [`StoreError::Serialization`] if enum serialization fails.
     pub async fn create_session(&self, record: &SessionRecord) -> Result<(), StoreError> {
         let id = record.id.to_string();
@@ -36,7 +37,7 @@ impl Store {
             .map(serde_json::to_string)
             .transpose()?;
 
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO sessions (id, title, path, tool, group_id, parent_id, \
              execution_class, sandboxed, state, identity_json) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -52,9 +53,20 @@ impl Store {
         .bind(&state)
         .bind(&identity_json)
         .execute(&self.pool)
-        .await?;
+        .await;
 
-        Ok(())
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(ref db_err))
+                if db_err.code().as_deref() == Some("2067")
+                    && db_err.message().contains("sessions.title") =>
+            {
+                Err(StoreError::DuplicateTitle {
+                    title: record.title.clone(),
+                })
+            }
+            Err(e) => Err(StoreError::Database(e)),
+        }
     }
 
     /// Fetch a session by its unique ID.

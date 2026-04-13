@@ -15,6 +15,7 @@ sigil/
     sigil-audit/
     sigil-policy/
     sigil-store/
+    sigil-memory/
     sigil-runtime/
     sigil-conductor/
     sigil-bridge/
@@ -33,6 +34,7 @@ sigil/
 | `sigil-runtime` | tmux + container `SessionRuntime` backends, domain proxy, MCP socket, Claude Code adapter, worktree manager |
 | `sigil-conductor` | Heartbeat scans, reconciliation, status formatting, bridge message handling |
 | `sigil-bridge` | Telegram/Slack parsing, identity allowlisting, rate limiting, routing, live loops |
+| `sigil-memory` | Operational memory — episode logging, mechanical consolidation of learnings |
 | `sigil-mcp` | Host-side MCP server for policy-mediated agent actions (JSON-RPC over stdin/stdout) |
 | `sigil-cli` | `sigil` binary, clap commands, bridge runner, audit verification, conductor runner |
 
@@ -44,10 +46,11 @@ Compile-time workspace edges:
 
 ```text
 sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-core, sigil-runtime, sigil-store
-sigil-conductor → sigil-audit, sigil-core, sigil-policy, sigil-runtime, sigil-store
+sigil-conductor → sigil-audit, sigil-core, sigil-memory, sigil-policy, sigil-runtime, sigil-store
 sigil-bridge → sigil-audit, sigil-core, sigil-policy
 sigil-mcp → sigil-core, sigil-policy
 sigil-runtime → sigil-core, sigil-policy, sigil-audit [container], sigil-mcp [container]
+sigil-memory → sigil-core
 sigil-store → sigil-core, sigil-policy
 sigil-policy → sigil-audit, sigil-core
 sigil-audit → sigil-core
@@ -300,6 +303,7 @@ Implemented subcommands:
 - domain-filtering forward proxy for container network isolation (`DomainProxy`)
 - MCP Unix socket IPC wired into container lifecycle
 - agent container image (`container/Dockerfile`) with Claude Code + Codex
+- operational memory — episode logging and mechanical consolidation (`sigil-memory`)
 - property-based tests with `proptest` across core, audit, and policy crates
 
 ### Not implemented in this workspace
@@ -310,7 +314,7 @@ Implemented subcommands:
 
 ## Verification Snapshot
 
-The workspace currently registers 439 tests across unit and integration suites in [`crates/sigil-cli/tests`](/Users/zebas/Developer/sigil/crates/sigil-cli/tests).
+The workspace currently registers 586 tests across unit and integration suites.
 
 Recommended verification commands:
 
