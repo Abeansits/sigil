@@ -1,4 +1,8 @@
 //! The `bridge` command — run Telegram and/or Slack bridge loops.
+//!
+//! Messages from bridges are routed through a [`ConductorSink`] that
+//! forwards them to [`Conductor::handle_message`] for command dispatch
+//! and session forwarding.
 
 use std::sync::Arc;
 
@@ -11,22 +15,28 @@ use sigil_audit::AuditLogWriter;
 use sigil_bridge::{
     IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, default_config,
 };
+use sigil_conductor::Conductor;
 use sigil_core::CoreError;
 use sigil_core::PolicyDecision;
 use sigil_core::protocol::BridgeMessage;
-use sigil_core::traits::MessageSink;
+use sigil_core::traits::{MessageSink, SessionRuntime};
 
 use crate::BridgeCommands;
 use crate::audit::log_event;
 
-/// A [`MessageSink`] that logs received messages and forwards them to
-/// the store/conductor. For now it logs via tracing — the conductor
-/// integration will come later when `sigil-conductor` exposes a sink.
-struct LoggingSink {
+/// A [`MessageSink`] that routes bridge messages through the conductor.
+///
+/// On each accepted message the sink:
+/// 1. Forwards to [`Conductor::handle_message`] for command routing and
+///    session dispatch.
+/// 2. Logs the conductor's response via tracing.
+/// 3. Records an audit event.
+pub(crate) struct ConductorSink<R: SessionRuntime> {
+    conductor: Arc<Conductor<R>>,
     audit: Arc<AuditLogWriter>,
 }
 
-impl MessageSink for LoggingSink {
+impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
     async fn accept(&self, message: BridgeMessage) -> Result<(), CoreError> {
         info!(
             origin = ?message.origin,
@@ -34,35 +44,62 @@ impl MessageSink for LoggingSink {
             target = ?message.target_session,
             "bridge message received"
         );
+
+        let response = self.conductor.handle_message(&message).await?;
+
+        info!(response = %response, "conductor response");
+
         log_event(
             &self.audit,
-            &format!("bridge.message_received: {} chars", message.text.len()),
+            &format!("bridge.message_routed: {} chars", message.text.len()),
             &format!("{:?}", message.origin),
             PolicyDecision::Allow,
             message.target_session,
         )
         .await;
+
         Ok(())
     }
 }
 
 /// Run the bridge subcommand.
 ///
+/// Builds a [`ConductorSink`] to route messages through the conductor,
+/// then starts the requested bridge loop(s) with an internal
+/// cancellation token (ctrl-c).
+///
 /// # Errors
 ///
 /// Returns an error if required environment variables are missing or
 /// if a client fails to initialize.
-#[allow(clippy::print_stdout)]
-pub async fn run(audit: Arc<AuditLogWriter>, cmd: BridgeCommands) -> Result<()> {
+pub async fn run<R: SessionRuntime>(
+    conductor: Arc<Conductor<R>>,
+    audit: Arc<AuditLogWriter>,
+    cmd: BridgeCommands,
+) -> Result<()> {
+    let cancel = make_cancel_token();
+    start_bridges(conductor, audit, cmd, cancel).await
+}
+
+/// Run bridge loop(s) with an externally provided cancellation token.
+///
+/// Used by `sigil run` for coordinated shutdown with the heartbeat
+/// loop.
+pub(crate) async fn start_bridges<R: SessionRuntime>(
+    conductor: Arc<Conductor<R>>,
+    audit: Arc<AuditLogWriter>,
+    cmd: BridgeCommands,
+    cancel: CancellationToken,
+) -> Result<()> {
     match cmd {
-        BridgeCommands::Telegram => run_telegram(audit).await,
-        BridgeCommands::Slack => run_slack(audit).await,
-        BridgeCommands::All => run_all(audit).await,
+        BridgeCommands::Telegram => run_telegram(conductor, audit, cancel).await,
+        BridgeCommands::Slack => run_slack(conductor, audit, cancel).await,
+        BridgeCommands::All => run_all(conductor, audit, cancel).await,
     }
 }
 
 /// Build a `CancellationToken` that fires on ctrl-c.
-fn make_cancel_token() -> CancellationToken {
+pub(crate) fn make_cancel_token() -> CancellationToken {
     let cancel = CancellationToken::new();
     let child = cancel.clone();
     tokio::spawn(async move {
@@ -82,15 +119,19 @@ fn load_identity_config() -> IdentityConfig {
 // ── Telegram ────────────────────────────────────────────────────────
 
 #[allow(clippy::print_stdout)]
-async fn run_telegram(audit: Arc<AuditLogWriter>) -> Result<()> {
+async fn run_telegram<R: SessionRuntime>(
+    conductor: Arc<Conductor<R>>,
+    audit: Arc<AuditLogWriter>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let token = read_env_secret("SIGIL_TELEGRAM_TOKEN")?;
     let client = TelegramClient::new(&token).context("failed to build Telegram client")?;
     let identity = load_identity_config();
     let mut bridge = TelegramBridge::new(client, identity);
-    let sink = LoggingSink {
+    let sink = ConductorSink {
+        conductor,
         audit: Arc::clone(&audit),
     };
-    let cancel = make_cancel_token();
 
     log_event(
         &audit,
@@ -124,17 +165,21 @@ async fn run_telegram(audit: Arc<AuditLogWriter>) -> Result<()> {
 // ── Slack ────────────────────────────────────────────────────────────
 
 #[allow(clippy::print_stdout)]
-async fn run_slack(audit: Arc<AuditLogWriter>) -> Result<()> {
+async fn run_slack<R: SessionRuntime>(
+    conductor: Arc<Conductor<R>>,
+    audit: Arc<AuditLogWriter>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let app_token = read_env_secret("SIGIL_SLACK_APP_TOKEN")?;
     let bot_token = read_env_secret("SIGIL_SLACK_BOT_TOKEN")?;
     let client =
         SlackClient::new(&bot_token, &app_token).context("failed to build Slack client")?;
     let identity = load_identity_config();
     let mut bridge = SlackBridge::new(client, identity);
-    let sink = LoggingSink {
+    let sink = ConductorSink {
+        conductor,
         audit: Arc::clone(&audit),
     };
-    let cancel = make_cancel_token();
 
     log_event(
         &audit,
@@ -168,7 +213,11 @@ async fn run_slack(audit: Arc<AuditLogWriter>) -> Result<()> {
 // ── Both ─────────────────────────────────────────────────────────────
 
 #[allow(clippy::print_stdout)]
-async fn run_all(audit: Arc<AuditLogWriter>) -> Result<()> {
+async fn run_all<R: SessionRuntime>(
+    conductor: Arc<Conductor<R>>,
+    audit: Arc<AuditLogWriter>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let tg_token = read_env_secret("SIGIL_TELEGRAM_TOKEN")?;
     let slack_app = read_env_secret("SIGIL_SLACK_APP_TOKEN")?;
     let slack_bot = read_env_secret("SIGIL_SLACK_BOT_TOKEN")?;
@@ -181,14 +230,14 @@ async fn run_all(audit: Arc<AuditLogWriter>) -> Result<()> {
     let mut tg_bridge = TelegramBridge::new(tg_client, identity.clone());
     let mut slack_bridge = SlackBridge::new(slack_client, identity);
 
-    let tg_sink = LoggingSink {
+    let tg_sink = ConductorSink {
+        conductor: Arc::clone(&conductor),
         audit: Arc::clone(&audit),
     };
-    let slack_sink = LoggingSink {
+    let slack_sink = ConductorSink {
+        conductor,
         audit: Arc::clone(&audit),
     };
-
-    let cancel = make_cancel_token();
 
     log_event(
         &audit,

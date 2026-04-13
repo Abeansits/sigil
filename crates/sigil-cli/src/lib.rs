@@ -77,6 +77,17 @@ pub enum Commands {
     #[command(subcommand)]
     Bridge(BridgeCommands),
 
+    /// Start the conductor with optional bridge adapters.
+    Run {
+        /// Heartbeat interval in seconds.
+        #[arg(long, default_value = "60")]
+        interval: u64,
+
+        /// Bridge to run alongside the conductor.
+        #[arg(long, value_enum)]
+        bridge: Option<commands::run::BridgeMode>,
+    },
+
     /// Audit log operations.
     #[command(subcommand)]
     Audit(AuditCommands),
@@ -392,12 +403,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         .await
         .context("failed to initialize audit writer")?;
 
-    // The bridge command only needs the audit writer — skip Store and
-    // runtime initialization so it works without SQLite or tmux.
-    if let Commands::Bridge(cmd) = cli.command {
-        return commands::bridge::run(Arc::clone(&audit), cmd).await;
-    }
-
     // The audit command is self-contained — no Store or runtime needed.
     if let Commands::Audit(cmd) = cli.command {
         return commands::audit::run(cmd).await;
@@ -427,9 +432,31 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::Bridge(cmd) => {
+            runtime.preflight_check().await?;
+            let store = Arc::new(store);
+            let runtime = Arc::new(runtime);
+            let conductor = Arc::new(sigil_conductor::Conductor::new(
+                store,
+                runtime,
+                std::time::Duration::from_secs(60),
+            ));
+            commands::bridge::run(conductor, Arc::clone(&audit), cmd).await
+        }
+        Commands::Run { interval, bridge } => {
+            runtime.preflight_check().await?;
+            Box::pin(commands::run::run(
+                Arc::new(store),
+                Arc::new(runtime),
+                Arc::clone(&audit),
+                interval,
+                bridge,
+            ))
+            .await
+        }
         Commands::Identity(cmd) => commands::identity::run(&store, &runtime, &audit, cmd).await,
-        Commands::Bridge(_) | Commands::Audit(_) => {
-            // Already handled in the early match above.
+        Commands::Audit(_) => {
+            // Already handled above.
             Ok(())
         }
     }
@@ -917,6 +944,97 @@ mod tests {
     #[test]
     fn cli_identity_reload_requires_name() {
         let cli = Cli::try_parse_from(["sigil", "identity", "reload"]);
+        assert!(cli.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Run CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_run_default() {
+        let cli = Cli::try_parse_from(["sigil", "run"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Run { interval, bridge } => {
+                assert_eq!(*interval, 60);
+                assert!(bridge.is_none());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_custom_interval() {
+        let cli = Cli::try_parse_from(["sigil", "run", "--interval", "30"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Run { interval, bridge } => {
+                assert_eq!(*interval, 30);
+                assert!(bridge.is_none());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_with_telegram_bridge() {
+        let cli = Cli::try_parse_from(["sigil", "run", "--bridge", "telegram"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Run { bridge, .. } => {
+                assert!(matches!(bridge, Some(commands::run::BridgeMode::Telegram)));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_with_slack_bridge() {
+        let cli = Cli::try_parse_from(["sigil", "run", "--bridge", "slack"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Run { bridge, .. } => {
+                assert!(matches!(bridge, Some(commands::run::BridgeMode::Slack)));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_with_all_bridges() {
+        let cli = Cli::try_parse_from(["sigil", "run", "--bridge", "all"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Run { bridge, .. } => {
+                assert!(matches!(bridge, Some(commands::run::BridgeMode::All)));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_with_interval_and_bridge() {
+        let cli = Cli::try_parse_from(["sigil", "run", "--interval", "15", "--bridge", "all"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Run { interval, bridge } => {
+                assert_eq!(*interval, 15);
+                assert!(matches!(bridge, Some(commands::run::BridgeMode::All)));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_run_rejects_invalid_bridge() {
+        let cli = Cli::try_parse_from(["sigil", "run", "--bridge", "discord"]);
         assert!(cli.is_err());
     }
 }
