@@ -35,7 +35,7 @@ fn make_update(user_id: &str, text: &str) -> TelegramUpdate {
 fn telegram_message_with_zero_width_chars_is_normalized() {
     let config = default_config();
     // Zero-width spaces injected between characters.
-    let update = make_update("SEBASTIAN_TG_ID", "/sta\u{200B}tu\u{200C}s");
+    let update = make_update("7279215778", "/sta\u{200B}tu\u{200C}s");
 
     let result = process_telegram_update(&update, &config)
         .expect("processing should succeed")
@@ -49,7 +49,7 @@ fn telegram_message_with_zero_width_chars_is_normalized() {
 #[test]
 fn telegram_message_with_directional_overrides_is_cleaned() {
     let config = default_config();
-    let update = make_update("SEBASTIAN_TG_ID", "check \u{202E}sessions");
+    let update = make_update("7279215778", "check \u{202E}sessions");
 
     let result = process_telegram_update(&update, &config)
         .expect("processing should succeed")
@@ -62,7 +62,7 @@ fn telegram_message_with_directional_overrides_is_cleaned() {
 #[test]
 fn telegram_message_with_tag_characters_is_cleaned() {
     let config = default_config();
-    let update = make_update("SEBASTIAN_TG_ID", "hello\u{E0001}\u{E0065}\u{E006E} world");
+    let update = make_update("7279215778", "hello\u{E0001}\u{E0065}\u{E006E} world");
 
     let result = process_telegram_update(&update, &config)
         .expect("processing should succeed")
