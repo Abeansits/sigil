@@ -5,7 +5,7 @@
 //! detect commands, and emit a [`BridgeMessage`].
 
 use sigil_core::origin::ActionOrigin;
-use sigil_core::protocol::BridgeMessage;
+use sigil_core::protocol::{BridgeMessage, ReplyContext};
 
 use crate::error::BridgeError;
 use crate::identity::{IdentityConfig, resolve_identity};
@@ -84,6 +84,10 @@ pub fn process_telegram_update(
         text,
         target_session: None,
         is_command,
+        reply_context: ReplyContext {
+            chat_id: Some(msg.chat_id),
+            channel_id: None,
+        },
     }))
 }
 

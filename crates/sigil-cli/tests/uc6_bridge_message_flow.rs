@@ -25,7 +25,7 @@ use sigil_bridge::slack::{SlackEvent, process_slack_event};
 use sigil_bridge::telegram::{TelegramMessage, TelegramUpdate, process_telegram_update};
 use sigil_core::CoreError;
 use sigil_core::origin::ActionOrigin;
-use sigil_core::protocol::BridgeMessage;
+use sigil_core::protocol::{BridgeMessage, ReplyContext};
 use sigil_core::traits::MessageSink;
 use sigil_core::trust::Tier;
 use sigil_policy::normalize::normalize_text;
@@ -251,6 +251,7 @@ async fn router_forwards_message_to_sink() {
         text: "hello conductor".into(),
         target_session: None,
         is_command: false,
+        reply_context: ReplyContext::default(),
     };
 
     router.route(msg).await.expect("route should succeed");
@@ -273,6 +274,7 @@ async fn router_rate_limits_bridge_origins() {
             text: format!("msg-{i}"),
             target_session: None,
             is_command: false,
+            reply_context: ReplyContext::default(),
         };
         router.route(msg).await.expect("under limit");
     }
@@ -285,6 +287,7 @@ async fn router_rate_limits_bridge_origins() {
         text: "too many".into(),
         target_session: None,
         is_command: false,
+        reply_context: ReplyContext::default(),
     };
     let err = router.route(msg).await.expect_err("should be rate limited");
     assert_matches!(err, BridgeError::RateLimited { .. });
@@ -306,6 +309,7 @@ async fn router_skips_rate_limit_for_local_cli() {
             text: "local msg".into(),
             target_session: None,
             is_command: false,
+            reply_context: ReplyContext::default(),
         };
         router
             .route(msg)
@@ -329,6 +333,7 @@ async fn router_propagates_sink_error() {
         text: "hello".into(),
         target_session: None,
         is_command: false,
+        reply_context: ReplyContext::default(),
     };
 
     let err = router.route(msg).await.expect_err("sink rejects");

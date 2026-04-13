@@ -336,7 +336,7 @@ fn session_to_handle(
 #[cfg(test)]
 mod tests {
     use sigil_core::origin::ActionOrigin;
-    use sigil_core::protocol::BridgeMessage;
+    use sigil_core::protocol::{BridgeMessage, ReplyContext};
 
     /// Helper to create a bridge message for command tests.
     fn command_msg(text: &str) -> BridgeMessage {
@@ -345,6 +345,7 @@ mod tests {
             text: text.into(),
             target_session: None,
             is_command: text.starts_with('/'),
+            reply_context: ReplyContext::default(),
         }
     }
 

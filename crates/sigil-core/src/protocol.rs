@@ -81,6 +81,19 @@ pub enum HookFormat {
     CodexOutput,
 }
 
+/// Where to deliver a conductor response back through the originating bridge.
+///
+/// Populated by the bridge adapter that created the [`BridgeMessage`].
+/// The CLI-side sink reads these fields to route the reply to the
+/// correct Telegram chat or Slack channel.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReplyContext {
+    /// Telegram chat ID (set by the Telegram adapter).
+    pub chat_id: Option<i64>,
+    /// Slack channel ID (set by the Slack adapter).
+    pub channel_id: Option<String>,
+}
+
 /// A message routed through the bridge (inbound from user).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BridgeMessage {
@@ -88,4 +101,6 @@ pub struct BridgeMessage {
     pub text: String,
     pub target_session: Option<SessionId>,
     pub is_command: bool,
+    /// Context needed to send the conductor's response back to the user.
+    pub reply_context: ReplyContext,
 }

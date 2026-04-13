@@ -29,7 +29,7 @@ pub use error::CoreError;
 pub use id::{GroupId, RequestId, SessionId};
 pub use origin::ActionOrigin;
 pub use principal::Principal;
-pub use protocol::{AgentSignal, BridgeMessage, ConductorMessage};
+pub use protocol::{AgentSignal, BridgeMessage, ConductorMessage, ReplyContext};
 pub use session::{
     IdentitySpec, LifecycleEvent, SessionConfig, SessionHandle, SessionRecord, SessionState,
     ToolKind,
