@@ -33,6 +33,11 @@ fn episodes_path(data_dir: &Path) -> PathBuf {
     data_dir.join("episodes.jsonl")
 }
 
+/// Path to LEARNINGS.md in the data directory.
+fn learnings_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("LEARNINGS.md")
+}
+
 // ---------------------------------------------------------------------------
 // Episodes subcommands
 // ---------------------------------------------------------------------------
@@ -177,8 +182,8 @@ async fn run_search(data_dir: &Path, query: &str, json: bool) -> Result<()> {
         })
         .collect();
 
-    // Search LEARNINGS.md in the current directory if present.
-    let learnings_path = PathBuf::from("LEARNINGS.md");
+    // Search LEARNINGS.md in the data directory if present.
+    let learnings_path = learnings_path(data_dir);
     let matched_learnings = if learnings_path.exists() {
         std::fs::read_to_string(&learnings_path)
             .context("failed to read LEARNINGS.md")?
@@ -240,7 +245,7 @@ async fn run_consolidate(data_dir: &Path, dry_run: bool) -> Result<()> {
     let reader = EpisodeReader::new(&ep_path);
     let episodes = reader.read_all().await.context("failed to read episodes")?;
 
-    let learnings_path = PathBuf::from("LEARNINGS.md");
+    let learnings_path = learnings_path(data_dir);
     let existing_learnings = if learnings_path.exists() {
         std::fs::read_to_string(&learnings_path).context("failed to read LEARNINGS.md")?
     } else {
@@ -312,7 +317,7 @@ async fn run_stats(data_dir: &Path, json: bool) -> Result<()> {
     }
     let session_count = sessions.len();
 
-    let learnings_path = PathBuf::from("LEARNINGS.md");
+    let learnings_path = learnings_path(data_dir);
     let (learning_count, stale_count) = if learnings_path.exists() {
         let content =
             std::fs::read_to_string(&learnings_path).context("failed to read LEARNINGS.md")?;
