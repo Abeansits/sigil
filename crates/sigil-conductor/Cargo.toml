@@ -10,6 +10,7 @@ sigil-core = { path = "../sigil-core" }
 sigil-policy = { path = "../sigil-policy" }
 sigil-audit = { path = "../sigil-audit" }
 sigil-store = { path = "../sigil-store" }
+sigil-memory = { path = "../sigil-memory" }
 sigil-runtime = { path = "../sigil-runtime" }
 serde.workspace = true
 serde_json.workspace = true

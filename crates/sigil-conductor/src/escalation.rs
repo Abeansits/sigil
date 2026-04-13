@@ -180,6 +180,7 @@ mod tests {
             stopped: 1,
             auto_responded: Vec::new(),
             needs_attention: Vec::new(),
+            state_changes: Vec::new(),
         };
 
         let report = format_status_report(&result);
@@ -202,6 +203,7 @@ mod tests {
             stopped: 0,
             auto_responded: vec!["frontend".into()],
             needs_attention: vec!["api-fix".into()],
+            state_changes: Vec::new(),
         };
 
         let report = format_status_report(&result);
@@ -227,6 +229,7 @@ mod tests {
             stopped: 0,
             auto_responded: Vec::new(),
             needs_attention: Vec::new(),
+            state_changes: Vec::new(),
         };
 
         let report = format_status_report(&result);

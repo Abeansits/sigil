@@ -15,6 +15,9 @@ pub enum ConductorError {
     #[error("policy error: {0}")]
     Policy(#[from] sigil_policy::PolicyError),
 
+    #[error("memory error: {0}")]
+    Memory(#[from] sigil_memory::MemoryError),
+
     #[error("no sessions found")]
     NoSessions,
 
@@ -28,6 +31,7 @@ impl From<ConductorError> for CoreError {
             ConductorError::Store(e) => Self::from(e),
             ConductorError::Runtime(e) => Self::from(e),
             ConductorError::Policy(e) => Self::from(e),
+            ConductorError::Memory(e) => Self::from(e),
             ConductorError::NoSessions => Self::Store {
                 message: "no sessions found".into(),
             },

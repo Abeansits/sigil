@@ -5,12 +5,26 @@
 
 use std::sync::Arc;
 
+use sigil_core::SessionId;
 use sigil_core::session::{SessionRecord, SessionState};
 use sigil_core::traits::SessionRuntime;
 use sigil_store::Store;
 use tracing::{debug, warn};
 
 use crate::error::ConductorError;
+
+/// A detected state transition during a heartbeat scan.
+#[derive(Clone, Debug)]
+pub struct StateChange {
+    /// Session that changed state.
+    pub session_id: SessionId,
+    /// Session title (for logging and episode summaries).
+    pub title: String,
+    /// State in the store before this cycle.
+    pub old_state: SessionState,
+    /// Live state detected this cycle.
+    pub new_state: SessionState,
+}
 
 /// Results of a single heartbeat scan cycle.
 #[derive(Clone, Debug, Default)]
@@ -23,6 +37,8 @@ pub struct HeartbeatResult {
     pub stopped: usize,
     pub auto_responded: Vec<String>,
     pub needs_attention: Vec<String>,
+    /// State transitions detected this cycle.
+    pub state_changes: Vec<StateChange>,
 }
 
 /// Run one heartbeat scan: fetch all sessions, check live status, update
@@ -59,6 +75,14 @@ pub async fn scan_sessions<R: SessionRuntime>(
                 live = ?live_state,
                 "session state changed"
             );
+
+            result.state_changes.push(StateChange {
+                session_id: session.id,
+                title: session.title.clone(),
+                old_state: session.state,
+                new_state: live_state,
+            });
+
             if let Err(e) = store.update_session_state(&session.id, live_state).await {
                 warn!(session = %session.title, error = %e, "failed to update session state");
             }
@@ -152,6 +176,7 @@ mod tests {
             stopped,
             auto_responded: Vec::new(),
             needs_attention: Vec::new(),
+            state_changes: Vec::new(),
         }
     }
 
@@ -216,5 +241,25 @@ mod tests {
         assert_eq!(r.waiting, 1);
         assert_eq!(r.error, 1);
         assert_eq!(r.stopped, 1);
+    }
+
+    #[test]
+    fn state_change_stores_transition() {
+        let id = SessionId::new();
+        let change = StateChange {
+            session_id: id,
+            title: "test-session".into(),
+            old_state: SessionState::Running,
+            new_state: SessionState::Waiting,
+        };
+        assert_eq!(change.session_id, id);
+        assert_eq!(change.old_state, SessionState::Running);
+        assert_eq!(change.new_state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn heartbeat_result_default_has_empty_state_changes() {
+        let r = HeartbeatResult::default();
+        assert!(r.state_changes.is_empty());
     }
 }
