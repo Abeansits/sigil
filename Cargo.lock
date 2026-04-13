@@ -1758,6 +1758,7 @@ dependencies = [
  "sigil-bridge",
  "sigil-conductor",
  "sigil-core",
+ "sigil-memory",
  "sigil-policy",
  "sigil-runtime",
  "sigil-store",
@@ -1765,6 +1766,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
