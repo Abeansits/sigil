@@ -27,7 +27,7 @@ pub mod telegram_client;
 pub mod telegram_loop;
 
 pub use error::BridgeError;
-pub use identity::{AllowedUser, IdentityConfig, default_config, resolve_identity};
+pub use identity::{AllowedUser, IdentityConfig, build_config, default_config, resolve_identity};
 pub use rate_limit::RateLimiter;
 pub use router::{BridgeRouter, parse_target_session};
 pub use slack::{SlackEvent, process_slack_event};

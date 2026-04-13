@@ -13,7 +13,7 @@ use tracing::info;
 
 use sigil_audit::AuditLogWriter;
 use sigil_bridge::{
-    IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, default_config,
+    IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, build_config,
 };
 use sigil_conductor::Conductor;
 use sigil_core::CoreError;
@@ -121,10 +121,15 @@ pub(crate) fn make_cancel_token() -> CancellationToken {
     cancel
 }
 
-/// Load the identity config. Uses [`default_config`] today — will load
-/// from a config file in the future.
+/// Load the identity config from `.sigil/config.toml`, falling back to
+/// env vars and then hardcoded defaults.
 fn load_identity_config() -> IdentityConfig {
-    default_config()
+    let bridge_section = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| sigil_core::config::ProjectConfig::load(&cwd).ok().flatten())
+        .and_then(|cfg| cfg.bridge);
+
+    build_config(bridge_section.as_ref())
 }
 
 // ── Telegram ────────────────────────────────────────────────────────

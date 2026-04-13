@@ -4,6 +4,7 @@
 //! processing. Only known platform IDs are accepted — unknown senders
 //! are rejected at the bridge boundary.
 
+use sigil_core::config::{BridgeConfigSection, parse_tier};
 use sigil_core::origin::ActionOrigin;
 use sigil_core::trust::Tier;
 
@@ -72,42 +73,70 @@ pub fn resolve_identity(
     }
 }
 
-/// Build identity config from environment variables with hardcoded fallbacks.
+/// Build identity config with a priority cascade:
 ///
-/// Env vars (comma-separated `id:name:tier` triples):
-///   - `SIGIL_TELEGRAM_USERS` — e.g. `7279215778:Sebastian:T3`
-///   - `SIGIL_SLACK_USERS` — e.g. `U123:Sebastian:T3,U456:Paul:T1`
+/// 1. `.sigil/config.toml` `[bridge]` section (if provided)
+/// 2. Environment variables (`SIGIL_TELEGRAM_USERS`, `SIGIL_SLACK_USERS`)
+/// 3. Hardcoded defaults
 ///
-/// Falls back to compiled defaults if env vars are absent.
+/// Env var format: comma-separated `id:name:tier` triples.
 #[must_use]
 pub fn default_config() -> IdentityConfig {
-    let telegram_ids = parse_users_env("SIGIL_TELEGRAM_USERS").unwrap_or_else(|| {
-        vec![AllowedUser {
-            platform_id: "7279215778".into(),
-            display_name: "Sebastian".into(),
-            tier_ceiling: Tier::T3,
-        }]
-    });
+    build_config(None)
+}
 
-    let slack_ids = parse_users_env("SIGIL_SLACK_USERS").unwrap_or_else(|| {
-        vec![
-            AllowedUser {
-                platform_id: "SEBASTIAN_SLACK_ID".into(),
+/// Build identity config from an optional [`BridgeConfigSection`].
+///
+/// Falls back through the cascade: config file → env vars → hardcoded.
+#[must_use]
+pub fn build_config(bridge_section: Option<&BridgeConfigSection>) -> IdentityConfig {
+    let telegram_ids = bridge_section
+        .and_then(|b| b.telegram.as_ref())
+        .map(|tg| entries_to_users(&tg.users))
+        .or_else(|| parse_users_env("SIGIL_TELEGRAM_USERS"))
+        .unwrap_or_else(|| {
+            vec![AllowedUser {
+                platform_id: "7279215778".into(),
                 display_name: "Sebastian".into(),
                 tier_ceiling: Tier::T3,
-            },
-            AllowedUser {
-                platform_id: "PAUL_SLACK_ID".into(),
-                display_name: "Paul".into(),
-                tier_ceiling: Tier::T1,
-            },
-        ]
-    });
+            }]
+        });
+
+    let slack_ids = bridge_section
+        .and_then(|b| b.slack.as_ref())
+        .map(|sl| entries_to_users(&sl.users))
+        .or_else(|| parse_users_env("SIGIL_SLACK_USERS"))
+        .unwrap_or_else(|| {
+            vec![
+                AllowedUser {
+                    platform_id: "SEBASTIAN_SLACK_ID".into(),
+                    display_name: "Sebastian".into(),
+                    tier_ceiling: Tier::T3,
+                },
+                AllowedUser {
+                    platform_id: "PAUL_SLACK_ID".into(),
+                    display_name: "Paul".into(),
+                    tier_ceiling: Tier::T1,
+                },
+            ]
+        });
 
     IdentityConfig {
         allowed_telegram_ids: telegram_ids,
         allowed_slack_ids: slack_ids,
     }
+}
+
+/// Convert config file entries into `AllowedUser` values.
+fn entries_to_users(entries: &[sigil_core::config::BridgeUserEntry]) -> Vec<AllowedUser> {
+    entries
+        .iter()
+        .map(|e| AllowedUser {
+            platform_id: e.id.clone(),
+            display_name: e.name.clone(),
+            tier_ceiling: parse_tier(&e.tier).unwrap_or(Tier::T1),
+        })
+        .collect()
 }
 
 /// Parse a comma-separated list of `id:name:tier` triples from an env var.
@@ -141,9 +170,87 @@ fn parse_users_env(var: &str) -> Option<Vec<AllowedUser>> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::indexing_slicing)]
+
+    use sigil_core::config::{BridgePlatformConfig, BridgeUserEntry};
 
     use super::*;
+
+    #[test]
+    fn build_config_uses_bridge_section_when_provided() {
+        let section = BridgeConfigSection {
+            telegram: Some(BridgePlatformConfig {
+                users: vec![BridgeUserEntry {
+                    id: "999".into(),
+                    name: "ConfigUser".into(),
+                    tier: "T2".into(),
+                }],
+            }),
+            slack: Some(BridgePlatformConfig {
+                users: vec![BridgeUserEntry {
+                    id: "U_CONFIG".into(),
+                    name: "SlackConfig".into(),
+                    tier: "T0".into(),
+                }],
+            }),
+        };
+
+        let config = build_config(Some(&section));
+        assert_eq!(config.allowed_telegram_ids.len(), 1);
+        assert_eq!(config.allowed_telegram_ids[0].platform_id, "999");
+        assert_eq!(config.allowed_telegram_ids[0].display_name, "ConfigUser");
+        assert_eq!(config.allowed_telegram_ids[0].tier_ceiling, Tier::T2);
+
+        assert_eq!(config.allowed_slack_ids.len(), 1);
+        assert_eq!(config.allowed_slack_ids[0].platform_id, "U_CONFIG");
+        assert_eq!(config.allowed_slack_ids[0].tier_ceiling, Tier::T0);
+    }
+
+    #[test]
+    fn build_config_falls_back_to_defaults_when_none() {
+        let config = build_config(None);
+        // Should use the hardcoded defaults (same as default_config).
+        assert!(!config.allowed_telegram_ids.is_empty());
+        assert!(!config.allowed_slack_ids.is_empty());
+    }
+
+    #[test]
+    fn build_config_partial_section_falls_back_per_platform() {
+        // Only telegram in config, slack should fall back to env/default.
+        let section = BridgeConfigSection {
+            telegram: Some(BridgePlatformConfig {
+                users: vec![BridgeUserEntry {
+                    id: "888".into(),
+                    name: "TGOnly".into(),
+                    tier: "T1".into(),
+                }],
+            }),
+            slack: None,
+        };
+
+        let config = build_config(Some(&section));
+        assert_eq!(config.allowed_telegram_ids.len(), 1);
+        assert_eq!(config.allowed_telegram_ids[0].platform_id, "888");
+        // Slack should fall back to defaults (env or hardcoded).
+        assert!(!config.allowed_slack_ids.is_empty());
+    }
+
+    #[test]
+    fn build_config_invalid_tier_defaults_to_t1() {
+        let section = BridgeConfigSection {
+            telegram: Some(BridgePlatformConfig {
+                users: vec![BridgeUserEntry {
+                    id: "111".into(),
+                    name: "BadTier".into(),
+                    tier: "INVALID".into(),
+                }],
+            }),
+            slack: None,
+        };
+
+        let config = build_config(Some(&section));
+        assert_eq!(config.allowed_telegram_ids[0].tier_ceiling, Tier::T1);
+    }
 
     #[test]
     fn known_telegram_sender_resolves_correctly() {
