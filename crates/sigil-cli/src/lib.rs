@@ -473,6 +473,12 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     std::fs::create_dir_all(&data_dir).context("failed to create data directory")?;
 
+    // Memory commands are self-contained and must dispatch before audit
+    // initialization so they don't create audit.jsonl as a side effect.
+    if let Commands::Memory(cmd) = cli.command {
+        return commands::memory::run(&data_dir, cmd).await;
+    }
+
     let audit = audit::init_audit_writer(&data_dir)
         .await
         .context("failed to initialize audit writer")?;
@@ -480,11 +486,6 @@ pub async fn run(cli: Cli) -> Result<()> {
     // The audit command is self-contained — no Store or runtime needed.
     if let Commands::Audit(cmd) = cli.command {
         return commands::audit::run(cmd).await;
-    }
-
-    // Memory commands are self-contained — no Store or runtime needed.
-    if let Commands::Memory(cmd) = cli.command {
-        return commands::memory::run(&data_dir, cmd).await;
     }
 
     let db_str = db_path

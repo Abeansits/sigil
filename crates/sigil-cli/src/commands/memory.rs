@@ -285,13 +285,12 @@ async fn run_consolidate(data_dir: &Path, dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!("\n(dry run — no changes written)");
-    } else {
-        let has_changes = !result.promoted.is_empty() || !result.marked_stale.is_empty();
-        if has_changes {
-            std::fs::write(&learnings_path, &result.learnings_content)
-                .context("failed to write LEARNINGS.md")?;
-            println!("\nWrote LEARNINGS.md");
-        }
+    } else if result.learnings_content != existing_learnings {
+        // Content comparison covers promotion, dedup reinforcement, staleness
+        // annotation, and stale→fresh transitions — not just counter-based changes.
+        std::fs::write(&learnings_path, &result.learnings_content)
+            .context("failed to write LEARNINGS.md")?;
+        println!("\nWrote LEARNINGS.md");
     }
 
     Ok(())

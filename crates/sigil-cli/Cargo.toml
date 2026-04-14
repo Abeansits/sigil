@@ -38,11 +38,14 @@ sigil-policy = { path = "../sigil-policy" }
 sigil-audit = { path = "../sigil-audit" }
 sigil-store = { path = "../sigil-store" }
 sigil-bridge = { path = "../sigil-bridge" }
+sigil-memory = { path = "../sigil-memory" }
 sigil-runtime = { path = "../sigil-runtime" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 assert_matches.workspace = true
 serde_json.workspace = true
+time.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
