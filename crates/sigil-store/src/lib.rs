@@ -303,6 +303,71 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Helper: drop the unique title index, insert sessions with the given
+    /// titles in order (forcing deterministic `created_at`), then rerun
+    /// migrations. Returns the inserted session IDs in input order.
+    async fn seed_pre_v003_duplicates(store: &Store, titles: &[&str]) -> Vec<SessionId> {
+        sqlx::query("DROP INDEX IF EXISTS idx_sessions_title")
+            .execute(&store.pool)
+            .await
+            .expect("drop unique index");
+
+        let mut ids = Vec::with_capacity(titles.len());
+        for (i, title) in titles.iter().enumerate() {
+            let record = make_session(title);
+            store.create_session(&record).await.expect("create");
+            // Force deterministic ordering by created_at.
+            let ts = format!("2026-01-{:02} 00:00:00", i + 1);
+            sqlx::query("UPDATE sessions SET created_at = ? WHERE id = ?")
+                .bind(&ts)
+                .bind(record.id.to_string())
+                .execute(&store.pool)
+                .await
+                .expect("set created_at");
+            ids.push(record.id);
+        }
+
+        sqlx::query("DELETE FROM schema_version WHERE version = 3")
+            .execute(&store.pool)
+            .await
+            .expect("delete v003 record");
+
+        migrate::run_migrations(&store.pool)
+            .await
+            .expect("rerun migrations");
+
+        ids
+    }
+
+    #[tokio::test]
+    async fn v003_migration_dedups_existing_duplicate_titles() {
+        let store = Store::new_in_memory().await.expect("init");
+        let ids = seed_pre_v003_duplicates(&store, &["dup", "dup", "dup"]).await;
+
+        let s1 = store.get_session(&ids[0]).await.expect("get s1");
+        let s2 = store.get_session(&ids[1]).await.expect("get s2");
+        let s3 = store.get_session(&ids[2]).await.expect("get s3");
+        assert_eq!(s1.title, "dup");
+        assert_eq!(s2.title, "dup (2)");
+        assert_eq!(s3.title, "dup (3)");
+    }
+
+    #[tokio::test]
+    async fn v003_migration_dedup_skips_existing_suffix() {
+        let store = Store::new_in_memory().await.expect("init");
+        // The pre-existing "dup (2)" must not collide with the rename target.
+        let ids = seed_pre_v003_duplicates(&store, &["dup", "dup", "dup (2)"]).await;
+
+        let s1 = store.get_session(&ids[0]).await.expect("get s1");
+        let s2 = store.get_session(&ids[1]).await.expect("get s2");
+        let s3 = store.get_session(&ids[2]).await.expect("get s3");
+        assert_eq!(s1.title, "dup");
+        // s2 was renamed; (2) was taken so it became (3).
+        assert_eq!(s2.title, "dup (3)");
+        // s3 is the only one with that title — left untouched.
+        assert_eq!(s3.title, "dup (2)");
+    }
+
     // -- Identity persistence tests --
 
     #[tokio::test]
