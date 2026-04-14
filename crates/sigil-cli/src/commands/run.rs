@@ -61,14 +61,23 @@ pub async fn run<R: SessionRuntime>(
 ) -> Result<()> {
     println!("{}\n", crate::banner::BANNER);
 
-    let conductor = Arc::new(
-        Conductor::new(
-            Arc::clone(&store),
-            Arc::clone(&runtime),
-            Duration::from_secs(interval),
-        )
-        .with_audit(Arc::clone(&audit)),
-    );
+    let mut conductor_builder = Conductor::new(
+        Arc::clone(&store),
+        Arc::clone(&runtime),
+        Duration::from_secs(interval),
+    )
+    .with_audit(Arc::clone(&audit));
+
+    // When running with bridges, apply per-user tier ceilings from the
+    // bridge identity config so policy evaluation enforces the same
+    // limits as `sigil bridge`.
+    if bridge_mode.is_some() {
+        let identity_config = sigil_bridge::default_config();
+        let eval_config = bridge::evaluator_config_from_identity(&identity_config);
+        conductor_builder = conductor_builder.with_evaluator_config(eval_config);
+    }
+
+    let conductor = Arc::new(conductor_builder);
 
     // Reconcile DB state with live runtime before entering the loop.
     do_reconcile(&conductor, &audit).await;

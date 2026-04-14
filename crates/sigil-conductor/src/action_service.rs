@@ -295,12 +295,21 @@ where
 
         self.store.create_session(&record).await?;
 
-        // Register identity hooks if configured.
+        // Register identity hooks if configured. Fail closed: roll back the
+        // persisted session so we never leave behind a half-configured record
+        // that policy callers believe was fully provisioned.
         if let Some(ref spec) = record.identity {
             if !spec.reload_on.is_empty() {
                 let handle = record_to_handle(&record);
                 if let Err(e) = self.runtime.register_identity_hooks(&handle, spec).await {
-                    warn!(error = %e, "failed to register identity hooks");
+                    if let Err(rollback_err) = self.store.delete_session(&record.id).await {
+                        warn!(
+                            error = %rollback_err,
+                            session_id = %record.id,
+                            "failed to roll back session after identity hook registration error"
+                        );
+                    }
+                    return Err(runtime_err(e));
                 }
             }
         }
@@ -348,11 +357,27 @@ where
 
         self.store.create_session(&record).await?;
 
-        // Register identity hooks if configured.
+        // Register identity hooks if configured. Fail closed: stop the
+        // launched runtime session and remove the persisted record so we
+        // never leave behind a half-configured session.
         if let Some(ref spec) = record.identity {
             if !spec.reload_on.is_empty() {
                 if let Err(e) = self.runtime.register_identity_hooks(&handle, spec).await {
-                    warn!(error = %e, "failed to register identity hooks");
+                    if let Err(stop_err) = self.runtime.stop(&handle).await {
+                        warn!(
+                            error = %stop_err,
+                            session_id = %record.id,
+                            "failed to stop runtime session after identity hook registration error"
+                        );
+                    }
+                    if let Err(rollback_err) = self.store.delete_session(&record.id).await {
+                        warn!(
+                            error = %rollback_err,
+                            session_id = %record.id,
+                            "failed to roll back session after identity hook registration error"
+                        );
+                    }
+                    return Err(runtime_err(e));
                 }
             }
         }
