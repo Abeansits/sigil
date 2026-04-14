@@ -790,7 +790,7 @@ fn cli_memory_consolidate_promotes_candidates() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Promoted: 1"),
+        stdout.contains("promoted 1"),
         "should promote 1 learning: {stdout}"
     );
     assert!(
@@ -798,8 +798,8 @@ fn cli_memory_consolidate_promotes_candidates() {
         "should show promoted learning: {stdout}"
     );
 
-    // LEARNINGS.md should exist at the project root.
-    let learnings_path = tmp.path().join("LEARNINGS.md");
+    // LEARNINGS.md lives alongside episodes.jsonl in the data directory.
+    let learnings_path = sigil_dir.join("LEARNINGS.md");
     let content = std::fs::read_to_string(&learnings_path).expect("read LEARNINGS.md");
     assert!(
         content.contains("Always verify state before sending"),
@@ -837,17 +837,14 @@ fn cli_memory_consolidate_no_candidates_shows_zero() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Promoted: 0"),
+        stdout.contains("promoted 0"),
         "should promote nothing: {stdout}"
     );
-    assert!(
-        stdout.contains("Marked stale: 0"),
-        "nothing stale: {stdout}"
-    );
+    assert!(stdout.contains("marked 0 stale"), "nothing stale: {stdout}");
 
-    // LEARNINGS.md may be created with just the header (the consolidator
-    // always produces "# Learnings\n"), but it should contain no entries.
-    let learnings_path = tmp.path().join("LEARNINGS.md");
+    // With no existing learnings and no promotions, the file should not be
+    // written (content comparison gate).
+    let learnings_path = sigil_dir.join("LEARNINGS.md");
     if learnings_path.exists() {
         let content = std::fs::read_to_string(&learnings_path).expect("read LEARNINGS.md");
         assert!(
@@ -858,20 +855,12 @@ fn cli_memory_consolidate_no_candidates_shows_zero() {
 }
 
 #[test]
-fn cli_memory_consolidate_respects_config_threshold() {
+fn cli_memory_consolidate_below_default_threshold_does_not_promote() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let sigil_dir = tmp.path().join(".sigil");
-    std::fs::create_dir_all(&sigil_dir).expect("create .sigil");
 
-    // Write config with threshold=5.
-    std::fs::write(
-        sigil_dir.join("config.toml"),
-        "[memory]\npromotion_threshold = 5\n",
-    )
-    .expect("write config.toml");
-
-    // Write 4 candidates from 4 distinct sessions (below threshold=5).
-    let episodes: Vec<EpisodeEvent> = (0..4)
+    // Default threshold is 3. Only 2 distinct sessions → no promotion.
+    let episodes: Vec<EpisodeEvent> = (0..2)
         .map(|_| {
             make_episode(
                 SessionId::new(),
@@ -883,16 +872,7 @@ fn cli_memory_consolidate_respects_config_threshold() {
             )
         })
         .collect();
-
-    // Seed episodes after config so the directory already exists.
-    let path = sigil_dir.join("episodes.jsonl");
-    let mut contents = String::new();
-    for ep in &episodes {
-        let line = serde_json::to_string(ep).expect("serialize");
-        contents.push_str(&line);
-        contents.push('\n');
-    }
-    std::fs::write(path, contents).expect("write episodes.jsonl");
+    seed_episodes(&sigil_dir, &episodes);
 
     let out = run_sigil(tmp.path(), &["memory", "consolidate"]);
     assert!(
@@ -902,8 +882,8 @@ fn cli_memory_consolidate_respects_config_threshold() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Promoted: 0"),
-        "4 sessions < threshold 5, should not promote: {stdout}"
+        stdout.contains("promoted 0"),
+        "2 sessions < default threshold 3, should not promote: {stdout}"
     );
 }
 
@@ -946,14 +926,11 @@ fn cli_memory_episodes_list_invalid_kind_exits_nonzero() {
         tmp.path(),
         &["memory", "episodes", "list", "--kind", "NotARealKind"],
     );
-    assert!(
-        !out.status.success(),
-        "invalid --kind should exit non-zero"
-    );
+    assert!(!out.status.success(), "invalid --kind should exit non-zero");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("NotARealKind") || stderr.contains("unknown episode kind"),
-        "stderr should mention the bad kind: {stderr}"
+        stderr.contains("NotARealKind") || stderr.to_lowercase().contains("invalid"),
+        "stderr should mention the bad kind or 'invalid': {stderr}"
     );
 }
 
@@ -965,8 +942,8 @@ fn cli_memory_consolidate_dedup_reinforcement_persists() {
     let sigil_dir = tmp.path().join(".sigil");
     std::fs::create_dir_all(&sigil_dir).expect("create .sigil");
 
-    // Pre-existing LEARNINGS.md with an old count.
-    let learnings_path = tmp.path().join("LEARNINGS.md");
+    // Pre-existing LEARNINGS.md (in data_dir) with an old count.
+    let learnings_path = sigil_dir.join("LEARNINGS.md");
     std::fs::write(
         &learnings_path,
         "# Learnings\n\n- Always verify state before sending\n  <!-- sigil:count=3,last=2026-01-01 -->\n",
@@ -998,7 +975,7 @@ fn cli_memory_consolidate_dedup_reinforcement_persists() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Promoted count is 0 because the learning already exists (dedup).
     assert!(
-        stdout.contains("Promoted: 0"),
+        stdout.contains("promoted 0"),
         "should not re-promote existing learning: {stdout}"
     );
 

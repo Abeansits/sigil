@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+use sigil_core::EpisodeKind;
 use sigil_core::error::CoreError;
 use sigil_core::protocol::ConductorMessage;
 use sigil_core::session::IdentitySpec;
@@ -96,7 +97,7 @@ pub enum Commands {
     #[command(subcommand)]
     Identity(IdentityCommands),
 
-    /// Memory subsystem (episodes and consolidation).
+    /// Episodic memory operations.
     #[command(subcommand)]
     Memory(MemoryCommands),
 }
@@ -273,22 +274,66 @@ pub enum AuditCommands {
 pub enum MemoryCommands {
     /// Episode log operations.
     #[command(subcommand)]
-    Episodes(MemoryEpisodesCommands),
+    Episodes(EpisodeCommands),
 
-    /// Run a manual consolidation pass.
-    Consolidate,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum MemoryEpisodesCommands {
-    /// List episodes from the episode log.
-    List {
+    /// Search across episodes and learnings.
+    Search {
+        /// Substring to search for in episode summaries, tags, and learnings.
+        query: String,
         /// Output as JSON.
         #[arg(long)]
         json: bool,
-        /// Filter by episode kind (e.g., `CandidateLearning`, `ActionCompleted`).
+    },
+
+    /// Run mechanical consolidation.
+    Consolidate {
+        /// Show what would change without writing.
         #[arg(long)]
-        kind: Option<String>,
+        dry_run: bool,
+    },
+
+    /// Show memory statistics.
+    Stats {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EpisodeCommands {
+    /// List episodes from the log.
+    List {
+        /// Filter by session ID (ULID).
+        #[arg(long)]
+        session: Option<String>,
+        /// Filter by episode kind.
+        #[arg(long, value_name = "KIND")]
+        kind: Option<EpisodeKind>,
+        /// Filter by tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Only include episodes at or after this date (YYYY-MM-DD).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Write an episode to the log (used by hooks and manual capture).
+    Write {
+        /// Session ID to associate the episode with.
+        session_id: String,
+        /// Episode kind.
+        #[arg(long, value_name = "KIND")]
+        kind: EpisodeKind,
+        /// One-line summary of the episode.
+        #[arg(long)]
+        summary: String,
+        /// Comma-separated tags.
+        #[arg(long)]
+        tags: Option<String>,
     },
 }
 
@@ -426,12 +471,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     std::fs::create_dir_all(&data_dir).context("failed to create data directory")?;
 
-    // Audit and Memory commands are self-contained — dispatch before
-    // initializing the audit writer, Store, or runtime to avoid side
-    // effects (e.g., creating audit.jsonl for read-only memory queries).
-    if let Commands::Audit(cmd) = cli.command {
-        return commands::audit::run(cmd).await;
-    }
+    // Memory commands are self-contained and must dispatch before audit
+    // initialization so they don't create audit.jsonl as a side effect.
     if let Commands::Memory(cmd) = cli.command {
         return commands::memory::run(&data_dir, cmd).await;
     }
@@ -439,6 +480,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     let audit = audit::init_audit_writer(&data_dir)
         .await
         .context("failed to initialize audit writer")?;
+
+    // The audit command is self-contained — no Store or runtime needed.
+    if let Commands::Audit(cmd) = cli.command {
+        return commands::audit::run(cmd).await;
+    }
 
     let db_str = db_path
         .to_str()
@@ -980,6 +1026,205 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Memory CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_memory_episodes_list() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "episodes", "list"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Memory(MemoryCommands::Episodes(EpisodeCommands::List {
+                session: None,
+                kind: None,
+                tag: None,
+                since: None,
+                json: false,
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_parses_memory_episodes_list_with_filters() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "memory",
+            "episodes",
+            "list",
+            "--kind",
+            "ActionCompleted",
+            "--tag",
+            "infra",
+            "--since",
+            "2026-01-01",
+            "--json",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Memory(MemoryCommands::Episodes(EpisodeCommands::List {
+                kind,
+                tag,
+                since,
+                json,
+                ..
+            })) => {
+                assert_eq!(*kind, Some(sigil_core::EpisodeKind::ActionCompleted));
+                assert_eq!(tag.as_deref(), Some("infra"));
+                assert_eq!(since.as_deref(), Some("2026-01-01"));
+                assert!(*json);
+            }
+            other => panic!("expected Memory Episodes List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_memory_episodes_write() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "memory",
+            "episodes",
+            "write",
+            "01JRR3SESSION000000000000",
+            "--kind",
+            "CandidateLearning",
+            "--summary",
+            "Test learning",
+            "--tags",
+            "test,infra",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Memory(MemoryCommands::Episodes(EpisodeCommands::Write {
+                session_id,
+                kind,
+                summary,
+                tags,
+            })) => {
+                assert_eq!(session_id, "01JRR3SESSION000000000000");
+                assert_eq!(*kind, sigil_core::EpisodeKind::CandidateLearning);
+                assert_eq!(summary, "Test learning");
+                assert_eq!(tags.as_deref(), Some("test,infra"));
+            }
+            other => panic!("expected Memory Episodes Write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_memory_search() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "search", "worktree"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Memory(MemoryCommands::Search { query, json }) => {
+                assert_eq!(query, "worktree");
+                assert!(!json);
+            }
+            other => panic!("expected Memory Search, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_memory_search_json() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "search", "worktree", "--json"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Memory(MemoryCommands::Search { json, .. }) => {
+                assert!(json);
+            }
+            other => panic!("expected Memory Search, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_memory_consolidate() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "consolidate"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Memory(MemoryCommands::Consolidate { dry_run: false })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_memory_consolidate_dry_run() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "consolidate", "--dry-run"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Memory(MemoryCommands::Consolidate { dry_run: true })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_memory_stats() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "stats"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Memory(MemoryCommands::Stats { json: false })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_memory_stats_json() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "stats", "--json"]);
+        assert!(cli.is_ok());
+        let cli = cli.expect("parse should succeed");
+        assert!(matches!(
+            cli.command,
+            Commands::Memory(MemoryCommands::Stats { json: true })
+        ));
+    }
+
+    #[test]
+    fn cli_memory_requires_subcommand() {
+        let cli = Cli::try_parse_from(["sigil", "memory"]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn cli_memory_episodes_requires_subcommand() {
+        let cli = Cli::try_parse_from(["sigil", "memory", "episodes"]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn cli_memory_episodes_write_requires_kind_and_summary() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "memory",
+            "episodes",
+            "write",
+            "01JRR3SESSION000000000000",
+        ]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn cli_memory_episodes_write_rejects_invalid_kind() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "memory",
+            "episodes",
+            "write",
+            "01JRR3SESSION000000000000",
+            "--kind",
+            "InvalidKind",
+            "--summary",
+            "test",
+        ]);
+        assert!(cli.is_err());
+    }
+
+    // -----------------------------------------------------------------------
     // Run CLI parsing
     // -----------------------------------------------------------------------
 
@@ -1067,78 +1312,6 @@ mod tests {
     #[test]
     fn cli_run_rejects_invalid_bridge() {
         let cli = Cli::try_parse_from(["sigil", "run", "--bridge", "discord"]);
-        assert!(cli.is_err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Memory CLI parsing
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn cli_parses_memory_episodes_list() {
-        let cli = Cli::try_parse_from(["sigil", "memory", "episodes", "list"]);
-        assert!(cli.is_ok());
-        let cli = cli.expect("parse should succeed");
-        assert!(matches!(
-            cli.command,
-            Commands::Memory(MemoryCommands::Episodes(MemoryEpisodesCommands::List {
-                json: false,
-                kind: None,
-            }))
-        ));
-    }
-
-    #[test]
-    fn cli_parses_memory_episodes_list_json() {
-        let cli = Cli::try_parse_from(["sigil", "memory", "episodes", "list", "--json"]);
-        assert!(cli.is_ok());
-        let cli = cli.expect("parse should succeed");
-        assert!(matches!(
-            cli.command,
-            Commands::Memory(MemoryCommands::Episodes(MemoryEpisodesCommands::List {
-                json: true,
-                kind: None,
-            }))
-        ));
-    }
-
-    #[test]
-    fn cli_parses_memory_episodes_list_with_kind() {
-        let cli = Cli::try_parse_from([
-            "sigil",
-            "memory",
-            "episodes",
-            "list",
-            "--kind",
-            "CandidateLearning",
-        ]);
-        assert!(cli.is_ok());
-        let cli = cli.expect("parse should succeed");
-        match &cli.command {
-            Commands::Memory(MemoryCommands::Episodes(MemoryEpisodesCommands::List {
-                kind,
-                ..
-            })) => {
-                assert_eq!(kind.as_deref(), Some("CandidateLearning"));
-            }
-            other => panic!("expected Memory Episodes List, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cli_parses_memory_consolidate() {
-        let cli = Cli::try_parse_from(["sigil", "memory", "consolidate"]);
-        assert!(cli.is_ok());
-        let cli = cli.expect("parse should succeed");
-        assert!(matches!(
-            cli.command,
-            Commands::Memory(MemoryCommands::Consolidate)
-        ));
-    }
-
-    #[test]
-    fn cli_memory_requires_subcommand() {
-        let cli = Cli::try_parse_from(["sigil", "memory"]);
         assert!(cli.is_err());
     }
 }

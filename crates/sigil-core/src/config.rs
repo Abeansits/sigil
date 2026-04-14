@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
 use crate::session::{IdentitySpec, LifecycleEvent};
+use crate::trust::Tier;
 
 /// Top-level project configuration from `.sigil/config.toml`.
 #[derive(Debug, Deserialize, Default)]
@@ -15,6 +16,9 @@ pub struct ProjectConfig {
 
     /// Memory system configuration.
     pub memory: Option<MemoryConfigSection>,
+
+    /// Bridge user allowlists per platform.
+    pub bridge: Option<BridgeConfigSection>,
 }
 
 /// Configuration for the memory subsystem (episodic capture and consolidation).
@@ -135,6 +139,98 @@ impl MemoryConfigSection {
             episodes_enabled: self.episodes_enabled,
             consolidation_enabled: self.consolidation_enabled,
         })
+    }
+}
+
+/// The `[bridge]` section of `.sigil/config.toml`.
+///
+/// Maps platform names to user allowlists. Each user entry specifies a
+/// platform ID, display name, and trust tier ceiling.
+///
+/// ```toml
+/// [bridge.telegram]
+/// users = [
+///     { id = "7279215778", name = "Sebastian", tier = "T3" }
+/// ]
+///
+/// [bridge.slack]
+/// users = [
+///     { id = "U_SEBASTIAN", name = "Sebastian", tier = "T3" },
+///     { id = "U_PAUL", name = "Paul", tier = "T1" }
+/// ]
+/// ```
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BridgeConfigSection {
+    /// Telegram user allowlist.
+    pub telegram: Option<BridgePlatformConfig>,
+
+    /// Slack user allowlist.
+    pub slack: Option<BridgePlatformConfig>,
+}
+
+/// Per-platform bridge user allowlist.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BridgePlatformConfig {
+    /// Known users on this platform.
+    pub users: Vec<BridgeUserEntry>,
+}
+
+/// A single allowed user in the bridge config.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BridgeUserEntry {
+    /// Platform-specific user ID.
+    pub id: String,
+
+    /// Human-readable display name.
+    pub name: String,
+
+    /// Trust tier ceiling (as string: `"T0"`, `"T1"`, `"T2"`, `"T3"`).
+    #[serde(default = "default_tier_str")]
+    pub tier: String,
+}
+
+fn default_tier_str() -> String {
+    "T1".into()
+}
+
+impl BridgeConfigSection {
+    /// Validate the config section, checking that all tier strings are valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InvalidConfig`] if any user entry has an
+    /// unrecognized tier string.
+    pub fn validate(&self) -> Result<(), CoreError> {
+        if let Some(ref tg) = self.telegram {
+            for user in &tg.users {
+                parse_tier(&user.tier)?;
+            }
+        }
+        if let Some(ref slack) = self.slack {
+            for user in &slack.users {
+                parse_tier(&user.tier)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parse a tier string into a [`Tier`].
+///
+/// Recognized values: `T0`, `T1`, `T2`, `T3` (case-insensitive).
+///
+/// # Errors
+///
+/// Returns [`CoreError::InvalidConfig`] for unrecognized tier strings.
+pub fn parse_tier(s: &str) -> Result<Tier, CoreError> {
+    match s.to_uppercase().as_str() {
+        "T0" => Ok(Tier::T0),
+        "T1" => Ok(Tier::T1),
+        "T2" => Ok(Tier::T2),
+        "T3" => Ok(Tier::T3),
+        _ => Err(CoreError::InvalidConfig {
+            message: format!("unknown tier '{s}' (expected T0, T1, T2, or T3)"),
+        }),
     }
 }
 
@@ -580,6 +676,145 @@ promotion_threshold = 10
             msg.contains("staleness_days"),
             "error should mention the field: {msg}"
         );
+    }
+
+    // -- BridgeConfigSection ------------------------------------------------
+
+    #[test]
+    fn parse_bridge_config_telegram_only() {
+        let toml_str = r#"
+[bridge.telegram]
+users = [
+    { id = "7279215778", name = "Sebastian", tier = "T3" }
+]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let bridge = config.bridge.unwrap();
+        bridge.validate().unwrap();
+        let tg = bridge.telegram.unwrap();
+        assert_eq!(tg.users.len(), 1);
+        assert_eq!(tg.users[0].id, "7279215778");
+        assert_eq!(tg.users[0].name, "Sebastian");
+        assert_eq!(tg.users[0].tier, "T3");
+        assert!(bridge.slack.is_none());
+    }
+
+    #[test]
+    fn parse_bridge_config_both_platforms() {
+        let toml_str = r#"
+[bridge.telegram]
+users = [
+    { id = "7279215778", name = "Sebastian", tier = "T3" }
+]
+
+[bridge.slack]
+users = [
+    { id = "U_SEBASTIAN", name = "Sebastian", tier = "T3" },
+    { id = "U_PAUL", name = "Paul", tier = "T1" }
+]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let bridge = config.bridge.unwrap();
+        bridge.validate().unwrap();
+        let tg = bridge.telegram.unwrap();
+        assert_eq!(tg.users.len(), 1);
+        let slack = bridge.slack.unwrap();
+        assert_eq!(slack.users.len(), 2);
+        assert_eq!(slack.users[0].name, "Sebastian");
+        assert_eq!(slack.users[1].name, "Paul");
+        assert_eq!(slack.users[1].tier, "T1");
+    }
+
+    #[test]
+    fn bridge_config_missing_section_returns_none() {
+        let toml_str = r#"
+[identity]
+files = ["SOUL.md"]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.bridge.is_none());
+    }
+
+    #[test]
+    fn bridge_config_tier_defaults_to_t1() {
+        let toml_str = r#"
+[bridge.telegram]
+users = [
+    { id = "123", name = "NoTier" }
+]
+"#;
+
+        let config: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let bridge = config.bridge.unwrap();
+        bridge.validate().unwrap();
+        let tg = bridge.telegram.unwrap();
+        assert_eq!(tg.users[0].tier, "T1");
+    }
+
+    #[test]
+    fn bridge_config_validate_rejects_invalid_tier() {
+        let section = BridgeConfigSection {
+            telegram: Some(BridgePlatformConfig {
+                users: vec![BridgeUserEntry {
+                    id: "123".into(),
+                    name: "Bad".into(),
+                    tier: "T99".into(),
+                }],
+            }),
+            slack: None,
+        };
+
+        let err = section.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("T99"),
+            "error should mention the bad tier: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_tier_case_insensitive() {
+        assert_eq!(parse_tier("t0").unwrap(), Tier::T0);
+        assert_eq!(parse_tier("T1").unwrap(), Tier::T1);
+        assert_eq!(parse_tier("t2").unwrap(), Tier::T2);
+        assert_eq!(parse_tier("T3").unwrap(), Tier::T3);
+    }
+
+    #[test]
+    fn parse_tier_rejects_invalid() {
+        assert!(parse_tier("T4").is_err());
+        assert!(parse_tier("admin").is_err());
+    }
+
+    #[test]
+    fn load_config_with_bridge_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let sigil_dir = dir.path().join(".sigil");
+        std::fs::create_dir_all(&sigil_dir).unwrap();
+        std::fs::write(
+            sigil_dir.join("config.toml"),
+            r#"
+[bridge.telegram]
+users = [
+    { id = "7279215778", name = "Sebastian", tier = "T3" }
+]
+
+[bridge.slack]
+users = [
+    { id = "U_SEB", name = "Sebastian", tier = "T3" }
+]
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(dir.path()).unwrap().unwrap();
+        let bridge = config.bridge.unwrap();
+        bridge.validate().unwrap();
+        assert!(bridge.telegram.is_some());
+        assert!(bridge.slack.is_some());
     }
 
     #[test]

@@ -85,6 +85,37 @@ sigil bridge all
 
 Bridge commands: `/status`, `/sessions`, `/check`, `/send <session> <message>`.
 
+### Running as a Service (macOS)
+
+Run the conductor + Telegram bridge as a persistent launchd service that starts at login and restarts on crash.
+
+**Store your token in Keychain** (one-time):
+
+```bash
+security add-generic-password -s sigil-telegram-token -a $USER -w "your-bot-token"
+```
+
+**Install:**
+
+```bash
+scripts/install-service.sh
+```
+
+The install script creates a wrapper at `~/.sigil/sigil-run.sh` that loads the token from Keychain at launch, installs the plist to `~/Library/LaunchAgents/`, and starts the service.
+
+**Check status / logs:**
+
+```bash
+launchctl print gui/$(id -u)/com.sigil.conductor
+tail -f ~/.sigil/logs/sigil.log
+```
+
+**Uninstall:**
+
+```bash
+scripts/uninstall-service.sh
+```
+
 ### Audit Verification
 
 Every session action is logged to an HMAC-chained audit trail:
