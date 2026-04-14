@@ -271,7 +271,7 @@ impl<R: SessionRuntime> Conductor<R> {
             }
         }
 
-        Ok("Message received.".into())
+        Ok("No target session. Use /send <name> <msg> or try /help.".into())
     }
 
     /// Format the current status for display.
@@ -465,10 +465,65 @@ impl<R: SessionRuntime> Conductor<R> {
 
 #[cfg(test)]
 mod tests {
-    use sigil_core::origin::ActionOrigin;
-    use sigil_core::protocol::{BridgeMessage, ReplyContext};
+    #![allow(clippy::expect_used)]
 
-    /// Helper to create a bridge message for command tests.
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use sigil_core::SessionId;
+    use sigil_core::error::CoreError;
+    use sigil_core::origin::ActionOrigin;
+    use sigil_core::protocol::{BridgeMessage, ConductorMessage, ReplyContext};
+    use sigil_core::session::{SessionConfig, SessionHandle, SessionRecord, SessionState};
+    use sigil_core::traits::SessionRuntime;
+    use sigil_core::trust::ExecutionClass;
+    use sigil_store::Store;
+
+    /// A mock runtime that returns fixed state and output for any session.
+    struct MockRuntime {
+        state: SessionState,
+        output: String,
+    }
+
+    impl MockRuntime {
+        fn new(state: SessionState, output: &str) -> Self {
+            Self {
+                state,
+                output: output.into(),
+            }
+        }
+    }
+
+    impl SessionRuntime for MockRuntime {
+        async fn launch(&self, _config: &SessionConfig) -> Result<SessionHandle, CoreError> {
+            Err(CoreError::Runtime {
+                message: "mock: launch not implemented".into(),
+            })
+        }
+
+        async fn send(
+            &self,
+            _handle: &SessionHandle,
+            _msg: ConductorMessage,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn read_output(&self, _handle: &SessionHandle) -> Result<String, CoreError> {
+            Ok(self.output.clone())
+        }
+
+        async fn status(&self, _handle: &SessionHandle) -> Result<SessionState, CoreError> {
+            Ok(self.state)
+        }
+
+        async fn stop(&self, _handle: &SessionHandle) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    /// Helper to create a bridge message for tests.
     fn command_msg(text: &str) -> BridgeMessage {
         BridgeMessage {
             origin: ActionOrigin::LocalCli,
@@ -477,6 +532,45 @@ mod tests {
             is_command: text.starts_with('/'),
             reply_context: ReplyContext::default(),
         }
+    }
+
+    fn msg_with_target(text: &str, target: SessionId) -> BridgeMessage {
+        BridgeMessage {
+            origin: ActionOrigin::LocalCli,
+            text: text.into(),
+            target_session: Some(target),
+            is_command: false,
+            reply_context: ReplyContext::default(),
+        }
+    }
+
+    fn make_session(title: &str, state: SessionState) -> SessionRecord {
+        SessionRecord {
+            id: SessionId::new(),
+            title: title.into(),
+            path: PathBuf::from("/tmp/test"),
+            tool: sigil_core::ToolKind::ClaudeCode,
+            group: None,
+            parent: None,
+            execution_class: ExecutionClass::OfflineWorker,
+            sandboxed: true,
+            state,
+            identity: None,
+        }
+    }
+
+    async fn setup_conductor(
+        sessions: &[SessionRecord],
+        runtime_state: SessionState,
+        runtime_output: &str,
+    ) -> (super::Conductor<MockRuntime>, Arc<Store>) {
+        let store = Arc::new(Store::new_in_memory().await.expect("store init"));
+        for s in sessions {
+            store.create_session(s).await.expect("create session");
+        }
+        let runtime = Arc::new(MockRuntime::new(runtime_state, runtime_output));
+        let conductor = super::Conductor::new(Arc::clone(&store), runtime, Duration::from_secs(30));
+        (conductor, store)
     }
 
     // -- Command parsing tests --
@@ -532,5 +626,129 @@ mod tests {
     fn non_command_not_detected() {
         let msg = command_msg("just a regular message");
         assert!(!msg.text.starts_with('/'));
+    }
+
+    // -- Integration tests with mock runtime --
+
+    #[tokio::test]
+    async fn help_command_lists_all_commands() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("/help");
+        let response = conductor.handle_message(&msg).await.expect("/help");
+        assert!(response.contains("/status"));
+        assert!(response.contains("/sessions"));
+        assert!(response.contains("/check"));
+        assert!(response.contains("/send"));
+        assert!(response.contains("/help"));
+    }
+
+    #[tokio::test]
+    async fn sessions_command_empty_store() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("/sessions");
+        let response = conductor.handle_message(&msg).await.expect("/sessions");
+        assert_eq!(response, "No sessions.");
+    }
+
+    #[tokio::test]
+    async fn sessions_command_lists_all() {
+        let s1 = make_session("frontend", SessionState::Running);
+        let s2 = make_session("api-server", SessionState::Waiting);
+        let (conductor, _) = setup_conductor(&[s1, s2], SessionState::Running, "").await;
+
+        let msg = command_msg("/sessions");
+        let response = conductor.handle_message(&msg).await.expect("/sessions");
+        assert!(response.contains("frontend"));
+        assert!(response.contains("api-server"));
+        assert!(response.contains("Running"));
+        assert!(response.contains("Waiting"));
+    }
+
+    #[tokio::test]
+    async fn status_command_returns_formatted_report() {
+        let s1 = make_session("frontend", SessionState::Running);
+        let s2 = make_session("backend", SessionState::Running);
+        let (conductor, _) = setup_conductor(&[s1, s2], SessionState::Running, "").await;
+
+        let msg = command_msg("/status");
+        let response = conductor.handle_message(&msg).await.expect("/status");
+        assert!(response.contains("STATUS"));
+        assert!(response.contains('2'));
+    }
+
+    #[tokio::test]
+    async fn check_command_returns_session_output() {
+        let s = make_session("frontend", SessionState::Running);
+        let output = "line 1\nline 2\nline 3\nline 4\nline 5";
+        let (conductor, _) = setup_conductor(&[s], SessionState::Running, output).await;
+
+        let msg = command_msg("/check frontend");
+        let response = conductor.handle_message(&msg).await.expect("/check");
+        assert!(response.contains("frontend"));
+        assert!(response.contains("Running"));
+        assert!(response.contains("line 1"));
+        assert!(response.contains("line 5"));
+    }
+
+    #[tokio::test]
+    async fn check_command_missing_name_shows_usage() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("/check");
+        let response = conductor.handle_message(&msg).await.expect("/check usage");
+        assert!(response.contains("Usage"));
+    }
+
+    #[tokio::test]
+    async fn send_command_forwards_to_session() {
+        let s = make_session("api-server", SessionState::Running);
+        let (conductor, _) = setup_conductor(&[s], SessionState::Running, "").await;
+
+        let msg = command_msg("/send api-server run the migration");
+        let response = conductor.handle_message(&msg).await.expect("/send");
+        assert!(response.contains("Sent to api-server"));
+    }
+
+    #[tokio::test]
+    async fn send_command_missing_args_shows_usage() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("/send");
+        let response = conductor.handle_message(&msg).await.expect("/send usage");
+        assert!(response.contains("Usage"));
+    }
+
+    #[tokio::test]
+    async fn send_command_missing_message_shows_usage() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("/send api-server");
+        let response = conductor.handle_message(&msg).await.expect("/send usage");
+        assert!(response.contains("Usage"));
+    }
+
+    #[tokio::test]
+    async fn unknown_command_suggests_help() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("/foobar");
+        let response = conductor.handle_message(&msg).await.expect("unknown cmd");
+        assert!(response.contains("Unknown command"));
+        assert!(response.contains("/help"));
+    }
+
+    #[tokio::test]
+    async fn non_command_with_target_forwards_to_session() {
+        let s = make_session("frontend", SessionState::Running);
+        let session_id = s.id;
+        let (conductor, _) = setup_conductor(&[s], SessionState::Running, "").await;
+
+        let msg = msg_with_target("do the thing", session_id);
+        let response = conductor.handle_message(&msg).await.expect("forward");
+        assert!(response.contains("Message sent to frontend"));
+    }
+
+    #[tokio::test]
+    async fn non_command_without_target_shows_help() {
+        let (conductor, _) = setup_conductor(&[], SessionState::Running, "").await;
+        let msg = command_msg("just a regular message");
+        let response = conductor.handle_message(&msg).await.expect("no target");
+        assert!(response.contains("/help") || response.contains("/send"));
     }
 }

@@ -13,7 +13,7 @@ use tracing::info;
 
 use sigil_audit::AuditLogWriter;
 use sigil_bridge::{
-    IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, default_config,
+    IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, build_config,
 };
 use sigil_conductor::Conductor;
 use sigil_core::CoreError;
@@ -121,10 +121,20 @@ pub(crate) fn make_cancel_token() -> CancellationToken {
     cancel
 }
 
-/// Load the identity config. Uses [`default_config`] today — will load
-/// from a config file in the future.
-fn load_identity_config() -> IdentityConfig {
-    default_config()
+/// Load the identity config from `.sigil/config.toml`, falling back to
+/// env vars and then hardcoded defaults.
+///
+/// If the config file exists but is malformed, this returns an error
+/// rather than silently falling back to defaults (fail closed).
+fn load_identity_config() -> Result<IdentityConfig> {
+    let bridge_section = match std::env::current_dir() {
+        Ok(cwd) => sigil_core::config::ProjectConfig::load(&cwd)
+            .context("failed to load .sigil/config.toml")?
+            .and_then(|cfg| cfg.bridge),
+        Err(_) => None,
+    };
+
+    Ok(build_config(bridge_section.as_ref()))
 }
 
 /// Build an [`EvaluatorConfig`] with per-user tier ceilings from the
@@ -169,7 +179,7 @@ async fn run_telegram<R: SessionRuntime>(
 ) -> Result<()> {
     let token = read_env_secret("SIGIL_TELEGRAM_TOKEN")?;
     let client = TelegramClient::new(&token).context("failed to build Telegram client")?;
-    let identity = load_identity_config();
+    let identity = load_identity_config()?;
     let mut bridge = TelegramBridge::new(client, identity);
 
     let (reply_tx, mut reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
@@ -220,7 +230,7 @@ async fn run_slack<R: SessionRuntime>(
     let bot_token = read_env_secret("SIGIL_SLACK_BOT_TOKEN")?;
     let client =
         SlackClient::new(&bot_token, &app_token).context("failed to build Slack client")?;
-    let identity = load_identity_config();
+    let identity = load_identity_config()?;
     let mut bridge = SlackBridge::new(client, identity);
 
     let (reply_tx, mut reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
@@ -275,7 +285,7 @@ async fn run_all<R: SessionRuntime>(
     let slack_client =
         SlackClient::new(&slack_bot, &slack_app).context("failed to build Slack client")?;
 
-    let identity = load_identity_config();
+    let identity = load_identity_config()?;
     let mut tg_bridge = TelegramBridge::new(tg_client, identity.clone());
     let mut slack_bridge = SlackBridge::new(slack_client, identity);
 

@@ -19,6 +19,7 @@ sigil-policy = { path = "../sigil-policy" }
 sigil-store = { path = "../sigil-store" }
 sigil-runtime = { path = "../sigil-runtime" }
 sigil-conductor = { path = "../sigil-conductor" }
+sigil-memory = { path = "../sigil-memory" }
 sigil-bridge = { path = "../sigil-bridge" }
 anyhow.workspace = true
 clap.workspace = true
