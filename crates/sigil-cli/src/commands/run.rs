@@ -69,10 +69,10 @@ pub async fn run<R: SessionRuntime>(
     .with_audit(Arc::clone(&audit));
 
     // When running with bridges, apply per-user tier ceilings from the
-    // bridge identity config so policy evaluation enforces the same
-    // limits as `sigil bridge`.
+    // same loaded IdentityConfig the bridge loops will consume, so policy
+    // ceilings can never drift from the actual allowlist.
     if bridge_mode.is_some() {
-        let identity_config = sigil_bridge::default_config();
+        let identity_config = bridge::load_identity_config()?;
         let eval_config = bridge::evaluator_config_from_identity(&identity_config);
         conductor_builder = conductor_builder.with_evaluator_config(eval_config);
     }

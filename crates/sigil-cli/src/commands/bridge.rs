@@ -126,7 +126,7 @@ pub(crate) fn make_cancel_token() -> CancellationToken {
 ///
 /// If the config file exists but is malformed, this returns an error
 /// rather than silently falling back to defaults (fail closed).
-fn load_identity_config() -> Result<IdentityConfig> {
+pub(crate) fn load_identity_config() -> Result<IdentityConfig> {
     let bridge_section = match std::env::current_dir() {
         Ok(cwd) => sigil_core::config::ProjectConfig::load(&cwd)
             .context("failed to load .sigil/config.toml")?

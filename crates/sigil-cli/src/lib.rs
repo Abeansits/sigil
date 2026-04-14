@@ -524,7 +524,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Bridge(cmd) => {
             runtime.preflight_check().await?;
-            let identity_config = sigil_bridge::default_config();
+            // Use the same loaded IdentityConfig the bridge loops will use,
+            // so policy ceilings can never drift from the actual allowlist.
+            let identity_config = commands::bridge::load_identity_config()?;
             let eval_config = commands::bridge::evaluator_config_from_identity(&identity_config);
             let conductor = Arc::new(
                 sigil_conductor::Conductor::new(
