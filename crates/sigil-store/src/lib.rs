@@ -368,6 +368,93 @@ mod tests {
         assert_eq!(s3.title, "dup (2)");
     }
 
+    #[tokio::test]
+    async fn v003_migration_dedups_multiple_independent_groups() {
+        let store = Store::new_in_memory().await.expect("init");
+        let ids = seed_pre_v003_duplicates(&store, &["a", "a", "b", "b"]).await;
+
+        let a1 = store.get_session(&ids[0]).await.expect("get a1");
+        let a2 = store.get_session(&ids[1]).await.expect("get a2");
+        let b1 = store.get_session(&ids[2]).await.expect("get b1");
+        let b2 = store.get_session(&ids[3]).await.expect("get b2");
+        assert_eq!(a1.title, "a");
+        assert_eq!(a2.title, "a (2)");
+        assert_eq!(b1.title, "b");
+        assert_eq!(b2.title, "b (2)");
+
+        let dup_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM (SELECT title FROM sessions GROUP BY title HAVING COUNT(*) > 1)",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .expect("count dups");
+        assert_eq!(
+            dup_count.0, 0,
+            "no duplicates should remain after migration"
+        );
+    }
+
+    #[tokio::test]
+    async fn v003_migration_jumps_past_dense_existing_suffixes() {
+        let store = Store::new_in_memory().await.expect("init");
+        // Pre-existing (2) and (3) — the renamed s2 must jump to (4).
+        let ids = seed_pre_v003_duplicates(&store, &["dup", "dup", "dup (2)", "dup (3)"]).await;
+
+        let s1 = store.get_session(&ids[0]).await.expect("get s1");
+        let s2 = store.get_session(&ids[1]).await.expect("get s2");
+        let s3 = store.get_session(&ids[2]).await.expect("get s3");
+        let s4 = store.get_session(&ids[3]).await.expect("get s4");
+        assert_eq!(s1.title, "dup");
+        assert_eq!(s2.title, "dup (4)");
+        assert_eq!(s3.title, "dup (2)");
+        assert_eq!(s4.title, "dup (3)");
+    }
+
+    /// When duplicates share a `created_at`, the dedup must still produce a
+    /// well-defined result (tie-broken by `id`). We don't assert which
+    /// specific row keeps the original title — only that all titles end up
+    /// distinct and form the expected multiset.
+    #[tokio::test]
+    async fn v003_migration_dedup_handles_identical_created_at() {
+        let store = Store::new_in_memory().await.expect("init");
+
+        sqlx::query("DROP INDEX IF EXISTS idx_sessions_title")
+            .execute(&store.pool)
+            .await
+            .expect("drop index");
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let record = make_session("same");
+            store.create_session(&record).await.expect("create");
+            ids.push(record.id);
+        }
+        // Force every row to share the same created_at.
+        sqlx::query("UPDATE sessions SET created_at = '2026-01-01 00:00:00'")
+            .execute(&store.pool)
+            .await
+            .expect("clobber created_at");
+
+        sqlx::query("DELETE FROM schema_version WHERE version = 3")
+            .execute(&store.pool)
+            .await
+            .expect("delete v003 record");
+
+        migrate::run_migrations(&store.pool)
+            .await
+            .expect("rerun migrations");
+
+        let mut titles: Vec<String> = sqlx::query_as("SELECT title FROM sessions")
+            .fetch_all(&store.pool)
+            .await
+            .expect("list titles")
+            .into_iter()
+            .map(|(t,): (String,)| t)
+            .collect();
+        titles.sort();
+        assert_eq!(titles, vec!["same", "same (2)", "same (3)"]);
+    }
+
     // -- Identity persistence tests --
 
     #[tokio::test]

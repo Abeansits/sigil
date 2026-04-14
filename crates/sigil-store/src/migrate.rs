@@ -153,7 +153,10 @@ async fn apply_v002_identity_column(pool: &SqlitePool) -> Result<(), StoreError>
 /// V003: add UNIQUE index on `sessions.title`.
 ///
 /// Pre-existing duplicate titles are renamed to `<title> (N)` before the
-/// index is created so the migration succeeds on legacy databases. Uses
+/// index is created so the migration succeeds on legacy databases. The
+/// dedup, index creation, and version record are wrapped in a single
+/// transaction so a concurrent writer cannot reintroduce a duplicate
+/// between the rename and the unique-index creation. Uses
 /// `CREATE UNIQUE INDEX IF NOT EXISTS` so the migration is idempotent.
 async fn apply_v003_unique_session_title(pool: &SqlitePool) -> Result<(), StoreError> {
     const VERSION: i64 = 3;
@@ -166,13 +169,22 @@ async fn apply_v003_unique_session_title(pool: &SqlitePool) -> Result<(), StoreE
 
     tracing::info!(VERSION, DESCRIPTION, "applying migration");
 
-    dedup_session_titles(pool).await?;
+    let mut tx = pool.begin().await?;
+
+    dedup_session_titles(&mut tx).await?;
 
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title)")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-    record_migration(pool, VERSION, DESCRIPTION).await
+    sqlx::query("INSERT INTO schema_version (version, description) VALUES (?, ?)")
+        .bind(VERSION)
+        .bind(DESCRIPTION)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Rename any pre-existing duplicate session titles so the V003 unique
@@ -181,17 +193,22 @@ async fn apply_v003_unique_session_title(pool: &SqlitePool) -> Result<(), StoreE
 /// For each title with multiple rows, the oldest row (by `created_at`,
 /// then `id`) keeps the original title; subsequent rows are renamed to
 /// `<title> (N)`, where `N` starts at 2 and skips suffixes already in use.
-async fn dedup_session_titles(pool: &SqlitePool) -> Result<(), StoreError> {
+///
+/// Runs against the caller's transaction so the rename, index creation,
+/// and version record commit atomically.
+async fn dedup_session_titles(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), StoreError> {
     let duplicate_titles: Vec<(String,)> =
         sqlx::query_as("SELECT title FROM sessions GROUP BY title HAVING COUNT(*) > 1")
-            .fetch_all(pool)
+            .fetch_all(&mut **tx)
             .await?;
 
     for (title,) in duplicate_titles {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT id FROM sessions WHERE title = ? ORDER BY created_at, id")
                 .bind(&title)
-                .fetch_all(pool)
+                .fetch_all(&mut **tx)
                 .await?;
 
         let mut next_suffix: u32 = 2;
@@ -201,7 +218,7 @@ async fn dedup_session_titles(pool: &SqlitePool) -> Result<(), StoreError> {
                 let exists: Option<(i64,)> =
                     sqlx::query_as("SELECT 1 FROM sessions WHERE title = ?")
                         .bind(&candidate)
-                        .fetch_optional(pool)
+                        .fetch_optional(&mut **tx)
                         .await?;
                 next_suffix += 1;
                 if exists.is_none() {
@@ -212,7 +229,7 @@ async fn dedup_session_titles(pool: &SqlitePool) -> Result<(), StoreError> {
             sqlx::query("UPDATE sessions SET title = ? WHERE id = ?")
                 .bind(&new_title)
                 .bind(&id)
-                .execute(pool)
+                .execute(&mut **tx)
                 .await?;
 
             tracing::warn!(
