@@ -1,28 +1,26 @@
 //! Session subcommands — list, show, create, launch, start, stop,
 //! restart, send, output, remove.
+//!
+//! All privileged operations go through [`ActionService::execute()`]:
+//! policy evaluation → dispatch → audit. No more "call runtime then
+//! log allowed."
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use sigil_audit::AuditLogWriter;
-use sigil_core::PolicyDecision;
+use sigil_conductor::action_service::{ActionOutcome, ActionService, DispatchResult};
+use sigil_core::action::{Action, ActionRequest};
 use sigil_core::config::ProjectConfig;
 use sigil_core::id::{GroupId, SessionId};
-use sigil_core::protocol::ConductorMessage;
-use sigil_core::session::{
-    IdentitySpec, LifecycleEvent, SessionConfig, SessionHandle, SessionRecord, SessionState,
-    ToolKind,
-};
-use sigil_core::traits::{LifecycleHooks, SessionRuntime};
-use sigil_core::trust::ExecutionClass;
+use sigil_core::origin::ActionOrigin;
+use sigil_core::session::{IdentitySpec, LifecycleEvent, SessionRecord, SessionState, ToolKind};
+use sigil_core::traits::{LifecycleHooks, PolicyEngine, SessionRuntime};
 use sigil_store::Store;
 
 use crate::SessionCommands;
-use crate::audit::log_event;
 
 /// Route a `SessionCommands` variant to its handler.
 ///
@@ -30,15 +28,14 @@ use crate::audit::log_event;
 ///
 /// Returns an error if any session operation fails.
 #[allow(clippy::print_stdout)]
-pub async fn run<R: SessionRuntime + LifecycleHooks>(
-    store: &Store,
-    runtime: &R,
-    audit: &Arc<AuditLogWriter>,
-    cmd: SessionCommands,
-) -> Result<()> {
+pub async fn run<R, P>(service: &ActionService<R, P>, cmd: SessionCommands) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
     match cmd {
-        SessionCommands::List { json } => list(store, json).await,
-        SessionCommands::Show { name, json } => show(store, &name, json).await,
+        SessionCommands::List { json } => list(service, json).await,
+        SessionCommands::Show { name, json } => show(service, &name, json).await,
         SessionCommands::Create {
             path,
             title,
@@ -47,9 +44,7 @@ pub async fn run<R: SessionRuntime + LifecycleHooks>(
             identity,
         } => {
             create(
-                store,
-                runtime,
-                audit,
+                service,
                 &path,
                 &title,
                 &tool,
@@ -67,9 +62,7 @@ pub async fn run<R: SessionRuntime + LifecycleHooks>(
             identity,
         } => {
             launch(
-                store,
-                runtime,
-                audit,
+                service,
                 &path,
                 &title,
                 &tool,
@@ -79,17 +72,17 @@ pub async fn run<R: SessionRuntime + LifecycleHooks>(
             )
             .await
         }
-        SessionCommands::Start { name } => start(store, runtime, audit, &name).await,
-        SessionCommands::Stop { name } => stop(store, runtime, audit, &name).await,
-        SessionCommands::Restart { name } => restart(store, runtime, audit, &name).await,
+        SessionCommands::Start { name } => start(service, &name).await,
+        SessionCommands::Stop { name } => stop(service, &name).await,
+        SessionCommands::Restart { name } => restart(service, &name).await,
         SessionCommands::Send {
             name,
             message,
             wait,
             quiet,
-        } => send(store, runtime, audit, &name, &message, wait, quiet).await,
-        SessionCommands::Output { name, quiet } => output(store, runtime, &name, quiet).await,
-        SessionCommands::Remove { name } => remove(store, audit, &name).await,
+        } => send(service, &name, &message, wait, quiet).await,
+        SessionCommands::Output { name, quiet } => output(service, &name, quiet).await,
+        SessionCommands::Remove { name } => remove(service, &name).await,
     }
 }
 
@@ -156,35 +149,6 @@ fn parse_tool(tool: &str) -> Result<ToolKind> {
     }
 }
 
-/// Convert a `SessionRecord` to a `SessionHandle` for runtime calls.
-pub(crate) fn record_to_handle(record: &SessionRecord) -> SessionHandle {
-    SessionHandle {
-        id: record.id,
-        title: record.title.clone(),
-        tool: record.tool,
-        state: record.state,
-        path: record.path.clone(),
-        tmux_window: Some(record.title.clone()),
-        container_id: None,
-        execution_class: record.execution_class,
-        sandboxed: record.sandboxed,
-        identity: record.identity.clone(),
-    }
-}
-
-/// Log an audit event for a session action (always `"cli"` origin, `Allow`
-/// decision). Reduces boilerplate across the session subcommands.
-async fn log_session_event(audit: &AuditLogWriter, action: &str, session_id: SessionId) {
-    log_event(
-        audit,
-        action,
-        "cli",
-        PolicyDecision::Allow,
-        Some(session_id),
-    )
-    .await;
-}
-
 // -- Identity resolution --
 
 /// Resolve an `IdentitySpec` from CLI flag or project config.
@@ -225,14 +189,34 @@ fn resolve_identity_spec(
     Ok(None)
 }
 
+// -- Outcome handling --
+
+/// Unwrap a completed `ActionOutcome` or bail on denial/approval.
+fn require_completed(outcome: ActionOutcome) -> Result<DispatchResult> {
+    match outcome {
+        ActionOutcome::Completed(result) => Ok(result),
+        ActionOutcome::Denied { reason } => bail!("policy denied: {reason}"),
+        ActionOutcome::NeedsApproval { description } => {
+            bail!("approval required: {description}")
+        }
+    }
+}
+
 // -- Subcommand handlers --
 
 #[allow(clippy::print_stdout)]
-async fn list(store: &Store, json: bool) -> Result<()> {
-    let sessions = store
-        .list_sessions()
-        .await
-        .context("failed to list sessions")?;
+async fn list<R, P>(service: &ActionService<R, P>, json: bool) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let request = ActionRequest::new(Action::ListSessions, ActionOrigin::LocalCli);
+    let outcome = service.execute(request).await.context("list sessions")?;
+    let result = require_completed(outcome)?;
+
+    let DispatchResult::SessionList(sessions) = result else {
+        bail!("unexpected dispatch result")
+    };
 
     if json {
         let formatted =
@@ -262,8 +246,12 @@ async fn list(store: &Store, json: bool) -> Result<()> {
 }
 
 #[allow(clippy::print_stdout)]
-async fn show(store: &Store, name: &str, json: bool) -> Result<()> {
-    let session = resolve_session(store, name).await?;
+async fn show<R, P>(service: &ActionService<R, P>, name: &str, json: bool) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
     if json {
         let formatted =
@@ -289,272 +277,175 @@ async fn show(store: &Store, name: &str, json: bool) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::print_stdout)]
-async fn create<R: SessionRuntime + LifecycleHooks>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
+async fn create<R, P>(
+    service: &ActionService<R, P>,
     path: &str,
     title: &str,
     tool: &str,
     group: Option<&str>,
     identity_flag: Option<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
     let tool_kind = parse_tool(tool)?;
     let project_dir = PathBuf::from(path);
     let identity = resolve_identity_spec(identity_flag, &project_dir)?;
 
-    let record = SessionRecord {
-        id: SessionId::new(),
-        title: title.to_owned(),
-        path: project_dir,
-        tool: tool_kind,
-        group: group.map(GroupId::new),
-        parent: None,
-        execution_class: ExecutionClass::OfflineWorker,
-        sandboxed: true,
-        state: SessionState::Stopped,
-        identity,
+    let request = ActionRequest::new(
+        Action::CreateSession {
+            path: project_dir,
+            title: title.to_owned(),
+            group: group.map(GroupId::new),
+            tool: tool_kind,
+            identity,
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let outcome = service.execute(request).await.context("create session")?;
+    let result = require_completed(outcome)?;
+
+    let DispatchResult::Session(record) = result else {
+        bail!("unexpected dispatch result")
     };
-
-    store
-        .create_session(&record)
-        .await
-        .context("failed to create session")?;
-
-    // Register identity hooks if the session has lifecycle events.
-    if let Some(ref spec) = record.identity {
-        if !spec.reload_on.is_empty() {
-            let handle = record_to_handle(&record);
-            runtime
-                .register_identity_hooks(&handle, spec)
-                .await
-                .context("failed to register identity hooks")?;
-        }
-    }
-
-    log_session_event(audit, "session.create", record.id).await;
-
     println!("Created session '{}' ({})", record.title, record.id);
+
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::print_stdout)]
-async fn launch<R: SessionRuntime + LifecycleHooks>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
+async fn launch<R, P>(
+    service: &ActionService<R, P>,
     path: &str,
     title: &str,
     tool: &str,
     group: Option<&str>,
     message: Option<&str>,
     identity_flag: Option<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
     let tool_kind = parse_tool(tool)?;
     let project_dir = PathBuf::from(path);
     let identity = resolve_identity_spec(identity_flag, &project_dir)?;
 
-    let config = SessionConfig {
-        path: project_dir,
-        title: title.to_owned(),
-        tool: tool_kind,
-        group: group.map(GroupId::new),
-        parent: None,
-        execution_class: ExecutionClass::OfflineWorker,
-        sandboxed: true,
-        initial_message: message.map(ToOwned::to_owned),
-        worktree_branch: None,
-        identity,
-        memory: None,
+    let request = ActionRequest::new(
+        Action::LaunchSession {
+            path: project_dir,
+            title: title.to_owned(),
+            tool: tool_kind,
+            group: group.map(GroupId::new),
+            message: message.map(ToOwned::to_owned),
+            identity,
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let outcome = service.execute(request).await.context("launch session")?;
+    let result = require_completed(outcome)?;
+
+    let DispatchResult::Session(record) = result else {
+        bail!("unexpected dispatch result")
     };
-
-    let handle = runtime
-        .launch(&config)
-        .await
-        .context("failed to launch session")?;
-
-    // Persist the session record.
-    let record = SessionRecord {
-        id: handle.id,
-        title: handle.title.clone(),
-        path: handle.path.clone(),
-        tool: handle.tool,
-        group: group.map(GroupId::new),
-        parent: None,
-        execution_class: handle.execution_class,
-        sandboxed: handle.sandboxed,
-        state: handle.state,
-        identity: handle.identity.clone(),
-    };
-
-    store
-        .create_session(&record)
-        .await
-        .context("failed to persist launched session")?;
-
-    // Register identity hooks if the session has lifecycle events.
-    if let Some(ref spec) = record.identity {
-        if !spec.reload_on.is_empty() {
-            runtime
-                .register_identity_hooks(&handle, spec)
-                .await
-                .context("failed to register identity hooks")?;
-        }
-    }
-
-    log_session_event(audit, "session.launch", record.id).await;
-
     println!("Launched session '{}' ({})", record.title, record.id);
+
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn start<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
-    name: &str,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
+async fn start<R, P>(service: &ActionService<R, P>, name: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
-    if session.state != SessionState::Stopped {
-        bail!(
-            "session '{}' is {:?}, not Stopped — cannot start",
-            session.title,
-            session.state
-        );
-    }
+    let request = ActionRequest::new(
+        Action::StartSession {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
 
-    let config = SessionConfig {
-        path: session.path.clone(),
-        title: session.title.clone(),
-        tool: session.tool,
-        group: session.group.clone(),
-        parent: session.parent,
-        execution_class: session.execution_class,
-        sandboxed: session.sandboxed,
-        initial_message: None,
-        worktree_branch: None,
-        identity: session.identity.clone(),
-        memory: None,
-    };
-
-    runtime
-        .launch(&config)
-        .await
-        .context("failed to start session")?;
-
-    // Hooks are already on disk from create/launch — no re-registration needed.
-
-    store
-        .update_session_state(&session.id, SessionState::Running)
-        .await
-        .context("failed to update session state")?;
-
-    log_session_event(audit, "session.start", session.id).await;
+    let outcome = service.execute(request).await.context("start session")?;
+    require_completed(outcome)?;
 
     println!("Started session '{}'.", session.title);
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn stop<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
-    name: &str,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
-    let handle = record_to_handle(&session);
+async fn stop<R, P>(service: &ActionService<R, P>, name: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
-    runtime
-        .stop(&handle)
-        .await
-        .context("failed to stop session")?;
+    let request = ActionRequest::new(
+        Action::StopSession {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
 
-    store
-        .update_session_state(&session.id, SessionState::Stopped)
-        .await
-        .context("failed to update session state")?;
-
-    log_session_event(audit, "session.stop", session.id).await;
+    let outcome = service.execute(request).await.context("stop session")?;
+    require_completed(outcome)?;
 
     println!("Stopped session '{}'.", session.title);
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn restart<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
-    name: &str,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
-    let handle = record_to_handle(&session);
+async fn restart<R, P>(service: &ActionService<R, P>, name: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
-    // Stop if currently alive.
-    if session.state != SessionState::Stopped {
-        let _ = runtime.stop(&handle).await;
-        // Brief pause for tmux to clean up.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
+    let request = ActionRequest::new(
+        Action::RestartSession {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
 
-    let config = SessionConfig {
-        path: session.path.clone(),
-        title: session.title.clone(),
-        tool: session.tool,
-        group: session.group.clone(),
-        parent: session.parent,
-        execution_class: session.execution_class,
-        sandboxed: session.sandboxed,
-        initial_message: None,
-        worktree_branch: None,
-        identity: session.identity.clone(),
-        memory: None,
-    };
-
-    runtime
-        .launch(&config)
-        .await
-        .context("failed to relaunch session")?;
-
-    // Hooks are already on disk from create/launch — no re-registration needed.
-
-    store
-        .update_session_state(&session.id, SessionState::Running)
-        .await
-        .context("failed to update session state")?;
-
-    log_session_event(audit, "session.restart", session.id).await;
+    let outcome = service.execute(request).await.context("restart session")?;
+    require_completed(outcome)?;
 
     println!("Restarted session '{}'.", session.title);
     Ok(())
 }
 
 #[allow(clippy::print_stdout)]
-async fn send<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
+async fn send<R, P>(
+    service: &ActionService<R, P>,
     name: &str,
     message: &str,
     wait: bool,
     quiet: bool,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
-    let handle = record_to_handle(&session);
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
-    let conductor_msg = ConductorMessage::TaskAssignment {
-        instructions: message.to_owned(),
-    };
+    let request = ActionRequest::new(
+        Action::SendMessage {
+            session_id: session.id,
+            message: message.to_owned(),
+        },
+        ActionOrigin::LocalCli,
+    );
 
-    runtime
-        .send(&handle, conductor_msg)
-        .await
-        .context("failed to send message")?;
-
-    log_session_event(audit, "session.send", session.id).await;
+    let outcome = service.execute(request).await.context("send message")?;
+    require_completed(outcome)?;
 
     if !quiet {
         println!("Sent to '{}'.", session.title);
@@ -562,12 +453,14 @@ async fn send<R: SessionRuntime>(
 
     if wait {
         // Poll for output until the session transitions away from Running.
-        // Timeout after 5 minutes.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let handle = sigil_conductor::action_service::record_to_handle(&session);
+
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
-            let state = runtime
+            let state = service
+                .runtime()
                 .status(&handle)
                 .await
                 .context("failed to check session status")?;
@@ -584,11 +477,20 @@ async fn send<R: SessionRuntime>(
             }
         }
 
-        // Read final output.
-        let text = runtime
-            .read_output(&handle)
-            .await
-            .context("failed to read session output")?;
+        // Read final output via ActionService.
+        let read_request = ActionRequest::new(
+            Action::ReadSessionOutput {
+                session_id: session.id,
+            },
+            ActionOrigin::LocalCli,
+        );
+
+        let read_outcome = service.execute(read_request).await.context("read output")?;
+        let read_result = require_completed(read_outcome)?;
+
+        let DispatchResult::Text(text) = read_result else {
+            bail!("unexpected dispatch result")
+        };
 
         if quiet {
             println!("{text}");
@@ -603,19 +505,26 @@ async fn send<R: SessionRuntime>(
 }
 
 #[allow(clippy::print_stdout)]
-async fn output<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    name: &str,
-    quiet: bool,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
-    let handle = record_to_handle(&session);
+async fn output<R, P>(service: &ActionService<R, P>, name: &str, quiet: bool) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
-    let text = runtime
-        .read_output(&handle)
-        .await
-        .context("failed to read session output")?;
+    let request = ActionRequest::new(
+        Action::ReadSessionOutput {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let outcome = service.execute(request).await.context("read output")?;
+    let result = require_completed(outcome)?;
+
+    let DispatchResult::Text(text) = result else {
+        bail!("unexpected dispatch result")
+    };
 
     if quiet {
         println!("{text}");
@@ -632,15 +541,22 @@ async fn output<R: SessionRuntime>(
 }
 
 #[allow(clippy::print_stdout)]
-async fn remove(store: &Store, audit: &AuditLogWriter, name: &str) -> Result<()> {
-    let session = resolve_session(store, name).await?;
+async fn remove<R, P>(service: &ActionService<R, P>, name: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
-    store
-        .delete_session(&session.id)
-        .await
-        .context("failed to delete session")?;
+    let request = ActionRequest::new(
+        Action::RemoveSession {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
 
-    log_session_event(audit, "session.remove", session.id).await;
+    let outcome = service.execute(request).await.context("remove session")?;
+    require_completed(outcome)?;
 
     println!("Removed session '{}' ({}).", session.title, session.id);
     Ok(())
@@ -699,7 +615,7 @@ mod tests {
             tool: ToolKind::ClaudeCode,
             group: None,
             parent: None,
-            execution_class: ExecutionClass::OfflineWorker,
+            execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
             identity: None,
@@ -727,7 +643,7 @@ mod tests {
             tool: ToolKind::ClaudeCode,
             group: None,
             parent: None,
-            execution_class: ExecutionClass::OfflineWorker,
+            execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
             identity: None,
@@ -756,7 +672,7 @@ mod tests {
             tool: ToolKind::ClaudeCode,
             group: None,
             parent: None,
-            execution_class: ExecutionClass::OfflineWorker,
+            execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
             sandboxed: true,
             state: SessionState::Stopped,
             identity: None,

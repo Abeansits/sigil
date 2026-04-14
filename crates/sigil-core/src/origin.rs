@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::SessionId;
+use crate::principal::PlatformIdentity;
 use crate::trust::TrustZone;
 
 /// Where an action originated. Carried through the entire request lifecycle
@@ -56,6 +57,24 @@ impl ActionOrigin {
     #[must_use]
     pub fn is_local(&self) -> bool {
         matches!(self, Self::LocalCli | Self::SystemHeartbeat)
+    }
+
+    /// Extract the typed platform identity for per-user config lookups
+    /// (tier ceiling overrides, etc.). Returns `None` for non-bridge origins.
+    #[must_use]
+    pub fn platform_identity(&self) -> Option<PlatformIdentity> {
+        match self {
+            Self::BridgeTelegram { user_id } => Some(PlatformIdentity::Telegram {
+                user_id: user_id.clone(),
+            }),
+            Self::BridgeSlack { user_id, .. } => Some(PlatformIdentity::Slack {
+                user_id: user_id.clone(),
+            }),
+            Self::LocalCli
+            | Self::AgentGenerated { .. }
+            | Self::SystemHeartbeat
+            | Self::HumanApproved { .. } => None,
+        }
     }
 }
 

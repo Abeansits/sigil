@@ -19,7 +19,9 @@ use std::time::Duration;
 use sigil_audit::AuditLogWriter;
 use sigil_cli::SessionCommands;
 use sigil_conductor::Conductor;
+use sigil_conductor::action_service::ActionService;
 use sigil_core::session::SessionState;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -37,11 +39,24 @@ async fn cleanup(server: &str) {
         .await;
 }
 
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
+}
+
 /// Create and start all sessions, returning their names.
 async fn create_and_start_sessions(
+    service: &ActionService<TmuxRuntime, PolicyService<NoopGrantStore>>,
     store: &Store,
-    runtime: &TmuxRuntime,
-    audit: &Arc<AuditLogWriter>,
     work_dir: &str,
 ) -> Vec<String> {
     let names: Vec<String> = (0..SESSION_COUNT)
@@ -50,9 +65,7 @@ async fn create_and_start_sessions(
 
     for name in &names {
         sigil_cli::commands::session::run(
-            store,
-            runtime,
-            audit,
+            service,
             SessionCommands::Create {
                 path: work_dir.to_owned(),
                 title: name.clone(),
@@ -64,14 +77,9 @@ async fn create_and_start_sessions(
         .await
         .expect("create session");
 
-        sigil_cli::commands::session::run(
-            store,
-            runtime,
-            audit,
-            SessionCommands::Start { name: name.clone() },
-        )
-        .await
-        .expect("start session");
+        sigil_cli::commands::session::run(service, SessionCommands::Start { name: name.clone() })
+            .await
+            .expect("start session");
     }
 
     // Verify all are in the store as Running.
@@ -181,10 +189,11 @@ async fn stress_conductor_detects_killed_sessions() {
             .await
             .expect("audit"),
     );
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid").to_owned();
 
     // -- Phase 1: Create and start 10 sessions --
-    let session_names = create_and_start_sessions(&store, &runtime, &audit, &work_dir).await;
+    let session_names = create_and_start_sessions(&service, &store, &work_dir).await;
 
     // -- Phase 2: Conductor startup reconciliation --
     let conductor = Conductor::new(
@@ -233,9 +242,7 @@ async fn stress_conductor_detects_killed_sessions() {
     // -- Cleanup --
     for name in &session_names[KILL_COUNT..] {
         let _ = sigil_cli::commands::session::run(
-            &store,
-            &*runtime,
-            &audit,
+            &service,
             SessionCommands::Stop { name: name.clone() },
         )
         .await;

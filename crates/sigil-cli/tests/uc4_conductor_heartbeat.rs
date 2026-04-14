@@ -14,7 +14,9 @@ use std::time::Duration;
 use sigil_audit::AuditLogWriter;
 use sigil_cli::SessionCommands;
 use sigil_conductor::Conductor;
+use sigil_conductor::action_service::ActionService;
 use sigil_core::session::SessionState;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -27,6 +29,20 @@ async fn cleanup(server: &str) {
         .args(["-L", server, "kill-server"])
         .output()
         .await;
+}
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
 }
 
 #[tokio::test]
@@ -50,14 +66,13 @@ async fn conductor_heartbeat_two_cycles() {
             .await
             .expect("audit"),
     );
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid").to_owned();
 
     // Create and start two sessions through the CLI layer.
     for name in &["uc4-alpha", "uc4-beta"] {
         sigil_cli::commands::session::run(
-            &store,
-            &*runtime,
-            &audit,
+            &service,
             SessionCommands::Create {
                 path: work_dir.clone(),
                 title: (*name).to_owned(),
@@ -72,9 +87,7 @@ async fn conductor_heartbeat_two_cycles() {
 
     // Start only one session.
     sigil_cli::commands::session::run(
-        &store,
-        &*runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: "uc4-alpha".into(),
         },
@@ -140,9 +153,7 @@ async fn conductor_heartbeat_two_cycles() {
 
     // ── CLEANUP ─────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &*runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: "uc4-alpha".into(),
         },

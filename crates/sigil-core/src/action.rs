@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::id::{RequestId, SessionId};
+use crate::id::{GroupId, RequestId, SessionId};
 use crate::origin::ActionOrigin;
-use crate::session::{ConductorConfig, ToolKind};
+use crate::session::{ConductorConfig, IdentitySpec, ToolKind};
 use crate::trust::Capability;
 
 /// A request to perform an action. The sole authority-bearing protocol.
@@ -58,13 +58,17 @@ pub enum Action {
     CreateSession {
         path: PathBuf,
         title: String,
-        group: Option<String>,
+        group: Option<GroupId>,
         tool: ToolKind,
+        identity: Option<IdentitySpec>,
     },
     LaunchSession {
         path: PathBuf,
         title: String,
+        tool: ToolKind,
+        group: Option<GroupId>,
         message: Option<String>,
+        identity: Option<IdentitySpec>,
     },
     StartSession {
         session_id: SessionId,
@@ -102,7 +106,7 @@ pub enum Action {
     },
     MoveSessionToGroup {
         session_id: SessionId,
-        group: String,
+        group: GroupId,
     },
     ConfigureConductor {
         name: String,
@@ -325,7 +329,7 @@ mod proptest_tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::id::SessionId;
+    use crate::id::{GroupId, SessionId};
     use crate::session::{ConductorConfig, ToolKind};
     use crate::trust::Tier;
 
@@ -428,16 +432,27 @@ mod proptest_tests {
                 .prop_map(|(path, title, group, tool)| Action::CreateSession {
                     path,
                     title,
-                    group,
+                    group: group.map(GroupId::new),
                     tool,
+                    identity: None,
                 }),
-            (arb_path(), arb_name(), proptest::option::of(arb_name())).prop_map(
-                |(path, title, message)| Action::LaunchSession {
-                    path,
-                    title,
-                    message,
-                }
-            ),
+            (
+                arb_path(),
+                arb_name(),
+                arb_tool_kind(),
+                proptest::option::of(arb_name()),
+                proptest::option::of(arb_name()),
+            )
+                .prop_map(|(path, title, tool, group, message)| {
+                    Action::LaunchSession {
+                        path,
+                        title,
+                        tool,
+                        group: group.map(GroupId::new),
+                        message,
+                        identity: None,
+                    }
+                }),
             arb_session_id().prop_map(|session_id| Action::StartSession { session_id }),
             arb_session_id().prop_map(|session_id| Action::StopSession { session_id }),
             arb_session_id().prop_map(|session_id| Action::RestartSession { session_id }),
@@ -469,7 +484,10 @@ mod proptest_tests {
                 }
             }),
             (arb_session_id(), arb_name()).prop_map(|(session_id, group)| {
-                Action::MoveSessionToGroup { session_id, group }
+                Action::MoveSessionToGroup {
+                    session_id,
+                    group: GroupId::new(group),
+                }
             }),
             (arb_name(), arb_conductor_config())
                 .prop_map(|(name, config)| Action::ConfigureConductor { name, config }),

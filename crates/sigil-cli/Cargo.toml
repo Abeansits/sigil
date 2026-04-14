@@ -15,6 +15,7 @@ container = ["sigil-runtime/container"]
 [dependencies]
 sigil-core = { path = "../sigil-core" }
 sigil-audit = { path = "../sigil-audit" }
+sigil-policy = { path = "../sigil-policy" }
 sigil-store = { path = "../sigil-store" }
 sigil-runtime = { path = "../sigil-runtime" }
 sigil-conductor = { path = "../sigil-conductor" }
@@ -32,11 +33,13 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 sigil-core = { path = "../sigil-core" }
+sigil-conductor = { path = "../sigil-conductor" }
 sigil-policy = { path = "../sigil-policy" }
 sigil-audit = { path = "../sigil-audit" }
 sigil-store = { path = "../sigil-store" }
 sigil-bridge = { path = "../sigil-bridge" }
 sigil-memory = { path = "../sigil-memory" }
+sigil-runtime = { path = "../sigil-runtime" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 assert_matches.workspace = true

@@ -12,6 +12,9 @@ pub enum StoreError {
     #[error("session not found: {id}")]
     SessionNotFound { id: String },
 
+    #[error("duplicate session title: {title}")]
+    DuplicateTitle { title: String },
+
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
@@ -24,6 +27,9 @@ impl From<StoreError> for CoreError {
         match err {
             StoreError::SessionNotFound { id } => Self::Store {
                 message: format!("session not found: {id}"),
+            },
+            StoreError::DuplicateTitle { title } => Self::Store {
+                message: format!("duplicate session title: {title}"),
             },
             StoreError::Database(e) => Self::Store {
                 message: format!("database error: {e}"),

@@ -9,6 +9,7 @@
 //! The `Conductor` struct provides the building blocks for the main
 //! run loop (wired up in `sigil-cli`).
 
+pub mod action_service;
 pub mod error;
 pub mod escalation;
 pub mod heartbeat;
@@ -19,13 +20,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sigil_audit::AuditLogWriter;
 use sigil_core::MemoryConfig;
+use sigil_core::action::{Action, ActionRequest, PolicyDecision};
+use sigil_core::origin::ActionOrigin;
 use sigil_core::protocol::BridgeMessage;
-use sigil_core::traits::SessionRuntime;
+use sigil_core::traits::{AuditEvent, SessionRuntime};
 use sigil_memory::EpisodeWriter;
+use sigil_policy::{EvaluatorConfig, PolicyService};
 use sigil_store::Store;
 use tracing::{debug, info, warn};
 
+use crate::action_service::record_to_handle;
 use crate::error::ConductorError;
 use crate::escalation::format_status_report;
 use crate::heartbeat::{HeartbeatResult, scan_sessions};
@@ -42,6 +48,9 @@ use crate::reconcile::{ReconcileResult, reconcile};
 /// for the heartbeat interval. The `sigil-cli` crate wires this into an
 /// async run loop with `CancellationToken` for cooperative shutdown.
 ///
+/// Bridge commands (`/send`, `/check`, message forwarding) go through
+/// the policy pipeline: `ActionRequest` → evaluate → execute → audit.
+///
 /// When memory is configured via [`with_memory`](Self::with_memory),
 /// the conductor captures episodes on heartbeat state transitions and
 /// bridge sends, and triggers mechanical consolidation after sustained
@@ -49,6 +58,10 @@ use crate::reconcile::{ReconcileResult, reconcile};
 pub struct Conductor<R: SessionRuntime> {
     store: Arc<Store>,
     runtime: Arc<R>,
+    /// Policy service for evaluating bridge commands.
+    policy: PolicyService<Store>,
+    /// Audit writer for logging bridge command decisions.
+    audit: Option<Arc<AuditLogWriter>>,
     heartbeat_interval: Duration,
     memory: Option<MemoryHandle>,
 }
@@ -57,12 +70,36 @@ impl<R: SessionRuntime> Conductor<R> {
     /// Create a new conductor with the given dependencies.
     #[must_use]
     pub fn new(store: Arc<Store>, runtime: Arc<R>, heartbeat_interval: Duration) -> Self {
+        let policy = PolicyService::new(EvaluatorConfig::default(), Arc::clone(&store));
         Self {
             store,
             runtime,
+            policy,
+            audit: None,
             heartbeat_interval,
             memory: None,
         }
+    }
+
+    /// Configure the audit writer for policy decision logging.
+    ///
+    /// When set, bridge commands are audited through the same HMAC-chained
+    /// audit trail as CLI commands.
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<AuditLogWriter>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Configure per-user tier ceilings for bridge identity convergence.
+    ///
+    /// This feeds bridge identity config (e.g., `AllowedUser.tier_ceiling`)
+    /// into the policy evaluator, converging bridge and core principal
+    /// resolution into a single path.
+    #[must_use]
+    pub fn with_evaluator_config(mut self, config: EvaluatorConfig) -> Self {
+        self.policy = PolicyService::new(config, Arc::clone(&self.store));
+        self
     }
 
     /// Configure the memory subsystem for episode capture and consolidation.
@@ -174,7 +211,8 @@ impl<R: SessionRuntime> Conductor<R> {
     ///
     /// Routes commands (messages starting with `/`) to the appropriate
     /// handler, and forwards other messages to the target session if
-    /// specified.
+    /// specified. All privileged operations go through
+    /// `ActionRequest` → policy evaluation → audit.
     ///
     /// # Errors
     ///
@@ -184,30 +222,53 @@ impl<R: SessionRuntime> Conductor<R> {
 
         // Check if this is a command.
         if text.starts_with('/') {
-            return self.handle_command(text).await;
+            return self.handle_command(text, &msg.origin).await;
         }
 
         // Non-command message — forward to target session if specified.
         if let Some(ref session_id) = msg.target_session {
             let session = self.store.get_session(session_id).await?;
-            let handle = session_to_handle(&session);
-            let conductor_msg = sigil_core::protocol::ConductorMessage::TaskAssignment {
-                instructions: text.to_owned(),
-            };
-            self.runtime
-                .send(&handle, conductor_msg)
-                .await
-                .map_err(|e| ConductorError::Internal {
-                    message: format!("failed to send to session {}: {e}", session.title),
-                })?;
 
-            if let Some(ref memory) = self.memory {
-                if let Err(e) = memory.record_bridge_send(session.id, &session.title).await {
-                    warn!(error = %e, "failed to write bridge episode");
+            // Route through policy: SendMessage action.
+            let request = ActionRequest::new(
+                Action::SendMessage {
+                    session_id: *session_id,
+                    message: text.to_owned(),
+                },
+                msg.origin.clone(),
+            );
+
+            let decision = self.evaluate_and_audit(&request).await?;
+
+            match decision {
+                PolicyDecision::Allow => {
+                    let handle = record_to_handle(&session);
+                    let conductor_msg = sigil_core::protocol::ConductorMessage::TaskAssignment {
+                        instructions: text.to_owned(),
+                    };
+                    self.runtime
+                        .send(&handle, conductor_msg)
+                        .await
+                        .map_err(|e| ConductorError::Internal {
+                            message: format!("failed to send to session {}: {e}", session.title),
+                        })?;
+
+                    if let Some(ref memory) = self.memory {
+                        if let Err(e) = memory.record_bridge_send(session.id, &session.title).await
+                        {
+                            warn!(error = %e, "failed to write bridge episode");
+                        }
+                    }
+
+                    return Ok(format!("Message sent to {}.", session.title));
+                }
+                PolicyDecision::Deny { reason } => {
+                    return Ok(format!("Denied: {reason}"));
+                }
+                PolicyDecision::NeedsApproval { description } => {
+                    return Ok(format!("Needs approval: {description}"));
                 }
             }
-
-            return Ok(format!("Message sent to {}.", session.title));
         }
 
         Ok("No target session. Use /send <name> <msg> or try /help.".into())
@@ -225,44 +286,116 @@ impl<R: SessionRuntime> Conductor<R> {
         Ok(format_status_report(&result))
     }
 
-    /// Handle a slash command.
-    async fn handle_command(&self, text: &str) -> Result<String, ConductorError> {
+    // -----------------------------------------------------------------------
+    // Policy pipeline helpers
+    // -----------------------------------------------------------------------
+
+    /// Evaluate an `ActionRequest` through the policy engine and log the
+    /// decision to the audit trail. Returns the decision for the caller
+    /// to act on.
+    async fn evaluate_and_audit(
+        &self,
+        request: &ActionRequest,
+    ) -> Result<PolicyDecision, ConductorError> {
+        use sigil_core::PolicyEngine;
+
+        let decision =
+            self.policy
+                .evaluate(request)
+                .await
+                .map_err(|e| ConductorError::Internal {
+                    message: format!("policy evaluation failed: {e}"),
+                })?;
+
+        // Audit the decision if we have a writer.
+        if let Some(ref audit) = self.audit {
+            let event = AuditEvent {
+                request_id: request.id,
+                timestamp: request.timestamp,
+                action_summary: format!("{:?}", request.action),
+                origin_summary: format!("{:?}", request.origin),
+                decision: decision.clone(),
+                session_id: action_service::extract_session_id(&request.action),
+            };
+            if let Err(e) = audit.append(&event).await {
+                warn!(error = %e, "failed to write audit event");
+            }
+        }
+
+        Ok(decision)
+    }
+
+    /// Handle a slash command routed from a bridge message.
+    async fn handle_command(
+        &self,
+        text: &str,
+        origin: &ActionOrigin,
+    ) -> Result<String, ConductorError> {
         let parts: Vec<&str> = text.splitn(3, ' ').collect();
         let command = parts.first().copied().unwrap_or_default();
 
         match command {
             "/status" => self.format_status().await,
-
-            "/sessions" => {
-                let sessions = self.store.list_sessions().await?;
-                if sessions.is_empty() {
-                    return Ok("No sessions.".into());
-                }
-                let mut lines = Vec::with_capacity(sessions.len());
-                for s in &sessions {
-                    lines.push(format!(
-                        "- {} [{:?}] ({})",
-                        s.title,
-                        s.state,
-                        s.path.display()
-                    ));
-                }
-                Ok(lines.join("\n"))
-            }
-
+            "/sessions" => self.cmd_sessions().await,
             "/check" => {
                 let name = parts.get(1).copied().unwrap_or_default().trim();
-                if name.is_empty() {
-                    return Ok("Usage: /check <session-name>".into());
-                }
-                let session = self.store.get_session_by_title(name).await?;
-                let handle = session_to_handle(&session);
+                self.cmd_check(name, origin).await
+            }
+            "/send" => {
+                let name = parts.get(1).copied().unwrap_or_default().trim();
+                let message = parts.get(2).copied().unwrap_or_default().trim();
+                self.cmd_send(name, message, origin).await
+            }
+            "/help" => Ok("Commands:\n\
+                 /status - Show session overview\n\
+                 /sessions - List all sessions with state\n\
+                 /check <name> - Read recent output from a session\n\
+                 /send <name> <msg> - Send a message to a session\n\
+                 /help - Show this help"
+                .into()),
+            _ => Ok(format!("Unknown command: {command}. Try /help.")),
+        }
+    }
+
+    async fn cmd_sessions(&self) -> Result<String, ConductorError> {
+        let sessions = self.store.list_sessions().await?;
+        if sessions.is_empty() {
+            return Ok("No sessions.".into());
+        }
+        let mut lines = Vec::with_capacity(sessions.len());
+        for s in &sessions {
+            lines.push(format!(
+                "- {} [{:?}] ({})",
+                s.title,
+                s.state,
+                s.path.display()
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    async fn cmd_check(&self, name: &str, origin: &ActionOrigin) -> Result<String, ConductorError> {
+        if name.is_empty() {
+            return Ok("Usage: /check <session-name>".into());
+        }
+        let session = self.store.get_session_by_title(name).await?;
+
+        let request = ActionRequest::new(
+            Action::ReadSessionOutput {
+                session_id: session.id,
+            },
+            origin.clone(),
+        );
+        let decision = self.evaluate_and_audit(&request).await?;
+
+        match decision {
+            PolicyDecision::Allow => {
+                let handle = record_to_handle(&session);
                 let output = self.runtime.read_output(&handle).await.map_err(|e| {
                     ConductorError::Internal {
                         message: format!("failed to read output from {name}: {e}"),
                     }
                 })?;
-                // Return a brief summary: last few lines of output.
                 let last_lines: String = output
                     .lines()
                     .rev()
@@ -274,15 +407,36 @@ impl<R: SessionRuntime> Conductor<R> {
                     .join("\n");
                 Ok(format!("{name} [{:?}]:\n{last_lines}", session.state))
             }
+            PolicyDecision::Deny { reason } => Ok(format!("Denied: {reason}")),
+            PolicyDecision::NeedsApproval { description } => {
+                Ok(format!("Needs approval: {description}"))
+            }
+        }
+    }
 
-            "/send" => {
-                let name = parts.get(1).copied().unwrap_or_default().trim();
-                let message = parts.get(2).copied().unwrap_or_default().trim();
-                if name.is_empty() || message.is_empty() {
-                    return Ok("Usage: /send <session-name> <message>".into());
-                }
-                let session = self.store.get_session_by_title(name).await?;
-                let handle = session_to_handle(&session);
+    async fn cmd_send(
+        &self,
+        name: &str,
+        message: &str,
+        origin: &ActionOrigin,
+    ) -> Result<String, ConductorError> {
+        if name.is_empty() || message.is_empty() {
+            return Ok("Usage: /send <session-name> <message>".into());
+        }
+        let session = self.store.get_session_by_title(name).await?;
+
+        let request = ActionRequest::new(
+            Action::SendMessage {
+                session_id: session.id,
+                message: message.to_owned(),
+            },
+            origin.clone(),
+        );
+        let decision = self.evaluate_and_audit(&request).await?;
+
+        match decision {
+            PolicyDecision::Allow => {
+                let handle = record_to_handle(&session);
                 let conductor_msg = sigil_core::protocol::ConductorMessage::TaskAssignment {
                     instructions: message.to_owned(),
                 };
@@ -301,35 +455,11 @@ impl<R: SessionRuntime> Conductor<R> {
 
                 Ok(format!("Sent to {name}."))
             }
-
-            "/help" => Ok("Commands:\n\
-                 /status - Show session overview\n\
-                 /sessions - List all sessions with state\n\
-                 /check <name> - Read recent output from a session\n\
-                 /send <name> <msg> - Send a message to a session\n\
-                 /help - Show this help"
-                .into()),
-
-            _ => Ok(format!("Unknown command: {command}. Try /help.")),
+            PolicyDecision::Deny { reason } => Ok(format!("Denied: {reason}")),
+            PolicyDecision::NeedsApproval { description } => {
+                Ok(format!("Needs approval: {description}"))
+            }
         }
-    }
-}
-
-/// Convert a `SessionRecord` to a `SessionHandle` for runtime calls.
-fn session_to_handle(
-    session: &sigil_core::session::SessionRecord,
-) -> sigil_core::session::SessionHandle {
-    sigil_core::session::SessionHandle {
-        id: session.id,
-        title: session.title.clone(),
-        tool: session.tool,
-        state: session.state,
-        path: session.path.clone(),
-        tmux_window: Some(session.title.clone()),
-        container_id: None,
-        execution_class: session.execution_class,
-        sandboxed: session.sandboxed,
-        identity: session.identity.clone(),
     }
 }
 

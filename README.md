@@ -153,6 +153,7 @@ Container sessions support domain-filtered networking and MCP-based policy media
 sigil-cli         `sigil` binary, clap commands, audit wiring
 sigil-conductor   Heartbeat loop, reconciliation, bridge message handling
 sigil-bridge      Telegram/Slack parsing, identity resolution, routing, live bridge loops
+sigil-memory      Operational memory — episode logging, mechanical consolidation
 sigil-mcp         Host-side MCP server for policy-mediated agent actions
 sigil-runtime     tmux + container runtimes, domain proxy, MCP socket, tool adapters, worktree manager
 sigil-store       SQLite persistence for sessions and approval grants
@@ -161,7 +162,7 @@ sigil-audit       HMAC-chained JSONL audit writer and verifier
 sigil-core        Action protocol, origins, principals, trust model, trait ports
 ```
 
-The workspace is a 9-crate DAG with `sigil-core` at the bottom and no internal dependency cycles.
+The workspace is a 10-crate DAG with `sigil-core` at the bottom and no internal dependency cycles.
 
 ## Design
 
@@ -179,7 +180,7 @@ The workspace is a 9-crate DAG with `sigil-core` at the bottom and no internal d
 
 ```bash
 cargo build --release     # current macOS arm64 build: 5.7M
-cargo test               # 443 tests (includes proptest property-based tests)
+cargo test               # 586 tests (includes proptest property-based tests)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 

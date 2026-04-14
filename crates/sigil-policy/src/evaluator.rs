@@ -4,12 +4,13 @@
 //! [`PolicyDecision`] by checking principal identity, tier ceilings,
 //! zone transitions, and approval grants.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use sigil_core::action::{Action, ActionRequest, PolicyDecision};
 use sigil_core::origin::ActionOrigin;
-use sigil_core::principal::resolve_principal;
+use sigil_core::principal::{PlatformIdentity, resolve_principal};
 use sigil_core::trust::{Capability, Tier, TrustZone};
 
 use crate::error::PolicyError;
@@ -19,11 +20,20 @@ use crate::zone::validate_zone_transition;
 
 /// Configuration for the policy evaluator.
 ///
-/// In production this will be loaded from a config file; for now it
-/// uses the default principal resolution from `sigil-core`.
+/// Per-user tier ceilings allow the bridge identity config to feed
+/// into the policy engine, converging bridge and core principal
+/// resolution into a single path.
 #[derive(Clone, Debug, Default)]
 pub struct EvaluatorConfig {
-    // Future: per-user tier ceilings, allowed capability overrides, etc.
+    /// Per-user tier ceiling overrides. Keyed by [`PlatformIdentity`],
+    /// which is extracted from [`ActionOrigin`] via
+    /// [`ActionOrigin::platform_identity()`].
+    ///
+    /// When present, overrides the default tier ceiling from
+    /// `resolve_principal()`. This lets bridge identity config
+    /// (e.g., `AllowedUser.tier_ceiling`) feed directly into
+    /// policy evaluation.
+    pub user_tier_ceilings: HashMap<PlatformIdentity, Tier>,
 }
 
 /// The core policy evaluator. Delegates to a [`GrantStore`] for
@@ -98,8 +108,13 @@ impl<G: GrantStore> Evaluator<G> {
     ///    from CLI).
     /// 8. Otherwise, `Allow`.
     pub async fn evaluate(&self, request: &ActionRequest) -> Result<PolicyDecision, PolicyError> {
-        // 1. Resolve principal.
-        let principal = resolve_principal(&request.origin);
+        // 1. Resolve principal, applying per-user tier ceiling overrides.
+        let mut principal = resolve_principal(&request.origin);
+        if let Some(platform_id) = request.origin.platform_identity() {
+            if let Some(&ceiling) = self.config.user_tier_ceilings.get(&platform_id) {
+                principal.tier_ceiling = ceiling;
+            }
+        }
 
         // 2. Check active status.
         if !principal.is_active() {
