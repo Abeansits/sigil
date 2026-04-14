@@ -1005,3 +1005,82 @@ fn cli_memory_does_not_create_audit_log() {
         "memory commands should not create audit.jsonl"
     );
 }
+
+/// P2 regression guard: with an arbitrary `--db` path outside any `.sigil`
+/// directory, memory artifacts (episodes.jsonl, LEARNINGS.md) must land in
+/// the db's parent directory, and no `.sigil` path may be inferred.
+#[test]
+fn cli_memory_respects_custom_db_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let custom_dir = tmp.path().join("custom/nested/data");
+    std::fs::create_dir_all(&custom_dir).expect("create custom data dir");
+    let custom_db = custom_dir.join("my.db");
+
+    // Seed 3 CandidateLearning episodes (meets default threshold=3) directly
+    // into the custom data dir.
+    let episodes: Vec<EpisodeEvent> = (0..3)
+        .map(|_| {
+            make_episode(
+                SessionId::new(),
+                EpisodeKind::CandidateLearning,
+                "Custom-db learning",
+                vec![],
+                "agent",
+                None,
+            )
+        })
+        .collect();
+    let ep_path = custom_dir.join("episodes.jsonl");
+    let mut contents = String::new();
+    for ep in &episodes {
+        contents.push_str(&serde_json::to_string(ep).expect("serialize"));
+        contents.push('\n');
+    }
+    std::fs::write(&ep_path, contents).expect("write episodes.jsonl");
+
+    // Run with --db pointing outside any .sigil/ directory.
+    let out = Command::new(sigil_bin())
+        .arg("--db")
+        .arg(&custom_db)
+        .args(["memory", "consolidate"])
+        .env("HOME", tmp.path())
+        .env("SIGIL_AUDIT_KEY", "test-memory-key")
+        .env("RUST_LOG", "off")
+        .env_remove("SIGIL_RUNTIME")
+        .env_remove("SIGIL_DB")
+        .output()
+        .expect("failed to execute sigil binary");
+    assert!(
+        out.status.success(),
+        "consolidate should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Artifacts must live in custom_dir (db parent), not `.sigil/`.
+    let learnings_path = custom_dir.join("LEARNINGS.md");
+    assert!(
+        learnings_path.exists(),
+        "LEARNINGS.md should live in db parent dir: {}",
+        learnings_path.display()
+    );
+    let content = std::fs::read_to_string(&learnings_path).expect("read LEARNINGS.md");
+    assert!(
+        content.contains("Custom-db learning"),
+        "LEARNINGS.md should contain promoted learning: {content}"
+    );
+
+    // No `.sigil` sibling directory should have been conjured.
+    let stray_sigil = tmp.path().join(".sigil");
+    assert!(
+        !stray_sigil.exists(),
+        "no .sigil path should be inferred: {}",
+        stray_sigil.display()
+    );
+
+    // And no audit.jsonl side effect in the custom dir either.
+    let stray_audit = custom_dir.join("audit.jsonl");
+    assert!(
+        !stray_audit.exists(),
+        "memory commands should not create audit.jsonl in custom dir"
+    );
+}
