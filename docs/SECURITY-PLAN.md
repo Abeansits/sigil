@@ -79,8 +79,8 @@ Implemented:
 | Area | Current state |
 |------|---------------|
 | Bridge ingress | Allowlist + normalization + rate limiting implemented |
-| Session runtime | tmux only |
-| Sandboxing | Not implemented |
+| Session runtime | tmux (default) + Apple Containers (feature-gated `container`) |
+| Sandboxing | Container runtime with domain-filtered networking and MCP-mediated IPC |
 | Audit logging | Implemented and wired into CLI/conductor |
 | Grant persistence | Implemented |
 | Grant enforcement | Implemented |
@@ -100,7 +100,6 @@ Implemented:
 
 ### Priority 3
 
-- add a real sandboxed runtime backend
 - add fetched-content sanitization for web and media inputs
 - add content provenance tagging for external inputs
 
@@ -108,13 +107,13 @@ Implemented:
 
 The current workspace does **not** yet provide:
 
-- Apple Container execution (research in `docs/CONTAINER-POC.md`)
 - cloud-execution substitution for bridge users
 - automatic bridge-to-conductor approval notifications
 - a separate Python bridge process
 
 The workspace **does** now provide:
 
+- Apple Container execution behind the `container` feature gate (`ContainerRuntime`), with domain-filtered networking and MCP-mediated IPC (note: CLI integration with `--all-features` has a known compile-time boundary issue)
 - host-side MCP server for policy-mediated agent actions (`sigil-mcp`)
 
 Those ideas are still reasonable roadmap items, but they are not current implementation details and should not be documented as if they already exist.

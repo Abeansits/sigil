@@ -20,7 +20,7 @@ This file records how the original agent-deck feature inventory maps onto the cu
 | Audit trail | Implemented | CLI and conductor write HMAC-chained JSONL audit entries; `sigil audit verify` validates chain integrity |
 | Security normalization | Implemented | Bridge normalization, ANSI stripping, trust zones, tier ceilings |
 | MCP server | Implemented | Host-side policy-mediated MCP server for agent actions (`sigil-mcp`) |
-| Container sandboxing | Not started | Research in `docs/CONTAINER-POC.md`; no container runtime backend yet |
+| Container sandboxing | Implemented | `ContainerRuntime` for Apple Containers behind `container` feature gate; domain-filtered networking (`DomainProxy`), MCP-mediated IPC; CLI `--runtime container` flag; known compile-time boundary issue with `--all-features` |
 | Profiles / TUI / Web / SSH / Remotes / Cost tracking | Not started | These areas are not present in the current Rust CLI |
 
 ## Implemented Command-Facing Features
