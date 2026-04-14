@@ -13,12 +13,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+use sigil_conductor::action_service::ActionService;
 use sigil_core::EpisodeKind;
 use sigil_core::error::CoreError;
 use sigil_core::protocol::ConductorMessage;
 use sigil_core::session::IdentitySpec;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionState};
 use sigil_core::traits::{LifecycleHooks, SessionRuntime};
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 #[cfg(feature = "container")]
 use sigil_runtime::ContainerRuntime;
 use sigil_runtime::TmuxRuntime;
@@ -489,21 +491,32 @@ pub async fn run(cli: Cli) -> Result<()> {
         .to_str()
         .context("database path is not valid UTF-8")?;
 
-    let store = Store::new(db_str)
-        .await
-        .context("failed to open database")?;
+    let store = Arc::new(
+        Store::new(db_str)
+            .await
+            .context("failed to open database")?,
+    );
 
-    let runtime = build_runtime(cli.runtime)?;
+    let runtime = Arc::new(build_runtime(cli.runtime)?);
 
     match cli.command {
         Commands::Status { json } => commands::status::run(&store, json).await,
-        Commands::Session(cmd) => commands::session::run(&store, &runtime, &audit, cmd).await,
+        Commands::Session(cmd) => {
+            let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+            let action_service = ActionService::new(
+                policy,
+                Arc::clone(&runtime),
+                Arc::clone(&audit),
+                Arc::clone(&store),
+            );
+            commands::session::run(&action_service, cmd).await
+        }
         Commands::Worktree(cmd) => commands::worktree::run(&store, cmd).await,
         Commands::Conductor { interval } => {
             runtime.preflight_check().await?;
             commands::conductor::run(
-                Arc::new(store),
-                Arc::new(runtime),
+                Arc::clone(&store),
+                Arc::clone(&runtime),
                 Arc::clone(&audit),
                 interval,
             )
@@ -511,27 +524,35 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Bridge(cmd) => {
             runtime.preflight_check().await?;
-            let store = Arc::new(store);
-            let runtime = Arc::new(runtime);
-            let conductor = Arc::new(sigil_conductor::Conductor::new(
-                store,
-                runtime,
-                std::time::Duration::from_secs(60),
-            ));
-            commands::bridge::run(conductor, Arc::clone(&audit), cmd).await
+            // Use the same loaded IdentityConfig the bridge loops will use,
+            // so policy ceilings can never drift from the actual allowlist.
+            let identity_config = commands::bridge::load_identity_config()?;
+            let eval_config = commands::bridge::evaluator_config_from_identity(&identity_config);
+            let conductor = Arc::new(
+                sigil_conductor::Conductor::new(
+                    Arc::clone(&store),
+                    Arc::clone(&runtime),
+                    std::time::Duration::from_secs(60),
+                )
+                .with_audit(Arc::clone(&audit))
+                .with_evaluator_config(eval_config),
+            );
+            Box::pin(commands::bridge::run(conductor, Arc::clone(&audit), cmd)).await
         }
         Commands::Run { interval, bridge } => {
             runtime.preflight_check().await?;
             Box::pin(commands::run::run(
-                Arc::new(store),
-                Arc::new(runtime),
+                Arc::clone(&store),
+                Arc::clone(&runtime),
                 Arc::clone(&audit),
                 interval,
                 bridge,
             ))
             .await
         }
-        Commands::Identity(cmd) => commands::identity::run(&store, &runtime, &audit, cmd).await,
+        Commands::Identity(cmd) => {
+            commands::identity::run(&store, runtime.as_ref(), &audit, cmd).await
+        }
         Commands::Audit(_) | Commands::Memory(_) => {
             // Already handled above.
             Ok(())

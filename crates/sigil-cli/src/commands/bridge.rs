@@ -126,7 +126,7 @@ pub(crate) fn make_cancel_token() -> CancellationToken {
 ///
 /// If the config file exists but is malformed, this returns an error
 /// rather than silently falling back to defaults (fail closed).
-fn load_identity_config() -> Result<IdentityConfig> {
+pub(crate) fn load_identity_config() -> Result<IdentityConfig> {
     let bridge_section = match std::env::current_dir() {
         Ok(cwd) => sigil_core::config::ProjectConfig::load(&cwd)
             .context("failed to load .sigil/config.toml")?
@@ -135,6 +135,38 @@ fn load_identity_config() -> Result<IdentityConfig> {
     };
 
     Ok(build_config(bridge_section.as_ref()))
+}
+
+/// Build an [`EvaluatorConfig`] with per-user tier ceilings from the
+/// bridge identity config. This converges bridge and core principal
+/// resolution into a single path.
+pub(crate) fn evaluator_config_from_identity(
+    config: &IdentityConfig,
+) -> sigil_policy::EvaluatorConfig {
+    use sigil_core::PlatformIdentity;
+    use std::collections::HashMap;
+
+    let mut user_tier_ceilings = HashMap::new();
+
+    for user in &config.allowed_telegram_ids {
+        user_tier_ceilings.insert(
+            PlatformIdentity::Telegram {
+                user_id: user.platform_id.clone(),
+            },
+            user.tier_ceiling,
+        );
+    }
+
+    for user in &config.allowed_slack_ids {
+        user_tier_ceilings.insert(
+            PlatformIdentity::Slack {
+                user_id: user.platform_id.clone(),
+            },
+            user.tier_ceiling,
+        );
+    }
+
+    sigil_policy::EvaluatorConfig { user_tier_ceilings }
 }
 
 // ── Telegram ────────────────────────────────────────────────────────

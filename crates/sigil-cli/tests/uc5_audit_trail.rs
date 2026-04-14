@@ -22,6 +22,8 @@ use std::sync::Arc;
 use sigil_audit::AuditLogWriter;
 use sigil_audit::chain::ChainedEntry;
 use sigil_cli::SessionCommands;
+use sigil_conductor::action_service::ActionService;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -39,6 +41,20 @@ async fn cleanup(server: &str) {
         .await;
 }
 
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
+}
+
 #[tokio::test]
 async fn audit_trail_valid_after_session_lifecycle() {
     if !tmux_available().await {
@@ -52,8 +68,8 @@ async fn audit_trail_valid_after_session_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store");
-    let runtime = TmuxRuntime::new(server);
+    let store = Arc::new(Store::new(db_str).await.expect("store"));
+    let runtime = Arc::new(TmuxRuntime::new(server));
     let audit_path = dir.path().join("audit.jsonl");
     let key = b"uc5-audit-key".to_vec();
     let audit = Arc::new(
@@ -61,6 +77,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
             .await
             .expect("audit writer"),
     );
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid").to_owned();
     let title = "uc5-audit".to_owned();
 
@@ -68,9 +85,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
     // Each operation appends an audit event.
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir.clone(),
             title: title.clone(),
@@ -83,9 +98,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
     .expect("create");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: title.clone(),
         },
@@ -94,9 +107,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
     .expect("start");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Send {
             name: title.clone(),
             message: "echo audit test".into(),
@@ -108,9 +119,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
     .expect("send");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: title.clone(),
         },
@@ -119,9 +128,7 @@ async fn audit_trail_valid_after_session_lifecycle() {
     .expect("stop");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Remove {
             name: title.clone(),
         },
@@ -188,11 +195,31 @@ async fn audit_trail_valid_after_session_lifecycle() {
         .iter()
         .map(|e| e.event.action_summary.as_str())
         .collect();
-    assert_eq!(actions[0], "session.create");
-    assert_eq!(actions[1], "session.start");
-    assert_eq!(actions[2], "session.send");
-    assert_eq!(actions[3], "session.stop");
-    assert_eq!(actions[4], "session.remove");
+    assert!(
+        actions[0].contains("CreateSession"),
+        "expected CreateSession, got: {}",
+        actions[0]
+    );
+    assert!(
+        actions[1].contains("StartSession"),
+        "expected StartSession, got: {}",
+        actions[1]
+    );
+    assert!(
+        actions[2].contains("SendMessage"),
+        "expected SendMessage, got: {}",
+        actions[2]
+    );
+    assert!(
+        actions[3].contains("StopSession"),
+        "expected StopSession, got: {}",
+        actions[3]
+    );
+    assert!(
+        actions[4].contains("RemoveSession"),
+        "expected RemoveSession, got: {}",
+        actions[4]
+    );
 
     // Full chain verification using the library verifier.
     sigil_audit::chain::verify_chain(&key, &entries).expect("HMAC chain should be valid");
@@ -218,8 +245,8 @@ async fn audit_events_for_non_tmux_operations() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store");
-    let runtime = TmuxRuntime::new("sigil-test-uc5-notmux");
+    let store = Arc::new(Store::new(db_str).await.expect("store"));
+    let runtime = Arc::new(TmuxRuntime::new("sigil-test-uc5-notmux"));
     let audit_path = dir.path().join("audit.jsonl");
     let key = b"uc5-notmux-key".to_vec();
     let audit = Arc::new(
@@ -227,12 +254,11 @@ async fn audit_events_for_non_tmux_operations() {
             .await
             .expect("audit writer"),
     );
+    let service = build_action_service(&store, &runtime, &audit);
 
     // Create and remove (no tmux needed).
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: "/tmp".into(),
             title: "uc5-notmux".into(),
@@ -245,9 +271,7 @@ async fn audit_events_for_non_tmux_operations() {
     .expect("create");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Remove {
             name: "uc5-notmux".into(),
         },
@@ -267,8 +291,16 @@ async fn audit_events_for_non_tmux_operations() {
         .collect();
 
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].event.action_summary, "session.create");
-    assert_eq!(entries[1].event.action_summary, "session.remove");
+    assert!(
+        entries[0].event.action_summary.contains("CreateSession"),
+        "expected CreateSession, got: {}",
+        entries[0].event.action_summary
+    );
+    assert!(
+        entries[1].event.action_summary.contains("RemoveSession"),
+        "expected RemoveSession, got: {}",
+        entries[1].event.action_summary
+    );
 
     // Chain is valid.
     sigil_audit::chain::verify_chain(&key, &entries).expect("chain valid");

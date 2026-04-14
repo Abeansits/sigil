@@ -19,6 +19,8 @@ use std::time::Duration;
 
 use sigil_audit::AuditLogWriter;
 use sigil_cli::{IdentityCommands, SessionCommands};
+use sigil_conductor::action_service::ActionService;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -35,7 +37,10 @@ async fn cleanup(server: &str) {
         .await;
 }
 
-async fn setup(dir: &tempfile::TempDir, server: &str) -> (Store, TmuxRuntime, Arc<AuditLogWriter>) {
+async fn setup(
+    dir: &tempfile::TempDir,
+    server: &str,
+) -> (Arc<Store>, Arc<TmuxRuntime>, Arc<AuditLogWriter>) {
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
     let store = Store::new(db_str).await.expect("store should init");
@@ -45,7 +50,21 @@ async fn setup(dir: &tempfile::TempDir, server: &str) -> (Store, TmuxRuntime, Ar
     let writer = AuditLogWriter::new(&audit_path, key)
         .await
         .expect("audit writer should init");
-    (store, runtime, Arc::new(writer))
+    (Arc::new(store), Arc::new(runtime), Arc::new(writer))
+}
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
 }
 
 /// Full identity round-trip: create with --identity, verify DB + hooks,
@@ -62,6 +81,7 @@ async fn identity_reload_round_trip() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, SERVER).await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid path").to_owned();
     let title = "identity-test".to_owned();
 
@@ -76,9 +96,7 @@ async fn identity_reload_round_trip() {
 
     // ── CREATE with --identity ─────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir.clone(),
             title: title.clone(),
@@ -147,9 +165,7 @@ async fn identity_reload_round_trip() {
 
     // ── START the session (creates tmux session) ───────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: title.clone(),
         },
@@ -163,7 +179,7 @@ async fn identity_reload_round_trip() {
     // ── RELOAD identity ────────────────────────────────────────────
     sigil_cli::commands::identity::run(
         &store,
-        &runtime,
+        runtime.as_ref(),
         &audit,
         IdentityCommands::Reload {
             name: title.clone(),
@@ -188,7 +204,7 @@ async fn identity_reload_round_trip() {
         sandboxed: rec.sandboxed,
         identity: rec.identity.clone(),
     };
-    let output = sigil_core::traits::SessionRuntime::read_output(&runtime, &handle)
+    let output = sigil_core::traits::SessionRuntime::read_output(runtime.as_ref(), &handle)
         .await
         .expect("read_output should succeed");
     assert!(
@@ -203,7 +219,7 @@ async fn identity_reload_round_trip() {
     // ── SNAPSHOT identity ──────────────────────────────────────────
     sigil_cli::commands::identity::run(
         &store,
-        &runtime,
+        runtime.as_ref(),
         &audit,
         IdentityCommands::Snapshot {
             name: title.clone(),
@@ -214,9 +230,7 @@ async fn identity_reload_round_trip() {
 
     // ── Cleanup ────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: title.clone(),
         },
@@ -232,14 +246,13 @@ async fn identity_reload_round_trip() {
 async fn identity_reload_no_spec_returns_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, "sigil-test-identity-nospec").await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid path").to_owned();
     let title = "no-identity-session".to_owned();
 
     // Create a session without identity.
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir,
             title: title.clone(),
@@ -254,7 +267,7 @@ async fn identity_reload_no_spec_returns_error() {
     // Reload should fail with a clear error.
     let result = sigil_cli::commands::identity::run(
         &store,
-        &runtime,
+        runtime.as_ref(),
         &audit,
         IdentityCommands::Reload {
             name: title.clone(),
@@ -275,12 +288,11 @@ async fn identity_reload_no_spec_returns_error() {
 async fn create_without_identity_skips_hooks() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, "sigil-test-identity-nohooks").await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid path").to_owned();
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir,
             title: "no-hooks-session".into(),

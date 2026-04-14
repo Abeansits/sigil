@@ -103,6 +103,7 @@ async fn comprehensive_tier_zone_capability_matrix() {
                 title: "test".into(),
                 group: None,
                 tool: ToolKind::ClaudeCode,
+                identity: None,
             },
             expect: |d| matches!(d, PolicyDecision::Allow),
         },

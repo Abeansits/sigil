@@ -96,6 +96,18 @@ impl Principal {
     }
 }
 
+/// Typed key for per-user configuration lookups (tier ceilings, etc.).
+///
+/// Avoids string-based identity matching — always extracted from
+/// `ActionOrigin` via [`ActionOrigin::platform_identity()`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlatformIdentity {
+    /// Telegram user identified by their user ID.
+    Telegram { user_id: String },
+    /// Slack user identified by their user ID.
+    Slack { user_id: String },
+}
+
 /// Resolve an `ActionOrigin` to a `Principal`.
 ///
 /// In production, this reads from a config table mapping platform IDs

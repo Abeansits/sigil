@@ -10,9 +10,11 @@ use std::sync::Arc;
 
 use sigil_audit::AuditLogWriter;
 use sigil_cli::SessionCommands;
+use sigil_conductor::action_service::ActionService;
 use sigil_core::id::SessionId;
 use sigil_core::session::{SessionRecord, SessionState, ToolKind};
 use sigil_core::trust::ExecutionClass;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -40,6 +42,20 @@ fn make_record(title: &str, path: &str, state: SessionState) -> SessionRecord {
         state,
         identity: None,
     }
+}
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
 }
 
 /// Create multiple sessions in various states and verify status counts.
@@ -134,22 +150,21 @@ async fn status_updates_after_lifecycle_transitions() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store");
-    let runtime = TmuxRuntime::new(server);
+    let store = Arc::new(Store::new(db_str).await.expect("store"));
+    let runtime = Arc::new(TmuxRuntime::new(server));
     let audit_path = dir.path().join("audit.jsonl");
     let audit = Arc::new(
         AuditLogWriter::new(&audit_path, b"uc2-key".to_vec())
             .await
             .expect("audit"),
     );
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid").to_owned();
 
     // Create two sessions.
     for name in &["uc2-a", "uc2-b"] {
         sigil_cli::commands::session::run(
-            &store,
-            &runtime,
-            &audit,
+            &service,
             SessionCommands::Create {
                 path: work_dir.clone(),
                 title: (*name).to_owned(),
@@ -168,9 +183,7 @@ async fn status_updates_after_lifecycle_transitions() {
 
     // Start one.
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: "uc2-a".into(),
         },
@@ -192,9 +205,7 @@ async fn status_updates_after_lifecycle_transitions() {
 
     // Stop and remove for cleanup.
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: "uc2-a".into(),
         },

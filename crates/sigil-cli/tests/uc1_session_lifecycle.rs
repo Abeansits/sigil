@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use sigil_audit::AuditLogWriter;
 use sigil_cli::{SessionCommands, WorktreeCommands};
+use sigil_conductor::action_service::ActionService;
 use sigil_core::session::SessionState;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
@@ -35,7 +37,10 @@ async fn cleanup(server: &str) {
         .await;
 }
 
-async fn setup(dir: &tempfile::TempDir, server: &str) -> (Store, TmuxRuntime, Arc<AuditLogWriter>) {
+async fn setup(
+    dir: &tempfile::TempDir,
+    server: &str,
+) -> (Arc<Store>, Arc<TmuxRuntime>, Arc<AuditLogWriter>) {
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
     let store = Store::new(db_str).await.expect("store should init");
@@ -45,7 +50,21 @@ async fn setup(dir: &tempfile::TempDir, server: &str) -> (Store, TmuxRuntime, Ar
     let writer = AuditLogWriter::new(&audit_path, key)
         .await
         .expect("audit writer should init");
-    (store, runtime, Arc::new(writer))
+    (Arc::new(store), Arc::new(runtime), Arc::new(writer))
+}
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
 }
 
 #[tokio::test]
@@ -60,14 +79,13 @@ async fn full_session_lifecycle() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, SERVER).await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid path").to_owned();
     let title = "uc1-lifecycle".to_owned();
 
     // ── CREATE ──────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir.clone(),
             title: title.clone(),
@@ -95,9 +113,7 @@ async fn full_session_lifecycle() {
 
     // ── SHOW (verify fields through store) ─────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Show {
             name: title.clone(),
             json: true,
@@ -108,9 +124,7 @@ async fn full_session_lifecycle() {
 
     // ── START ───────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: title.clone(),
         },
@@ -130,9 +144,7 @@ async fn full_session_lifecycle() {
 
     // ── SEND ────────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Send {
             name: title.clone(),
             message: "echo hello-from-sigil-uc1".into(),
@@ -148,9 +160,7 @@ async fn full_session_lifecycle() {
 
     // ── OUTPUT ──────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Output {
             name: title.clone(),
             quiet: true,
@@ -161,9 +171,7 @@ async fn full_session_lifecycle() {
 
     // ── STOP ────────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: title.clone(),
         },
@@ -183,9 +191,7 @@ async fn full_session_lifecycle() {
 
     // ── REMOVE ──────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Remove {
             name: title.clone(),
         },
@@ -212,14 +218,13 @@ async fn session_restart_returns_to_running() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, server).await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid").to_owned();
     let title = "uc1-restart".to_owned();
 
     // Create and start.
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir,
             title: title.clone(),
@@ -232,9 +237,7 @@ async fn session_restart_returns_to_running() {
     .expect("create");
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: title.clone(),
         },
@@ -244,9 +247,7 @@ async fn session_restart_returns_to_running() {
 
     // Restart.
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Restart {
             name: title.clone(),
         },
@@ -263,9 +264,7 @@ async fn session_restart_returns_to_running() {
 
     // Cleanup.
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: title.clone(),
         },
@@ -289,13 +288,12 @@ async fn session_launch_combines_create_start_send() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir, server).await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid").to_owned();
     let title = "uc1-launch".to_owned();
 
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Launch {
             path: work_dir,
             title: title.clone(),
@@ -336,7 +334,7 @@ async fn session_launch_combines_create_start_send() {
         sandboxed: rec.sandboxed,
         identity: None,
     };
-    let _ = sigil_core::traits::SessionRuntime::stop(&runtime, &handle).await;
+    let _ = sigil_core::traits::SessionRuntime::stop(&*runtime, &handle).await;
 
     cleanup(server).await;
 }

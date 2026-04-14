@@ -36,7 +36,8 @@ pub async fn run<R: SessionRuntime>(
         Arc::clone(&store),
         Arc::clone(&runtime),
         Duration::from_secs(interval),
-    );
+    )
+    .with_audit(Arc::clone(&audit));
 
     // Reconcile DB state against live tmux sessions before entering
     // the heartbeat loop. This catches stale state from crashes or

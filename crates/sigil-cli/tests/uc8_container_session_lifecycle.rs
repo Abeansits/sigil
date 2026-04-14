@@ -21,7 +21,9 @@ use std::time::Duration;
 
 use sigil_audit::AuditLogWriter;
 use sigil_cli::SessionCommands;
+use sigil_conductor::action_service::ActionService;
 use sigil_core::session::SessionState;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::{ContainerConfig, ContainerRuntime};
 use sigil_store::Store;
 
@@ -31,7 +33,9 @@ async fn container_cli_available() -> bool {
     ContainerRuntime::check_container_cli().await.is_ok()
 }
 
-async fn setup(dir: &tempfile::TempDir) -> (Store, ContainerRuntime, Arc<AuditLogWriter>) {
+async fn setup(
+    dir: &tempfile::TempDir,
+) -> (Arc<Store>, Arc<ContainerRuntime>, Arc<AuditLogWriter>) {
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
     let store = Store::new(db_str).await.expect("store should init");
@@ -45,7 +49,21 @@ async fn setup(dir: &tempfile::TempDir) -> (Store, ContainerRuntime, Arc<AuditLo
     let writer = AuditLogWriter::new(&audit_path, key)
         .await
         .expect("audit writer should init");
-    (store, runtime, Arc::new(writer))
+    (Arc::new(store), Arc::new(runtime), Arc::new(writer))
+}
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<ContainerRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<ContainerRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
 }
 
 /// Best-effort cleanup: stop and remove the container.
@@ -75,13 +93,12 @@ async fn container_session_lifecycle() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, runtime, audit) = setup(&dir).await;
+    let service = build_action_service(&store, &runtime, &audit);
     let work_dir = dir.path().to_str().expect("valid path").to_owned();
 
     // ── CREATE ──────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Create {
             path: work_dir.clone(),
             title: title.to_owned(),
@@ -105,9 +122,7 @@ async fn container_session_lifecycle() {
 
     // ── START ───────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Start {
             name: title.to_owned(),
         },
@@ -130,9 +145,7 @@ async fn container_session_lifecycle() {
 
     // ── SEND ────────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Send {
             name: title.to_owned(),
             message: "echo hello-from-sigil-uc8".into(),
@@ -148,9 +161,7 @@ async fn container_session_lifecycle() {
 
     // ── OUTPUT ──────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Output {
             name: title.to_owned(),
             quiet: true,
@@ -161,9 +172,7 @@ async fn container_session_lifecycle() {
 
     // ── STOP ────────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Stop {
             name: title.to_owned(),
         },
@@ -183,9 +192,7 @@ async fn container_session_lifecycle() {
 
     // ── REMOVE ──────────────────────────────────────────────────────
     sigil_cli::commands::session::run(
-        &store,
-        &runtime,
-        &audit,
+        &service,
         SessionCommands::Remove {
             name: title.to_owned(),
         },
