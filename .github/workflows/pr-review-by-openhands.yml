@@ -49,7 +49,12 @@ jobs:
           jq -n \
             --arg repo "${REPO}" \
             --arg msg "${INSTRUCTION}" \
-            '{selected_repository: $repo, initial_user_msg: $msg}' \
+            '{
+              selected_repository: $repo,
+              initial_message: {
+                content: [{type: "text", text: $msg}]
+              }
+            }' \
             > payload.json
 
           curl -sS --fail-with-body \
