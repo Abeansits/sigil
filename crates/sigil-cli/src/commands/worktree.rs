@@ -1,9 +1,21 @@
 //! Worktree subcommands — create, finish, list.
+//!
+//! Mutating operations (`create`, `finish`) build T2 `ActionRequest`s and
+//! go through [`ActionService`] for policy evaluation + audit. `ActionService`
+//! returns [`DispatchResult::AuthorizedNotDispatched`] for these variants,
+//! signalling that the caller is responsible for executing the side effect
+//! (here, the git worktree operations).
+//!
+//! The read-only `list` command goes through `Action::ListSessions` so the
+//! read is still policy-evaluated.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use sigil_conductor::action_service::{ActionOutcome, ActionService, DispatchResult};
+use sigil_core::action::{Action, ActionRequest};
+use sigil_core::origin::ActionOrigin;
+use sigil_core::traits::{LifecycleHooks, PolicyEngine, SessionRuntime};
 use sigil_runtime::WorktreeManager;
-use sigil_store::Store;
 
 use crate::WorktreeCommands;
 
@@ -11,19 +23,69 @@ use crate::WorktreeCommands;
 ///
 /// # Errors
 ///
-/// Returns an error if any worktree operation fails.
+/// Returns an error if policy denies the request or any worktree operation
+/// fails.
 #[allow(clippy::print_stdout)]
-pub async fn run(store: &Store, cmd: WorktreeCommands) -> Result<()> {
+pub async fn run<R, P>(service: &ActionService<R, P>, cmd: WorktreeCommands) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
     match cmd {
-        WorktreeCommands::Create { name, branch } => create(store, &name, &branch).await,
-        WorktreeCommands::Finish { name, merge } => finish(store, &name, merge).await,
-        WorktreeCommands::List => list(store).await,
+        WorktreeCommands::Create { name, branch } => create(service, &name, &branch).await,
+        WorktreeCommands::Finish { name, merge } => finish(service, &name, merge).await,
+        WorktreeCommands::List => list(service).await,
+    }
+}
+
+/// Require that an outcome authorized the request. T2 actions are
+/// `AuthorizedNotDispatched` (`ActionService` does not run git for us);
+/// simpler T0/T1 session actions return `Completed(Session*)`.
+fn require_authorized(outcome: ActionOutcome) -> Result<DispatchResult> {
+    match outcome {
+        ActionOutcome::Completed(result) => Ok(result),
+        ActionOutcome::Denied { reason } => bail!("policy denied: {reason}"),
+        ActionOutcome::NeedsApproval { description } => {
+            bail!("approval required: {description}")
+        }
+    }
+}
+
+/// Assert a T2 worktree request came back as `AuthorizedNotDispatched`.
+/// Any other `DispatchResult` variant means `ActionService` dispatch
+/// semantics have drifted; refuse to run the git side effect rather than
+/// proceed on ambiguous signal.
+fn require_authorized_not_dispatched(outcome: ActionOutcome, what: &str) -> Result<()> {
+    let result = require_authorized(outcome)?;
+    if matches!(result, DispatchResult::AuthorizedNotDispatched) {
+        Ok(())
+    } else {
+        bail!(
+            "{what}: unexpected dispatch result {result:?}; \
+             expected AuthorizedNotDispatched"
+        )
     }
 }
 
 #[allow(clippy::print_stdout)]
-async fn create(store: &Store, name: &str, branch: &str) -> Result<()> {
-    let session = crate::commands::session::resolve_session(store, name).await?;
+async fn create<R, P>(service: &ActionService<R, P>, name: &str, branch: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = crate::commands::session::resolve_session(service.store(), name).await?;
+
+    let request = ActionRequest::new(
+        Action::CreateWorktree {
+            session_id: session.id,
+            branch: branch.to_owned(),
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let outcome = service.execute(request).await.context("create worktree")?;
+    require_authorized_not_dispatched(outcome, "create worktree")?;
+
     let repo = &session.path;
     let wt_path = WorktreeManager::worktree_path(repo, branch);
 
@@ -40,8 +102,24 @@ async fn create(store: &Store, name: &str, branch: &str) -> Result<()> {
 }
 
 #[allow(clippy::print_stdout)]
-async fn finish(store: &Store, name: &str, merge: bool) -> Result<()> {
-    let session = crate::commands::session::resolve_session(store, name).await?;
+async fn finish<R, P>(service: &ActionService<R, P>, name: &str, merge: bool) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = crate::commands::session::resolve_session(service.store(), name).await?;
+
+    let request = ActionRequest::new(
+        Action::FinishWorktree {
+            session_id: session.id,
+            merge,
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let outcome = service.execute(request).await.context("finish worktree")?;
+    require_authorized_not_dispatched(outcome, "finish worktree")?;
+
     let repo = &session.path;
 
     // The session's worktree_branch is not stored in SessionRecord, so we
@@ -57,7 +135,7 @@ async fn finish(store: &Store, name: &str, merge: bool) -> Result<()> {
         .find(|w| w.path.starts_with(&wt_dir) && !w.is_bare);
 
     let Some(wt) = session_wt else {
-        anyhow::bail!(
+        bail!(
             "no active worktree found under {} for session '{}'",
             wt_dir.display(),
             session.title,
@@ -87,11 +165,17 @@ async fn finish(store: &Store, name: &str, merge: bool) -> Result<()> {
 }
 
 #[allow(clippy::print_stdout)]
-async fn list(store: &Store) -> Result<()> {
-    let sessions = store
-        .list_sessions()
-        .await
-        .context("failed to list sessions")?;
+async fn list<R, P>(service: &ActionService<R, P>) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let request = ActionRequest::new(Action::ListSessions, ActionOrigin::LocalCli);
+    let outcome = service.execute(request).await.context("list sessions")?;
+
+    let DispatchResult::SessionList(sessions) = require_authorized(outcome)? else {
+        bail!("unexpected dispatch result for ListSessions")
+    };
 
     let mut found_any = false;
 

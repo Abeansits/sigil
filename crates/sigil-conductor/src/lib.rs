@@ -297,15 +297,7 @@ impl<R: SessionRuntime> Conductor<R> {
         &self,
         request: &ActionRequest,
     ) -> Result<PolicyDecision, ConductorError> {
-        use sigil_core::PolicyEngine;
-
-        let decision =
-            self.policy
-                .evaluate(request)
-                .await
-                .map_err(|e| ConductorError::Internal {
-                    message: format!("policy evaluation failed: {e}"),
-                })?;
+        let decision = self.evaluate_policy(request).await?;
 
         // Audit the decision if we have a writer.
         if let Some(ref audit) = self.audit {
@@ -325,6 +317,50 @@ impl<R: SessionRuntime> Conductor<R> {
         Ok(decision)
     }
 
+    /// Evaluate a request through the policy engine without writing an
+    /// audit entry. Used for T0 reads where the audit would be pure noise.
+    async fn evaluate_policy(
+        &self,
+        request: &ActionRequest,
+    ) -> Result<PolicyDecision, ConductorError> {
+        use sigil_core::PolicyEngine;
+
+        self.policy
+            .evaluate(request)
+            .await
+            .map_err(|e| ConductorError::Internal {
+                message: format!("policy evaluation failed: {e}"),
+            })
+    }
+
+    /// Evaluate a request and audit it iff the decision is not `Allow`.
+    /// Used for T0 reads so routine allowed traffic stays out of the audit
+    /// log while denials and approval prompts are still recorded.
+    async fn evaluate_with_non_allow_audit(
+        &self,
+        request: &ActionRequest,
+    ) -> Result<PolicyDecision, ConductorError> {
+        let decision = self.evaluate_policy(request).await?;
+
+        if !matches!(decision, PolicyDecision::Allow) {
+            if let Some(ref audit) = self.audit {
+                let event = AuditEvent {
+                    request_id: request.id,
+                    timestamp: request.timestamp,
+                    action_summary: format!("{:?}", request.action),
+                    origin_summary: format!("{:?}", request.origin),
+                    decision: decision.clone(),
+                    session_id: action_service::extract_session_id(&request.action),
+                };
+                if let Err(e) = audit.append(&event).await {
+                    warn!(error = %e, "failed to write audit event");
+                }
+            }
+        }
+
+        Ok(decision)
+    }
+
     /// Handle a slash command routed from a bridge message.
     async fn handle_command(
         &self,
@@ -335,8 +371,8 @@ impl<R: SessionRuntime> Conductor<R> {
         let command = parts.first().copied().unwrap_or_default();
 
         match command {
-            "/status" => self.format_status().await,
-            "/sessions" => self.cmd_sessions().await,
+            "/status" => self.cmd_status(origin).await,
+            "/sessions" => self.cmd_sessions(origin).await,
             "/check" => {
                 let name = parts.get(1).copied().unwrap_or_default().trim();
                 self.cmd_check(name, origin).await
@@ -357,21 +393,52 @@ impl<R: SessionRuntime> Conductor<R> {
         }
     }
 
-    async fn cmd_sessions(&self) -> Result<String, ConductorError> {
-        let sessions = self.store.list_sessions().await?;
-        if sessions.is_empty() {
-            return Ok("No sessions.".into());
+    /// T0 read: list sessions. Evaluated through policy so bridge reads
+    /// honor the same pipeline as mutating commands. To keep audit volume
+    /// manageable we skip audit entries for allowed reads (the common case)
+    /// but do record denials and approval prompts — those are the events
+    /// worth investigating later.
+    async fn cmd_sessions(&self, origin: &ActionOrigin) -> Result<String, ConductorError> {
+        let request = ActionRequest::new(Action::ListSessions, origin.clone());
+        let decision = self.evaluate_with_non_allow_audit(&request).await?;
+
+        match decision {
+            PolicyDecision::Allow => {
+                let sessions = self.store.list_sessions().await?;
+                if sessions.is_empty() {
+                    return Ok("No sessions.".into());
+                }
+                let mut lines = Vec::with_capacity(sessions.len());
+                for s in &sessions {
+                    lines.push(format!(
+                        "- {} [{:?}] ({})",
+                        s.title,
+                        s.state,
+                        s.path.display()
+                    ));
+                }
+                Ok(lines.join("\n"))
+            }
+            PolicyDecision::Deny { reason } => Ok(format!("Denied: {reason}")),
+            PolicyDecision::NeedsApproval { description } => {
+                Ok(format!("Needs approval: {description}"))
+            }
         }
-        let mut lines = Vec::with_capacity(sessions.len());
-        for s in &sessions {
-            lines.push(format!(
-                "- {} [{:?}] ({})",
-                s.title,
-                s.state,
-                s.path.display()
-            ));
+    }
+
+    /// T0 read: overall status report. Same policy-evaluated / audit-on-
+    /// denial treatment as [`cmd_sessions`].
+    async fn cmd_status(&self, origin: &ActionOrigin) -> Result<String, ConductorError> {
+        let request = ActionRequest::new(Action::GetSystemStatus, origin.clone());
+        let decision = self.evaluate_with_non_allow_audit(&request).await?;
+
+        match decision {
+            PolicyDecision::Allow => self.format_status().await,
+            PolicyDecision::Deny { reason } => Ok(format!("Denied: {reason}")),
+            PolicyDecision::NeedsApproval { description } => {
+                Ok(format!("Needs approval: {description}"))
+            }
         }
-        Ok(lines.join("\n"))
     }
 
     async fn cmd_check(&self, name: &str, origin: &ActionOrigin) -> Result<String, ConductorError> {
@@ -722,6 +789,48 @@ mod tests {
         let msg = command_msg("/send api-server");
         let response = conductor.handle_message(&msg).await.expect("/send usage");
         assert!(response.contains("Usage"));
+    }
+
+    /// `/sessions` from a bridge origin now flows through policy. Default
+    /// `EvaluatorConfig` allows T0 reads, so the session list is returned
+    /// — the important guarantee is that the response is shape-compatible
+    /// with the prior direct-store path.
+    #[tokio::test]
+    async fn sessions_command_allows_bridge_origin_under_default_policy() {
+        let s = make_session("frontend", SessionState::Running);
+        let (conductor, _) = setup_conductor(&[s], SessionState::Running, "").await;
+
+        let msg = BridgeMessage {
+            origin: ActionOrigin::BridgeTelegram {
+                user_id: "some-user".into(),
+            },
+            text: "/sessions".into(),
+            target_session: None,
+            is_command: true,
+            reply_context: ReplyContext::default(),
+        };
+        let response = conductor.handle_message(&msg).await.expect("/sessions");
+        assert!(response.contains("frontend"));
+    }
+
+    /// `/status` from a bridge origin also flows through policy and is
+    /// allowed for T0 reads under the default config.
+    #[tokio::test]
+    async fn status_command_allows_bridge_origin_under_default_policy() {
+        let s = make_session("frontend", SessionState::Running);
+        let (conductor, _) = setup_conductor(&[s], SessionState::Running, "").await;
+
+        let msg = BridgeMessage {
+            origin: ActionOrigin::BridgeTelegram {
+                user_id: "some-user".into(),
+            },
+            text: "/status".into(),
+            target_session: None,
+            is_command: true,
+            reply_context: ReplyContext::default(),
+        };
+        let response = conductor.handle_message(&msg).await.expect("/status");
+        assert!(response.contains("STATUS"));
     }
 
     #[tokio::test]

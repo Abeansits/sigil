@@ -10,12 +10,51 @@
     clippy::indexing_slicing
 )]
 
+use std::sync::Arc;
+
+use sigil_audit::AuditLogWriter;
 use sigil_cli::WorktreeCommands;
+use sigil_conductor::action_service::ActionService;
 use sigil_core::id::SessionId;
 use sigil_core::session::{SessionRecord, SessionState, ToolKind};
 use sigil_core::trust::ExecutionClass;
-use sigil_runtime::WorktreeManager;
+use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
+use sigil_runtime::{TmuxRuntime, WorktreeManager};
 use sigil_store::Store;
+
+fn build_action_service(
+    store: &Arc<Store>,
+    runtime: &Arc<TmuxRuntime>,
+    audit: &Arc<AuditLogWriter>,
+) -> ActionService<TmuxRuntime, PolicyService<NoopGrantStore>> {
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
+    ActionService::new(
+        policy,
+        Arc::clone(runtime),
+        Arc::clone(audit),
+        Arc::clone(store),
+    )
+}
+
+async fn build_service_from(
+    dir: &std::path::Path,
+) -> (
+    ActionService<TmuxRuntime, PolicyService<NoopGrantStore>>,
+    Arc<Store>,
+) {
+    let db_path = dir.join("sigil.db");
+    let db_str = db_path.to_str().expect("valid UTF-8");
+    let store = Arc::new(Store::new(db_str).await.expect("store"));
+    let runtime = Arc::new(TmuxRuntime::new("sigil-test-uc3"));
+    let audit_path = dir.join("audit.jsonl");
+    let audit = Arc::new(
+        AuditLogWriter::new(&audit_path, b"uc3-key".to_vec())
+            .await
+            .expect("audit"),
+    );
+    let service = build_action_service(&store, &runtime, &audit);
+    (service, store)
+}
 
 /// Initialize a git repo with user config and an initial commit.
 async fn init_git_repo(path: &std::path::Path) {
@@ -82,9 +121,7 @@ async fn worktree_create_list_finish() {
     std::fs::create_dir_all(&repo_path).expect("mkdir");
     init_git_repo(&repo_path).await;
 
-    let db_path = dir.path().join("sigil.db");
-    let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store");
+    let (service, store) = build_service_from(dir.path()).await;
 
     let record = SessionRecord {
         id: SessionId::new(),
@@ -104,7 +141,7 @@ async fn worktree_create_list_finish() {
 
     // ── CREATE WORKTREE ─────────────────────────────────────────────
     sigil_cli::commands::worktree::run(
-        &store,
+        &service,
         WorktreeCommands::Create {
             name: "wt-test".into(),
             branch: branch.into(),
@@ -148,7 +185,7 @@ async fn worktree_create_list_finish() {
     );
 
     // Also run the CLI list command (it should not error).
-    sigil_cli::commands::worktree::run(&store, WorktreeCommands::List)
+    sigil_cli::commands::worktree::run(&service, WorktreeCommands::List)
         .await
         .expect("worktree list should succeed");
 
@@ -235,9 +272,7 @@ async fn worktree_cli_create_and_list() {
     std::fs::create_dir_all(&repo_path).expect("mkdir");
     init_git_repo(&repo_path).await;
 
-    let db_path = dir.path().join("sigil.db");
-    let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store");
+    let (service, store) = build_service_from(dir.path()).await;
 
     let record = SessionRecord {
         id: SessionId::new(),
@@ -257,7 +292,7 @@ async fn worktree_cli_create_and_list() {
 
     // Create via CLI.
     sigil_cli::commands::worktree::run(
-        &store,
+        &service,
         WorktreeCommands::Create {
             name: "wt-cli-test".into(),
             branch: branch.into(),
@@ -272,7 +307,7 @@ async fn worktree_cli_create_and_list() {
     assert!(wt_path.exists());
 
     // List via CLI (should not error).
-    sigil_cli::commands::worktree::run(&store, WorktreeCommands::List)
+    sigil_cli::commands::worktree::run(&service, WorktreeCommands::List)
         .await
         .expect("cli worktree list");
 

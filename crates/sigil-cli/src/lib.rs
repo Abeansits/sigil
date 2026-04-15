@@ -20,7 +20,7 @@ use sigil_core::protocol::ConductorMessage;
 use sigil_core::session::IdentitySpec;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionState};
 use sigil_core::traits::{LifecycleHooks, SessionRuntime};
-use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
+use sigil_policy::{EvaluatorConfig, PolicyService};
 #[cfg(feature = "container")]
 use sigil_runtime::ContainerRuntime;
 use sigil_runtime::TmuxRuntime;
@@ -500,19 +500,21 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let runtime = Arc::new(build_runtime(cli.runtime)?);
 
+    // Single ActionService for every CLI command that needs to route through
+    // policy → dispatch → audit. Using the real Store as GrantStore means
+    // approval grants persisted by bridge/conductor flows are honored here.
+    let policy = PolicyService::new(EvaluatorConfig::default(), Arc::clone(&store));
+    let action_service = ActionService::new(
+        policy,
+        Arc::clone(&runtime),
+        Arc::clone(&audit),
+        Arc::clone(&store),
+    );
+
     match cli.command {
-        Commands::Status { json } => commands::status::run(&store, json).await,
-        Commands::Session(cmd) => {
-            let policy = PolicyService::new(EvaluatorConfig::default(), Arc::new(NoopGrantStore));
-            let action_service = ActionService::new(
-                policy,
-                Arc::clone(&runtime),
-                Arc::clone(&audit),
-                Arc::clone(&store),
-            );
-            commands::session::run(&action_service, cmd).await
-        }
-        Commands::Worktree(cmd) => commands::worktree::run(&store, cmd).await,
+        Commands::Status { json } => commands::status::run(&action_service, json).await,
+        Commands::Session(cmd) => commands::session::run(&action_service, cmd).await,
+        Commands::Worktree(cmd) => commands::worktree::run(&action_service, cmd).await,
         Commands::Conductor { interval } => {
             runtime.preflight_check().await?;
             commands::conductor::run(
@@ -551,9 +553,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             ))
             .await
         }
-        Commands::Identity(cmd) => {
-            commands::identity::run(&store, runtime.as_ref(), &audit, cmd).await
-        }
+        Commands::Identity(cmd) => commands::identity::run(&action_service, cmd).await,
         Commands::Audit(_) | Commands::Memory(_) => {
             // Already handled above.
             Ok(())
