@@ -1,0 +1,29 @@
+[package]
+name = "sigil-content"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sigil-core = { path = "../sigil-core" }
+sigil-policy = { path = "../sigil-policy" }
+serde.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+getrandom = "0.2"
+
+[dev-dependencies]
+assert_matches.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["html", "markdown", "json"]
+html = []
+markdown = []
+json = []
+image = []
+pdf = []
+
+[lints]
+workspace = true
