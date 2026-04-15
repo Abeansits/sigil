@@ -10,7 +10,6 @@ sigil-core = { path = "../sigil-core" }
 sigil-policy = { path = "../sigil-policy" }
 serde.workspace = true
 thiserror.workspace = true
-regex.workspace = true
 getrandom = "0.2"
 
 [dev-dependencies]

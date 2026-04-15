@@ -12,9 +12,11 @@
 //!
 //! Raw fetched bytes enter the sanitizer as a [`RawFetchedContent`] value.
 //! The struct has a private body and is consumed by value by every
-//! `sanitize_*` method, so it cannot be split into a reference that leaks
-//! to the model. This turns "raw content reaches the model" from a
-//! convention into a compile error.
+//! `sanitize_*` method, so once wrapped the bytes cannot be read back out
+//! except by the sanitizer. This turns "a `RawFetchedContent` reaches the
+//! model" from a convention into a compile error. Callers can still retain
+//! the original source bytes *before* wrapping — the type guards the
+//! sanitizer boundary, it does not pretend to be a runtime taint tracker.
 //!
 //! # Pipeline (plain-text path, PR2)
 //!
@@ -53,12 +55,20 @@ pub use sigil_core::{SanitizeReport, SanitizedContent as CoreSanitizedContent};
 /// sanitizer.
 ///
 /// The body is private and every `sanitize_*` method consumes the value
-/// by move. A caller therefore cannot (a) extract the raw bytes back out
-/// or (b) keep a reference alive past the sanitizer call. In practice
-/// this makes it a compile error to smuggle raw fetched bytes into the
-/// model context — the only legal destination is a `Sanitizer`.
+/// by move. Once a caller has wrapped bytes in a `RawFetchedContent` they
+/// can (a) observe its length but not its contents, (b) hand it to a
+/// sanitizer (which consumes it), or (c) drop it. There is no public
+/// accessor for the underlying buffer, so a `RawFetchedContent` cannot
+/// flow into the model prompt; only its [`SanitizedContent`] result can.
 ///
-/// `Clone` is deliberately not implemented: duplicating raw content
+/// The discipline this type enforces is "wrapped raw content stays
+/// sanitizer-bound", not "raw bytes never leave the caller" — a caller
+/// that held onto the source `Vec<u8>` or `String` before wrapping has
+/// already chosen to retain it. Callers that want the stronger property
+/// should construct the wrapper at the fetch boundary and let the
+/// original buffer drop.
+///
+/// `Clone` is deliberately not implemented: duplicating a wrapped buffer
 /// defeats the "consumed by value" discipline.
 pub struct RawFetchedContent {
     bytes: Vec<u8>,

@@ -89,7 +89,12 @@ pub(crate) fn sanitize(
 
     // Stage 5 — injection-pattern scan (PR3). Intentionally skipped here;
     // the empty `findings` vector below is the placeholder.
+    //
     // TODO(PR3): run pattern scan, populate findings + risk_score.
+    // TODO(PR3): compare `repetition_ratio` against
+    // `config.max_repetition_ratio` and emit a repetition-flood finding
+    // when it is exceeded. Until then the config field is reserved — the
+    // raw ratio still lands in the report for policy consumers.
 
     // Stage 6 — provenance wrap (PR3). Intentionally skipped here; the
     // cleaned text flows out bare for now.
