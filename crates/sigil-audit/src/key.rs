@@ -224,14 +224,30 @@ pub mod keychain {
 
     use super::KeychainError;
 
+    /// Stub: always reports "no key stored" on non-macOS targets.
+    ///
+    /// # Errors
+    ///
+    /// This stub never errors; the real backend's error signature is
+    /// preserved so callers compile unchanged on Linux / CI.
     pub fn read() -> Result<Option<Vec<u8>>, KeychainError> {
         Ok(None)
     }
 
+    /// Stub: non-macOS targets cannot persist to a system keychain.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`KeychainError::Unsupported`].
     pub fn write(_key: &[u8]) -> Result<(), KeychainError> {
         Err(KeychainError::Unsupported)
     }
 
+    /// Stub: non-macOS targets have nothing to delete.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`KeychainError::Unsupported`].
     pub fn delete() -> Result<(), KeychainError> {
         Err(KeychainError::Unsupported)
     }
