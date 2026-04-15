@@ -5,7 +5,8 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
+use zeroize::Zeroizing;
 
 use sigil_audit::key::{self, KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE, KeychainError};
 
@@ -80,7 +81,7 @@ fn run_key(cmd: AuditKeyCommands) -> Result<()> {
 fn key_generate(force: bool) -> Result<()> {
     ensure_macos()?;
 
-    let existing = key::keychain::read().map_err(|e| keychain_anyhow(&e))?;
+    let existing = key::keychain::read().context("keychain read failed")?;
     if existing.is_some() && !force {
         bail!(
             "A `{KEYCHAIN_SERVICE}/{KEYCHAIN_ACCOUNT}` Keychain entry already exists. \
@@ -88,8 +89,8 @@ fn key_generate(force: bool) -> Result<()> {
         );
     }
 
-    let new_key = key::generate_key().map_err(|e| anyhow!("failed to generate key: {e}"))?;
-    key::keychain::write(&new_key).map_err(|e| keychain_anyhow(&e))?;
+    let new_key = key::generate_key().context("failed to generate key")?;
+    key::keychain::write(&new_key).context("keychain write failed")?;
 
     println!(
         "Generated {} bytes and stored in Keychain ({}/{}).",
@@ -105,7 +106,7 @@ fn key_show(yes: bool) -> Result<()> {
     ensure_macos()?;
 
     let bytes = key::keychain::read()
-        .map_err(|e| keychain_anyhow(&e))?
+        .context("keychain read failed")?
         .context("no Keychain entry found — run `sigil audit key generate` first")?;
 
     if !yes && !confirm("Print the audit key (hex) to stdout?")? {
@@ -121,14 +122,16 @@ fn key_import(path: &str, force: bool, format: KeyFormat) -> Result<()> {
     ensure_macos()?;
 
     let resolved = crate::expand_tilde(path)?;
-    let raw = std::fs::read(&resolved)
-        .with_context(|| format!("failed to read {}", resolved.display()))?;
+    let raw: Zeroizing<Vec<u8>> = Zeroizing::new(
+        std::fs::read(&resolved)
+            .with_context(|| format!("failed to read {}", resolved.display()))?,
+    );
     let bytes = decode_key_bytes(&raw, format)?;
     if bytes.is_empty() {
         bail!("key file is empty");
     }
 
-    let existing = key::keychain::read().map_err(|e| keychain_anyhow(&e))?;
+    let existing = key::keychain::read().context("keychain read failed")?;
     if existing.is_some() && !force {
         bail!(
             "A `{KEYCHAIN_SERVICE}/{KEYCHAIN_ACCOUNT}` Keychain entry already exists. \
@@ -136,7 +139,7 @@ fn key_import(path: &str, force: bool, format: KeyFormat) -> Result<()> {
         );
     }
 
-    key::keychain::write(&bytes).map_err(|e| keychain_anyhow(&e))?;
+    key::keychain::write(&bytes).context("keychain write failed")?;
     println!(
         "Imported {} bytes from {} into Keychain ({}/{}).",
         bytes.len(),
@@ -148,23 +151,25 @@ fn key_import(path: &str, force: bool, format: KeyFormat) -> Result<()> {
     Ok(())
 }
 
-fn decode_key_bytes(raw: &[u8], format: KeyFormat) -> Result<Vec<u8>> {
+fn decode_key_bytes(raw: &[u8], format: KeyFormat) -> Result<Zeroizing<Vec<u8>>> {
     match format {
-        KeyFormat::Raw => Ok(raw.to_vec()),
+        KeyFormat::Raw => Ok(Zeroizing::new(raw.to_vec())),
         KeyFormat::Hex => decode_hex(raw),
     }
 }
 
-fn decode_hex(raw: &[u8]) -> Result<Vec<u8>> {
-    let stripped: String = std::str::from_utf8(raw)
-        .context("hex key file is not valid UTF-8")?
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
+fn decode_hex(raw: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let stripped: Zeroizing<String> = Zeroizing::new(
+        std::str::from_utf8(raw)
+            .context("hex key file is not valid UTF-8")?
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect(),
+    );
     if stripped.len() % 2 != 0 {
         bail!("hex key has an odd number of digits");
     }
-    let mut out = Vec::with_capacity(stripped.len() / 2);
+    let mut out: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(stripped.len() / 2));
     let mut chars = stripped.chars();
     while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
         let hi = hi
@@ -201,7 +206,7 @@ fn key_delete(yes: bool) -> Result<()> {
             println!("No Keychain entry to delete.");
             Ok(())
         }
-        Err(e) => Err(keychain_anyhow(&e)),
+        Err(e) => Err(anyhow::Error::new(e).context("keychain delete failed")),
     }
 }
 
@@ -215,10 +220,6 @@ fn ensure_macos() -> Result<()> {
     } else {
         bail!("`audit key` subcommands require macOS (Keychain backend)")
     }
-}
-
-fn keychain_anyhow(e: &KeychainError) -> anyhow::Error {
-    anyhow!("keychain: {e}")
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
@@ -266,14 +267,14 @@ mod tests {
     fn decode_raw_is_byte_exact_including_trailing_newline() {
         let input = b"abc\n";
         let out = decode_key_bytes(input, KeyFormat::Raw).expect("raw decode");
-        assert_eq!(out, input.to_vec());
+        assert_eq!(out.as_slice(), input);
     }
 
     #[test]
     fn decode_hex_strips_whitespace_and_decodes() {
         let input = b"de ad\nbe\tef\n";
         let out = decode_key_bytes(input, KeyFormat::Hex).expect("hex decode");
-        assert_eq!(out, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(out.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
     }
 
     #[test]

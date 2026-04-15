@@ -1763,6 +1763,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1811,6 +1812,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,5 +1,7 @@
 //! Audit-specific error types.
 
+use crate::key::KeychainError;
+
 /// Errors that can occur during audit operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -26,11 +28,11 @@ pub enum AuditError {
     )]
     KeyNotAvailable,
 
-    #[error("keychain error: {0}")]
-    Keychain(String),
+    #[error(transparent)]
+    Keychain(#[from] KeychainError),
 
-    #[error("random source error: {0}")]
-    Random(String),
+    #[error("random source: {0}")]
+    Random(#[source] getrandom::Error),
 
     #[error("SIGIL_AUDIT_KEY is set but invalid: {reason}")]
     InvalidEnvKey { reason: String },

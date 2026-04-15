@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::chain::{self, ChainedEntry, GENESIS_HASH};
 use crate::error::AuditError;
@@ -12,9 +13,12 @@ use crate::error::AuditError;
 ///
 /// Each entry is serialized as a single JSONL line. The writer holds
 /// a mutex over the file handle so concurrent appends are safe.
+///
+/// The HMAC key is held in a [`Zeroizing`] wrapper so the secret bytes
+/// are scrubbed from memory when the writer is dropped.
 pub struct AuditLogWriter {
     path: PathBuf,
-    key: Vec<u8>,
+    key: Zeroizing<Vec<u8>>,
     state: Mutex<WriterState>,
 }
 
@@ -35,7 +39,10 @@ impl AuditLogWriter {
     /// Returns [`AuditError::Write`] if the file cannot be opened or
     /// created, or [`AuditError::Serialize`] if the last entry cannot
     /// be deserialized during recovery.
-    pub async fn new(path: impl AsRef<Path>, key: Vec<u8>) -> Result<Self, AuditError> {
+    pub async fn new(
+        path: impl AsRef<Path>,
+        key: impl Into<Zeroizing<Vec<u8>>>,
+    ) -> Result<Self, AuditError> {
         let path = path.as_ref().to_path_buf();
         let prev_hash = recover_prev_hash(&path).await?;
 
@@ -48,7 +55,7 @@ impl AuditLogWriter {
 
         Ok(Self {
             path,
-            key,
+            key: key.into(),
             state: Mutex::new(WriterState { file, prev_hash }),
         })
     }
