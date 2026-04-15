@@ -13,7 +13,7 @@ A security-first Rust workspace for managing AI agent sessions. It replaces the 
 
 ## The Name
 
-*Sigil* comes from Latin *sigillum* — a seal of authority. In sigil, every orchestrated action carries typed authority through `ActionRequest`, and every decision is sealed into an HMAC-chained audit trail. The name reflects what the tool enforces: nothing runs without a seal of approval.
+*Sigil* comes from Latin *sigillum* — a seal of authority. In sigil, every orchestrated action carries typed authority through `ActionRequest`, and every decision is sealed into an HMAC-chained audit trail. The name reflects what the tool enforces: nothing runs without a seal of approval — every request is verified, logged, and bound to an auditable chain.
 
 ## Getting Started
 
