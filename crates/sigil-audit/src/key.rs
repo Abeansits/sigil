@@ -18,6 +18,8 @@
 //! fallback is the only available source (still subject to the rules
 //! above).
 
+use zeroize::Zeroizing;
+
 use crate::AuditError;
 
 /// Keychain service name for the HMAC key entry.
@@ -62,8 +64,12 @@ impl KeySource {
 }
 
 /// A key loaded from one of the configured sources.
+///
+/// `bytes` is wrapped in [`Zeroizing`] so the secret material is scrubbed
+/// from memory when the `LoadedKey` is dropped — defense-in-depth against
+/// core-dump or heap-read exfiltration.
 pub struct LoadedKey {
-    pub bytes: Vec<u8>,
+    pub bytes: Zeroizing<Vec<u8>>,
     pub source: KeySource,
 }
 
@@ -92,7 +98,7 @@ pub fn load_audit_key() -> Result<LoadedKey, AuditError> {
             });
         }
         Ok(None) => {} // entry missing — fall through
-        Err(e) => return Err(AuditError::Keychain(e.to_string())),
+        Err(e) => return Err(AuditError::Keychain(e)),
     }
 
     if dev_fallback_allowed() {
@@ -102,7 +108,7 @@ pub fn load_audit_key() -> Result<LoadedKey, AuditError> {
              This key is public; do NOT use in production."
         );
         return Ok(LoadedKey {
-            bytes: DEV_KEY.to_vec(),
+            bytes: Zeroizing::new(DEV_KEY.to_vec()),
             source: KeySource::Dev,
         });
     }
@@ -115,13 +121,13 @@ pub fn load_audit_key() -> Result<LoadedKey, AuditError> {
 /// # Errors
 ///
 /// Returns [`AuditError::Random`] if the system random source fails.
-pub fn generate_key() -> Result<Vec<u8>, AuditError> {
-    let mut buf = vec![0_u8; GENERATED_KEY_LEN];
-    getrandom::getrandom(&mut buf).map_err(|e| AuditError::Random(e.to_string()))?;
+pub fn generate_key() -> Result<Zeroizing<Vec<u8>>, AuditError> {
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0_u8; GENERATED_KEY_LEN]);
+    getrandom::getrandom(&mut buf).map_err(AuditError::Random)?;
     Ok(buf)
 }
 
-fn env_key() -> Result<Option<Vec<u8>>, AuditError> {
+fn env_key() -> Result<Option<Zeroizing<Vec<u8>>>, AuditError> {
     match std::env::var(ENV_KEY) {
         Ok(s) => {
             if s.trim().is_empty() {
@@ -129,7 +135,7 @@ fn env_key() -> Result<Option<Vec<u8>>, AuditError> {
                     reason: "value is empty or whitespace-only".to_owned(),
                 });
             }
-            Ok(Some(s.into_bytes()))
+            Ok(Some(Zeroizing::new(s.into_bytes())))
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(AuditError::InvalidEnvKey {
@@ -169,6 +175,7 @@ pub mod keychain {
     use security_framework::passwords::{
         delete_generic_password, get_generic_password, set_generic_password,
     };
+    use zeroize::Zeroizing;
 
     use super::{KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE, KeychainError};
 
@@ -181,9 +188,9 @@ pub mod keychain {
     ///
     /// Returns `Ok(None)` when the entry simply does not exist, and
     /// [`KeychainError::Backend`] for any other failure.
-    pub fn read() -> Result<Option<Vec<u8>>, KeychainError> {
+    pub fn read() -> Result<Option<Zeroizing<Vec<u8>>>, KeychainError> {
         match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
-            Ok(bytes) => Ok(Some(bytes)),
+            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
             Err(e) if is_not_found(e) => Ok(None),
             Err(e) => Err(KeychainError::Backend(e.to_string())),
         }
@@ -222,6 +229,8 @@ pub mod keychain {
 pub mod keychain {
     //! Stub backend for non-macOS targets.
 
+    use zeroize::Zeroizing;
+
     use super::KeychainError;
 
     /// Stub: always reports "no key stored" on non-macOS targets.
@@ -230,7 +239,7 @@ pub mod keychain {
     ///
     /// This stub never errors; the real backend's error signature is
     /// preserved so callers compile unchanged on Linux / CI.
-    pub fn read() -> Result<Option<Vec<u8>>, KeychainError> {
+    pub fn read() -> Result<Option<Zeroizing<Vec<u8>>>, KeychainError> {
         Ok(None)
     }
 

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use zeroize::Zeroizing;
 
 use sigil_audit::{AuditLogWriter, LoadedKey, load_audit_key};
 use sigil_core::PolicyDecision;
@@ -44,7 +45,7 @@ pub async fn init_audit_writer(data_dir: &Path) -> Result<Arc<AuditLogWriter>> {
 /// Returns an error if the audit log file cannot be opened or created.
 pub async fn init_audit_writer_with_key(
     data_dir: &Path,
-    key: Vec<u8>,
+    key: impl Into<Zeroizing<Vec<u8>>>,
 ) -> Result<Arc<AuditLogWriter>> {
     let audit_path = data_dir.join("audit.jsonl");
     let writer = AuditLogWriter::new(&audit_path, key)
