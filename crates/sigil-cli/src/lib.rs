@@ -445,6 +445,15 @@ fn build_runtime(choice: RuntimeChoice) -> Result<RuntimeBackend> {
 ///
 /// Returns `anyhow::Error` if any subcommand fails.
 pub async fn run(cli: Cli) -> Result<()> {
+    // The audit command group manages the HMAC key and verifies the log
+    // directly. It must short-circuit *before* any DB / data-dir setup so
+    // that bootstrap commands (`audit key generate` on a fresh install,
+    // or recovery when SIGIL_DB points at an unwritable parent) still
+    // work even if the rest of the CLI's prerequisites are unmet.
+    if let Commands::Audit(cmd) = cli.command {
+        return commands::audit::run(cmd).await;
+    }
+
     let db_path = expand_tilde(&cli.db)?;
 
     // Ensure the parent directory exists for the database file.
@@ -453,13 +462,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
 
     std::fs::create_dir_all(&data_dir).context("failed to create data directory")?;
-
-    // The audit command group manages the HMAC key and verifies the log
-    // directly — it must run without an initialized writer so that
-    // bootstrapping (`audit key generate`) works on a fresh install.
-    if let Commands::Audit(cmd) = cli.command {
-        return commands::audit::run(cmd).await;
-    }
 
     let audit = audit::init_audit_writer(&data_dir)
         .await

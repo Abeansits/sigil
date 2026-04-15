@@ -453,3 +453,41 @@ fn status_json_after_creates_reflects_correct_counts() {
     assert_eq!(parsed["total"], 2, "total should be 2");
     assert_eq!(parsed["stopped"], 2, "both should be stopped");
 }
+
+/// Regression: `audit` subcommands must short-circuit before any
+/// DB / data-dir setup so they remain usable even when `SIGIL_DB`
+/// points at an unwritable parent. (PR #40 review feedback.)
+#[test]
+fn audit_subcommand_runs_with_unwritable_db_parent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Place a regular file where the data dir's parent should be a
+    // directory; create_dir_all on a child path would fail loudly.
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"i am a file").expect("write blocker file");
+    let bogus_db = blocker.join("nested").join("sigil.db");
+
+    let out = Command::new(sigil_bin())
+        .arg("--db")
+        .arg(&bogus_db)
+        .args(["audit", "--help"])
+        .env("HOME", tmp.path())
+        .env("RUST_LOG", "off")
+        .env_remove("SIGIL_RUNTIME")
+        .env_remove("SIGIL_DB")
+        .output()
+        .expect("failed to execute sigil");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "audit --help should exit 0 even with broken --db; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("failed to create data directory"),
+        "audit short-circuit must skip data_dir setup; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("failed to open database"),
+        "audit short-circuit must skip Store::new; stderr: {stderr}"
+    );
+}
