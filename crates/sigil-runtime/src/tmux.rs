@@ -68,6 +68,34 @@ impl TmuxRuntime {
         }
     }
 
+    /// Poll `tmux has-session` until the named session is gone or the
+    /// deadline expires. `kill-session` returns before tmux's internal
+    /// session table is fully updated, so a follow-up `new-session` with
+    /// the same name can race against teardown and fail with "duplicate
+    /// session". This deterministic wait closes that window.
+    ///
+    /// `has-session` exits 0 if the session is present and non-zero if
+    /// it is absent (or the tmux server itself isn't running, which
+    /// also means "gone"). A spawn-time IO error is propagated rather
+    /// than treated as "gone" so that a missing or unusable `tmux`
+    /// binary surfaces as a real failure instead of a silent pass.
+    async fn wait_until_gone(&self, title: &str, timeout: Duration) -> Result<(), RuntimeError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let output = Command::new("tmux")
+                .args(["-L", &self.server_name, "has-session", "-t", title])
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(RuntimeError::Timeout);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Return the appropriate `ToolAdapter` for the given tool kind.
     fn get_adapter(tool: ToolKind) -> Box<dyn ToolAdapter> {
         adapter::adapter_for(tool)
@@ -178,16 +206,24 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     async fn stop(&self, handle: &SessionHandle) -> Result<(), CoreError> {
-        // Send Ctrl-C to interrupt the running process.
+        // Send Ctrl-C to interrupt the running process. Best-effort:
+        // gives the agent a chance to shut down gracefully before the
+        // session is killed.
         let _ = self
             .run_tmux(&["send-keys", "-t", &handle.title, "C-c"])
             .await;
 
-        // Brief delay to let the interrupt propagate.
+        // Brief delay to let the interrupt propagate to the foreground
+        // process before we tear the session down.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Kill the window.
+        // Kill the session.
         self.run_tmux(&["kill-session", "-t", &handle.title])
+            .await?;
+
+        // Wait until tmux confirms the session is actually gone — see
+        // `wait_until_gone` for the race this closes.
+        self.wait_until_gone(&handle.title, Duration::from_secs(5))
             .await?;
 
         debug!(title = %handle.title, "stopped tmux session");

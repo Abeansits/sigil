@@ -11,7 +11,6 @@
 //! No more "call runtime then log allowed."
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use sigil_audit::AuditLogWriter;
 use sigil_core::action::{Action, ActionRequest, PolicyDecision};
@@ -463,10 +462,20 @@ where
         let session = self.store.get_session(&session_id).await?;
         let handle = record_to_handle(&session);
 
-        // Stop if currently alive.
+        // Stop if currently alive. `SessionRuntime::stop` (for tmux)
+        // blocks until the backend confirms teardown so the same
+        // session name can be reused immediately. A stop failure is
+        // non-fatal — the relaunch will surface "duplicate session" if
+        // teardown didn't happen — but we log it so the cause isn't
+        // lost.
         if session.state != SessionState::Stopped {
-            let _ = self.runtime.stop(&handle).await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            if let Err(err) = self.runtime.stop(&handle).await {
+                warn!(
+                    session = %session.title,
+                    error = %err,
+                    "stop during restart failed; attempting relaunch anyway",
+                );
+            }
         }
 
         let config = SessionConfig {
