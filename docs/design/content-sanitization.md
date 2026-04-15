@@ -430,21 +430,21 @@ PR7  Conductor / MCP wiring + integration test
 - **Stylesheet-resolved hidden-element detection.** Phase 1 handles inline `style` + `hidden` attribute + `<style>` block inline rules. Full cascading-stylesheet resolution (external CSS) is deferred.
 - **External file read trust-tagging** and **inter-agent message relay sanitization** (integration Points 4 and 5).
 
+## Design Decisions (Resolved Apr 14, 2026)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | **Crate name: `sigil-content`.** | Broader than what the crate does today but leaves room for the image/audio/PDF phases without a rename. |
+| 2 | **Strict mode is a policy-layer threshold, not a sanitizer setting.** Default is hybrid by trust zone: `AgentRuntime` fetches gate on high `risk_score` → `NeedsApproval`; `ControlPlane` (CLI-driven) reads auto-allow. | Keeps the sanitizer a pure transform (per the main architecture constraint). Matches Sigil's existing trust-zone pattern: humans at the CLI are not gated; agents crossing out of their sandbox are. Avoids the noisy "every security blog post triggers an approval prompt" failure mode. |
+| 3 | **Drop stripped bytes immediately.** The report records element kinds + counts; the raw bytes go away. | Forensics value is low relative to the disk cost and the second-order risk of someone reading an attacker's payload back out of an audit attachment. Counts and kinds are enough to reconstruct "what happened" post-incident. |
+| 4 | **Nonce-delimited sentinels** (`<|sigil_external_start:nonce|> ... <|sigil_external_end:nonce|>`) with out-of-band provenance in `SanitizeReport`. | Closes the delimiter-breakout attack that XML-style tags leave open. Out-of-band metadata is the trust anchor; the in-band wrap is a hint to the model. |
+| 5 | **Canary tokens: separate design doc, not folded here.** | Canaries interact with identity files, agent system prompts, and the leak-detection path on the output side. They share scanner infrastructure with `sigil-content` but the concerns are distinct enough to deserve their own design. |
+| 6 | **Cross-session `read_session_output` sanitization lives in the conductor, not the sanitizer.** The conductor calls `sanitize_plain` on cross-session reads; intra-session reads pass through unchanged. | Preserves "sanitizer is a pure transform; policy/conductor decide where to call it." The sanitizer stays unaware of session identity and routing. Session topology already lives in the conductor; the additional call site is trivial. |
+| 7 | **Do not sanitize project file reads.** No flag, no opt-in in Phase 1. | Project code legitimately contains "weird" Unicode (tests, fixtures, i18n). Routing all project reads through the sanitizer is noisy and low-value compared to the cost. Revisit if threat model changes — e.g. if project repos start getting polluted via untrusted contributions. |
+
 ## Open Questions for Sebastian
 
-1. **Crate name.** `sigil-content` vs `sigil-sanitize` vs `sigil-ingress`. "Content" is broader than what the crate does today but leaves room for the image/audio/PDF phases. "Sanitize" is precise but narrow. "Ingress" overlaps with the trust zone name, which might help or confuse. Leaning `sigil-content`.
-
-2. **Strict mode default.** Should `SanitizerConfig::strict` (any injection-pattern flag → `NeedsApproval`) be on by default? Strict-by-default is the more secure posture but will generate approval prompts on legitimate content (articles about prompt injection, security advisories, etc.). Leaning off-by-default at the crate level, on-by-default for `AgentRuntime`-initiated fetches, off for `ControlPlane` CLI-driven reads.
-
-3. **Preserve raw or drop it?** When we strip `<script>` or a hidden `<div>`, do we keep the raw bytes anywhere (encrypted audit attachment) for later forensics, or drop immediately? Forensics are valuable after an incident; keeping bytes costs disk and risks a second-order attack vector (someone reads the audit attachment). Leaning drop, but the report records what was stripped (element kinds + counts).
-
-4. **Provenance wrap format.** `<external_content>` vs fenced delimiter (```` ```EXTERNAL ```` ... ```` ``` ````) vs JSON envelope. XML-style tags match the StruQ paper's recommendation and are easy for the model to learn, but they collide with any HTML content we pass through (post-strip HTML is rare but possible). Fenced delimiters are harder to spoof. Leaning XML-style with an unusual reserved name like `<sigil:external>` and documenting it in the agent system prompt.
-
-5. **Canary tokens.** Research.md §1 recommends canaries. Do we bake a canary into agent system prompts and scan sanitized output for leaks? That's agent-side, not content-side, but it shares the scanner infrastructure. Separate design doc, or fold into PR7? Leaning separate doc — it interacts with identity files, not just content.
-
-6. **Where does sanitization of `read_session_output` live — policy or sanitizer?** Cross-session read-back is the one place the sanitizer has to be aware of "who is reading whose output." The cleanest home is the conductor relay path, not the sanitizer itself. Confirm.
-
-7. **Do we sanitize project file reads at all?** Today an agent can read project code freely. If an attacker commits a file with zero-width payloads into the project repo, the agent would read it raw. Sanitizing project reads is loud and noisy (code is full of "weird" Unicode in some legitimate cases). Leaning no by default, with an opt-in `[content] sanitize_project_reads = true` in `.sigil/config.toml` for projects that want it.
+_All Phase 1 open questions resolved. Phase 2 questions surface with deferred integration points (attachments, external-file reads, inter-agent relay)._
 
 ## Relationship to Other Docs
 
