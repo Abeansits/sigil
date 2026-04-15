@@ -1,0 +1,34 @@
+---
+name: PR Review by OpenHands
+
+# Label-only trigger to start. After we validate quality on a few PRs, we can
+# broaden to auto-review on opened/ready_for_review. To broaden: add
+# 'opened', 'ready_for_review', 'review_requested' to `types` below and
+# extend the `if:` condition accordingly (see upstream workflow for the
+# full condition set).
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr-review:
+    if: github.event.label.name == 'review-this'
+    concurrency:
+      group: pr-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Run PR Review
+        # Pinned to commit SHA (not @main) for supply-chain safety.
+        # Bump deliberately after reviewing upstream diffs.
+        uses: OpenHands/extensions/plugins/pr-review@3175a1b77279bbc7514082bfa18e143939481d91
+        with:
+          llm-model: litellm_proxy/claude-sonnet-4-6
+          llm-base-url: https://llm-proxy.app.all-hands.dev
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
