@@ -28,6 +28,7 @@ tracing-subscriber.workspace = true
 time.workspace = true
 secrecy.workspace = true
 tokio-util.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 sigil-core = { path = "../sigil-core" }

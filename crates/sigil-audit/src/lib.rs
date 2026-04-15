@@ -16,10 +16,12 @@
 
 pub mod chain;
 pub mod error;
+pub mod key;
 pub mod verifier;
 pub mod writer;
 
 pub use error::AuditError;
+pub use key::{KeySource, LoadedKey, load_audit_key};
 pub use verifier::{VerifyResult, verify_log};
 pub use writer::AuditLogWriter;
 

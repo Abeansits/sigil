@@ -20,8 +20,20 @@ pub enum AuditError {
     #[error("audit log file not found: {path}")]
     FileNotFound { path: String },
 
-    #[error("HMAC key not available")]
+    #[error(
+        "audit HMAC key not available: set SIGIL_AUDIT_KEY, install one in the macOS Keychain \
+         (`sigil audit key generate`), or opt into the dev fallback with SIGIL_DEV_AUDIT_KEY=1"
+    )]
     KeyNotAvailable,
+
+    #[error("keychain error: {0}")]
+    Keychain(String),
+
+    #[error("random source error: {0}")]
+    Random(String),
+
+    #[error("SIGIL_AUDIT_KEY is set but invalid: {reason}")]
+    InvalidEnvKey { reason: String },
 }
 
 impl From<AuditError> for sigil_core::CoreError {

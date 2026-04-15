@@ -23,6 +23,16 @@ use sigil_runtime::ContainerRuntime;
 use sigil_runtime::TmuxRuntime;
 use sigil_store::Store;
 
+/// How to interpret the bytes in an `audit key import` file.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum KeyFormat {
+    /// Raw bytes, used verbatim (the default).
+    #[default]
+    Raw,
+    /// Hex-encoded; whitespace is ignored before decoding.
+    Hex,
+}
+
 /// Selects the session runtime backend.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum RuntimeChoice {
@@ -263,6 +273,51 @@ pub enum AuditCommands {
         #[arg(long)]
         path: Option<String>,
     },
+
+    /// Manage the HMAC key used to seal audit log entries.
+    #[command(subcommand)]
+    Key(AuditKeyCommands),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditKeyCommands {
+    /// Generate a new 32-byte audit key and store it in the macOS Keychain.
+    Generate {
+        /// Overwrite an existing Keychain entry without prompting.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print the audit key from the Keychain (hex-encoded).
+    Show {
+        /// Skip the confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Import an audit key from a file into the Keychain.
+    ///
+    /// The file is read verbatim for `--format raw` (default) or
+    /// hex-decoded (with whitespace stripped) for `--format hex`. Raw
+    /// imports are byte-exact: a trailing newline in the file becomes
+    /// part of the key — strip it yourself or use `--format hex`.
+    Import {
+        /// Path to the file containing the key bytes.
+        path: String,
+        /// Overwrite an existing Keychain entry without prompting.
+        #[arg(long)]
+        force: bool,
+        /// How to interpret the file contents.
+        #[arg(long, value_enum, default_value_t)]
+        format: KeyFormat,
+    },
+
+    /// Delete the audit key from the Keychain.
+    Delete {
+        /// Skip the confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 /// Expand a leading `~` to the user's home directory.
@@ -399,14 +454,16 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     std::fs::create_dir_all(&data_dir).context("failed to create data directory")?;
 
-    let audit = audit::init_audit_writer(&data_dir)
-        .await
-        .context("failed to initialize audit writer")?;
-
-    // The audit command is self-contained — no Store or runtime needed.
+    // The audit command group manages the HMAC key and verifies the log
+    // directly — it must run without an initialized writer so that
+    // bootstrapping (`audit key generate`) works on a fresh install.
     if let Commands::Audit(cmd) = cli.command {
         return commands::audit::run(cmd).await;
     }
+
+    let audit = audit::init_audit_writer(&data_dir)
+        .await
+        .context("failed to initialize audit writer")?;
 
     let db_str = db_path
         .to_str()

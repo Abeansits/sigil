@@ -15,6 +15,10 @@ hmac.workspace = true
 sha2.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["fs", "sync"] }
+getrandom = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
