@@ -6,29 +6,47 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use sigil_audit::AuditLogWriter;
+use sigil_audit::{AuditLogWriter, LoadedKey, load_audit_key};
 use sigil_core::PolicyDecision;
 use sigil_core::id::{RequestId, SessionId};
 use sigil_core::traits::AuditEvent;
 
-/// Default HMAC key for development. In production, set
-/// `SIGIL_AUDIT_KEY` (and later move to macOS Keychain).
-const DEV_FALLBACK_KEY: &[u8] = b"sigil-dev-audit-key-CHANGE-ME";
+/// Resolve the audit HMAC key using the documented priority order
+/// (env > Keychain > opt-in dev fallback).
+///
+/// # Errors
+///
+/// Returns an error if no key source is available.
+pub fn resolve_key() -> Result<LoadedKey> {
+    load_audit_key().context("failed to resolve audit HMAC key")
+}
 
 /// Create an `AuditLogWriter` rooted in the sigil data directory.
 ///
-/// Uses `SIGIL_AUDIT_KEY` env var for the HMAC key, falling back
-/// to a built-in development key.
+/// The HMAC key is resolved via [`resolve_key`].
+///
+/// # Errors
+///
+/// Returns an error if no key source is available, or if the audit log
+/// file cannot be opened or created.
+pub async fn init_audit_writer(data_dir: &Path) -> Result<Arc<AuditLogWriter>> {
+    let LoadedKey { bytes, source } = resolve_key()?;
+    tracing::info!(source = source.label(), "loaded audit HMAC key");
+    init_audit_writer_with_key(data_dir, bytes).await
+}
+
+/// Same as [`init_audit_writer`], but with an explicitly supplied key.
+///
+/// Intended for tests and embedders that resolve the key themselves.
 ///
 /// # Errors
 ///
 /// Returns an error if the audit log file cannot be opened or created.
-pub async fn init_audit_writer(data_dir: &Path) -> Result<Arc<AuditLogWriter>> {
+pub async fn init_audit_writer_with_key(
+    data_dir: &Path,
+    key: Vec<u8>,
+) -> Result<Arc<AuditLogWriter>> {
     let audit_path = data_dir.join("audit.jsonl");
-
-    let key = std::env::var("SIGIL_AUDIT_KEY")
-        .map_or_else(|_| DEV_FALLBACK_KEY.to_vec(), String::into_bytes);
-
     let writer = AuditLogWriter::new(&audit_path, key)
         .await
         .context("failed to open audit log")?;

@@ -108,9 +108,10 @@ async fn multiple_audit_events_form_valid_chain() {
 async fn init_audit_writer_creates_file_in_data_dir() {
     let dir = tempfile::tempdir().expect("tempdir creation should succeed");
 
-    let writer = sigil_cli::audit::init_audit_writer(dir.path())
-        .await
-        .expect("init should succeed");
+    let writer =
+        sigil_cli::audit::init_audit_writer_with_key(dir.path(), b"init-test-key".to_vec())
+            .await
+            .expect("init should succeed");
 
     // Write a test event to confirm it works end-to-end.
     sigil_cli::audit::log_event(&writer, "test.init", "test", PolicyDecision::Allow, None).await;
