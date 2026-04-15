@@ -1,0 +1,59 @@
+---
+name: PR Review by OpenHands
+
+# Label-gated. Add the 'review-this' label to a PR to trigger a Cloud-backed
+# OpenHands agent review. Agent runs in OpenHands Cloud infrastructure (not
+# in this runner) and posts comments to the PR via its own GitHub OAuth
+# integration (authorized at app.all-hands.dev for this repo).
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  trigger-review:
+    if: github.event.label.name == 'review-this'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Start OpenHands Cloud conversation
+        env:
+          OH_API_KEY: ${{ secrets.API_KEY_OPENHANDS }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          read -r -d '' INSTRUCTION <<EOF || true
+          Review pull request #${PR_NUMBER} ("${PR_TITLE}") on ${REPO}.
+          URL: ${PR_URL}
+
+          Perform a thorough code review:
+          - Read the full diff and relevant surrounding context.
+          - Identify bugs, logic errors, security issues, unsafe assumptions,
+            missing error handling, and violations of the repo's CLAUDE.md /
+            AGENTS.md conventions.
+          - Post inline review comments on the specific lines that need
+            attention.
+          - Finish with a single top-level PR comment summarizing your
+            verdict (approve / request changes / comment) and the top
+            concerns.
+
+          Do not push commits. Do not modify code. Review only.
+          EOF
+
+          jq -n \
+            --arg repo "${REPO}" \
+            --arg msg "${INSTRUCTION}" \
+            '{selected_repository: $repo, initial_user_msg: $msg}' \
+            > payload.json
+
+          curl -sS --fail-with-body \
+            -X POST https://app.all-hands.dev/api/v1/app-conversations \
+            -H "Authorization: Bearer ${OH_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data @payload.json
