@@ -351,7 +351,8 @@ mod tests {
     }
 
     #[test]
-    fn log_content_type_strips_ansi() {
+    fn log_content_type_strips_ansi_and_records_count() {
+        // Two ANSI sequences (opening SGR + reset) and one plain space.
         let input = "\x1b[31mred\x1b[0m text";
         let s = sanitizer();
         let out = s
@@ -363,6 +364,24 @@ mod tests {
             .unwrap();
         assert_eq!(out.text, "red text");
         assert_eq!(out.report.content_type, ContentType::Log);
+        assert_eq!(
+            out.report.stripped_elements,
+            vec![("ansi-escape".to_owned(), 2)],
+            "report must record both stripped ANSI escapes",
+        );
+    }
+
+    #[test]
+    fn log_content_type_without_ansi_records_nothing() {
+        let s = sanitizer();
+        let out = s
+            .sanitize_plain(
+                RawFetchedContent::from_string("no escapes here".into()),
+                file_source(),
+                ContentType::Log,
+            )
+            .unwrap();
+        assert!(out.report.stripped_elements.is_empty());
     }
 
     #[test]

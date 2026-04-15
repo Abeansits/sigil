@@ -76,9 +76,24 @@ pub(crate) fn sanitize(
 
     // Stage 3 — format-specific strip (plain-text path). For `PlainText`
     // this is a no-op. For `Log` we strip ANSI escape sequences, matching
-    // the treatment already applied to captured tmux output.
+    // the treatment already applied to captured tmux output. Count the
+    // ESC (0x1B) bytes removed so the report records structural-strip
+    // activity (each well-formed ANSI escape begins with exactly one ESC
+    // byte, so this approximates "number of escape sequences stripped").
+    let mut stripped_elements: Vec<(String, u32)> = Vec::new();
     let stage3 = if strip_ansi_first {
-        strip_ansi(decoded)
+        let stripped = strip_ansi(decoded);
+        let esc_before = count_esc_bytes(decoded);
+        let esc_after = count_esc_bytes(&stripped);
+        let removed = esc_before.saturating_sub(esc_after);
+        if removed > 0 {
+            // Use u32::try_from → saturating fallback so pathological
+            // inputs (unlikely given the 2-MiB size cap) still produce a
+            // well-typed entry rather than panicking.
+            let count = u32::try_from(removed).unwrap_or(u32::MAX);
+            stripped_elements.push(("ansi-escape".to_owned(), count));
+        }
+        stripped
     } else {
         decoded.to_owned()
     };
@@ -118,7 +133,7 @@ pub(crate) fn sanitize(
         content_type,
         bytes_in,
         bytes_out,
-        stripped_elements: Vec::new(),
+        stripped_elements,
         text_normalize,
         findings: Vec::new(),
         risk_score: 0,
@@ -165,6 +180,18 @@ fn generate_nonce() -> Result<String, ContentError> {
         let _ = write!(&mut out, "{b:02x}");
     }
     Ok(out)
+}
+
+/// Count ESC (0x1B) bytes in a string. Used as a proxy for the number of
+/// ANSI escape sequences: each well-formed sequence begins with exactly
+/// one ESC byte.
+///
+/// The naive-bytecount lint would prefer the `bytecount` crate; for
+/// strings bounded by the 2 MiB size cap the SIMD optimization is not
+/// worth the extra dependency.
+#[allow(clippy::naive_bytecount)]
+fn count_esc_bytes(s: &str) -> usize {
+    s.as_bytes().iter().filter(|&&b| b == 0x1B).count()
 }
 
 /// O(n) per-byte repetition approximation.
