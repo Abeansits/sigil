@@ -32,18 +32,40 @@ jobs:
           Review pull request #${PR_NUMBER} ("${PR_TITLE}") on ${REPO}.
           URL: ${PR_URL}
 
+          ## Task
           Perform a thorough code review:
           - Read the full diff and relevant surrounding context.
           - Identify bugs, logic errors, security issues, unsafe assumptions,
             missing error handling, and violations of the repo's CLAUDE.md /
             AGENTS.md conventions.
-          - Post inline review comments on the specific lines that need
-            attention.
-          - Finish with a single top-level PR comment summarizing your
-            verdict (approve / request changes / comment) and the top
-            concerns.
+          - For each specific line-level issue, post an INLINE review
+            comment anchored to the exact file + line. Use gh CLI inside
+            your sandbox:
+              gh pr review ${PR_NUMBER} --repo ${REPO} \\
+                --comment \\
+                --body "summary here"
+            For inline line comments, use \`gh api\` against
+            /repos/${REPO}/pulls/${PR_NUMBER}/comments with path, line,
+            side, and body. One POST per inline comment.
+          - After inline comments are posted, submit a STRUCTURED REVIEW
+            with an explicit verdict (APPROVE / REQUEST_CHANGES / COMMENT):
+              gh pr review ${PR_NUMBER} --repo ${REPO} \\
+                --approve|--request-changes|--comment \\
+                --body "<FULL STRUCTURED ANALYSIS HERE>"
+            The review body must contain your full analysis verbatim — do
+            NOT condense to a one-paragraph summary. Include the same
+            section headings you'd use internally (Bugs, Security,
+            Conventions, Best Practices, Verdict).
 
-          Do not push commits. Do not modify code. Review only.
+          ## Output formatting
+          - Prefix every comment and review body with the marker
+            "🤖 **OpenHands review** — " so it's distinguishable from
+            human-written comments by the repo owner (you are OAuthed
+            as the owner's account).
+
+          ## Rules
+          - Do NOT push commits or modify files in the repo. Review only.
+          - Do NOT merge, close, or re-open the PR.
           EOF
 
           jq -n \
