@@ -50,6 +50,7 @@ impl FromStr for SessionId {
 pub struct GroupId(String);
 
 impl GroupId {
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
@@ -126,5 +127,13 @@ mod tests {
         let g = GroupId::new("daydream");
         assert_eq!(g.as_str(), "daydream");
         assert_eq!(g.to_string(), "daydream");
+    }
+
+    #[test]
+    fn request_id_roundtrips_through_string() {
+        let id = RequestId::new();
+        let s = id.to_string();
+        let parsed: RequestId = s.parse().expect("valid ULID");
+        assert_eq!(id, parsed);
     }
 }
