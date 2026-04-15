@@ -532,7 +532,12 @@ impl<R: SessionRuntime> Conductor<R> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::wildcard_enum_match_arm,
+        clippy::doc_markdown
+    )]
 
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -859,5 +864,267 @@ mod tests {
         let msg = command_msg("just a regular message");
         let response = conductor.handle_message(&msg).await.expect("no target");
         assert!(response.contains("/help") || response.contains("/send"));
+    }
+
+    // -- evaluate_with_non_allow_audit --
+    //
+    // These tests pin the noise-reduction contract added in PR #41:
+    // allowed T0 bridge reads stay out of the audit log; denials and
+    // approval prompts still land there with full context. We exercise
+    // the helper directly (private, same-crate access) so the deny /
+    // needs-approval branches are reachable without a policy engine
+    // mock — the real evaluator naturally produces those decisions for
+    // ceiling-busting requests like `BridgeSlack` + `ReadHostFile`.
+
+    use sigil_audit::AuditLogWriter;
+    use sigil_core::action::{Action, ActionRequest, PolicyDecision};
+
+    async fn setup_conductor_with_audit(
+        sessions: &[SessionRecord],
+    ) -> (
+        super::Conductor<MockRuntime>,
+        std::path::PathBuf,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let audit = Arc::new(
+            AuditLogWriter::new(&audit_path, b"bridge-deny-test-key".to_vec())
+                .await
+                .expect("audit writer"),
+        );
+        let store = Arc::new(Store::new_in_memory().await.expect("store init"));
+        for s in sessions {
+            store.create_session(s).await.expect("create session");
+        }
+        let runtime = Arc::new(MockRuntime::new(SessionState::Running, ""));
+        let conductor = super::Conductor::new(Arc::clone(&store), runtime, Duration::from_secs(30))
+            .with_audit(audit);
+        (conductor, audit_path, dir)
+    }
+
+    async fn audit_line_count(path: &std::path::Path) -> usize {
+        tokio::fs::read_to_string(path)
+            .await
+            .map(|s| s.lines().filter(|l| !l.is_empty()).count())
+            .unwrap_or(0)
+    }
+
+    /// Read the last chained entry's event payload as generic JSON. Returning
+    /// `serde_json::Value` lets each test assert on just the fields it cares
+    /// about without pulling a `ChainedEntry` type through the test boundary.
+    async fn last_audit_event(path: &std::path::Path) -> serde_json::Value {
+        let contents = tokio::fs::read_to_string(path).await.expect("read audit");
+        let last = contents
+            .lines()
+            .rfind(|l| !l.is_empty())
+            .expect("audit log should have at least one entry");
+        let entry: serde_json::Value = serde_json::from_str(last).expect("entry is json");
+        entry
+            .get("event")
+            .cloned()
+            .expect("chained entry must have event field")
+    }
+
+    fn decision_from_event(event: &serde_json::Value) -> PolicyDecision {
+        let decision = event
+            .get("decision")
+            .cloned()
+            .expect("event.decision present");
+        serde_json::from_value(decision).expect("decision deserializes")
+    }
+
+    /// T0 bridge read through `/sessions`: under default policy this is
+    /// allowed, so the helper must NOT write to the audit log.
+    #[tokio::test]
+    async fn sessions_command_allowed_bridge_read_does_not_audit() {
+        let s = make_session("frontend", SessionState::Running);
+        let (conductor, audit_path, _dir) = setup_conductor_with_audit(&[s]).await;
+        let msg = BridgeMessage {
+            origin: ActionOrigin::BridgeTelegram {
+                user_id: "12345".into(),
+            },
+            text: "/sessions".into(),
+            target_session: None,
+            is_command: true,
+            reply_context: ReplyContext::default(),
+        };
+        let response = conductor.handle_message(&msg).await.expect("/sessions");
+        assert!(response.contains("frontend"));
+        assert_eq!(
+            audit_line_count(&audit_path).await,
+            0,
+            "allowed T0 bridge read should not produce an audit entry",
+        );
+    }
+
+    /// Same no-audit-on-Allow contract for `/status`.
+    #[tokio::test]
+    async fn status_command_allowed_bridge_read_does_not_audit() {
+        let s = make_session("frontend", SessionState::Running);
+        let (conductor, audit_path, _dir) = setup_conductor_with_audit(&[s]).await;
+        let msg = BridgeMessage {
+            origin: ActionOrigin::BridgeTelegram {
+                user_id: "12345".into(),
+            },
+            text: "/status".into(),
+            target_session: None,
+            is_command: true,
+            reply_context: ReplyContext::default(),
+        };
+        let _ = conductor.handle_message(&msg).await.expect("/status");
+        assert_eq!(
+            audit_line_count(&audit_path).await,
+            0,
+            "allowed T0 bridge read should not produce an audit entry",
+        );
+    }
+
+    /// Deny branch: the helper must write the denial to the audit log with
+    /// the real `Deny { reason }` preserved, plus matching request context
+    /// (request_id / action_summary / origin_summary). Context assertions
+    /// guard against a regression where the helper audits the right verdict
+    /// but attaches it to a mismatched request.
+    #[tokio::test]
+    async fn evaluate_with_non_allow_audit_records_deny() {
+        let (conductor, audit_path, _dir) = setup_conductor_with_audit(&[]).await;
+        // BridgeSlack Paul → T1 ceiling, ReadHostFile is T3 → Deny.
+        let req = ActionRequest::new(
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/passwd"),
+            },
+            ActionOrigin::BridgeSlack {
+                user_id: "U_PAUL".into(),
+                channel_id: "C_GEN".into(),
+            },
+        );
+        let expected_request_id = req.id;
+        let decision = conductor
+            .evaluate_with_non_allow_audit(&req)
+            .await
+            .expect("evaluate");
+        assert!(
+            matches!(decision, PolicyDecision::Deny { .. }),
+            "expected Deny, got {decision:?}",
+        );
+        assert_eq!(
+            audit_line_count(&audit_path).await,
+            1,
+            "deny should produce exactly one audit entry",
+        );
+
+        let event = last_audit_event(&audit_path).await;
+        match decision_from_event(&event) {
+            PolicyDecision::Deny { reason } => {
+                assert!(
+                    reason.contains("ceiling"),
+                    "deny reason should mention tier ceiling: {reason}",
+                );
+            }
+            other => panic!("audit entry should carry Deny, got {other:?}"),
+        }
+        let request_id = event
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("event.request_id is a string");
+        assert_eq!(
+            request_id,
+            expected_request_id.to_string(),
+            "audit entry must carry the originating request_id",
+        );
+        let action_summary = event
+            .get("action_summary")
+            .and_then(serde_json::Value::as_str)
+            .expect("event.action_summary is a string");
+        assert!(
+            action_summary.contains("ReadHostFile"),
+            "action_summary should reflect the action: {action_summary}",
+        );
+        let origin_summary = event
+            .get("origin_summary")
+            .and_then(serde_json::Value::as_str)
+            .expect("event.origin_summary is a string");
+        assert!(
+            origin_summary.contains("BridgeSlack"),
+            "origin_summary should reflect the origin: {origin_summary}",
+        );
+    }
+
+    /// NeedsApproval branch: LocalCli + T3 read has ceiling but still
+    /// requires explicit approval. The helper must audit these too, with
+    /// the originating request's context preserved.
+    #[tokio::test]
+    async fn evaluate_with_non_allow_audit_records_needs_approval() {
+        let (conductor, audit_path, _dir) = setup_conductor_with_audit(&[]).await;
+        let req = ActionRequest::new(
+            Action::ReadHostFile {
+                path: PathBuf::from("/etc/hosts"),
+            },
+            ActionOrigin::LocalCli,
+        );
+        let expected_request_id = req.id;
+        let decision = conductor
+            .evaluate_with_non_allow_audit(&req)
+            .await
+            .expect("evaluate");
+        assert!(
+            matches!(decision, PolicyDecision::NeedsApproval { .. }),
+            "expected NeedsApproval, got {decision:?}",
+        );
+        assert_eq!(
+            audit_line_count(&audit_path).await,
+            1,
+            "NeedsApproval should produce exactly one audit entry",
+        );
+
+        let event = last_audit_event(&audit_path).await;
+        match decision_from_event(&event) {
+            PolicyDecision::NeedsApproval { description } => {
+                assert!(
+                    description.contains("approval"),
+                    "description should mention approval: {description}",
+                );
+            }
+            other => panic!("audit entry should carry NeedsApproval, got {other:?}"),
+        }
+        let request_id = event
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("event.request_id is a string");
+        assert_eq!(request_id, expected_request_id.to_string());
+        let origin_summary = event
+            .get("origin_summary")
+            .and_then(serde_json::Value::as_str)
+            .expect("event.origin_summary is a string");
+        assert!(
+            origin_summary.contains("LocalCli"),
+            "origin_summary should reflect the origin: {origin_summary}",
+        );
+    }
+
+    /// Allow branch: direct invocation of the helper with an allowed
+    /// request must leave the audit log untouched.
+    #[tokio::test]
+    async fn evaluate_with_non_allow_audit_skips_audit_on_allow() {
+        let (conductor, audit_path, _dir) = setup_conductor_with_audit(&[]).await;
+        let req = ActionRequest::new(
+            Action::ListSessions,
+            ActionOrigin::BridgeTelegram {
+                user_id: "12345".into(),
+            },
+        );
+        let decision = conductor
+            .evaluate_with_non_allow_audit(&req)
+            .await
+            .expect("evaluate");
+        assert!(
+            matches!(decision, PolicyDecision::Allow),
+            "expected Allow, got {decision:?}",
+        );
+        assert_eq!(
+            audit_line_count(&audit_path).await,
+            0,
+            "allowed request must not produce an audit entry",
+        );
     }
 }
