@@ -68,10 +68,60 @@ impl TmuxRuntime {
         }
     }
 
+    /// Poll `tmux has-session` until the named session is gone or the
+    /// deadline expires. `kill-session` returns before tmux's internal
+    /// session table is fully updated, so a follow-up `new-session` with
+    /// the same name can race against teardown and fail with "duplicate
+    /// session". This deterministic wait closes that window.
+    ///
+    /// `has-session` exits 0 if the session is present and non-zero if
+    /// it is absent (or the tmux server itself isn't running, which
+    /// also means "gone"). A spawn-time IO error is propagated rather
+    /// than treated as "gone" so that a missing or unusable `tmux`
+    /// binary surfaces as a real failure instead of a silent pass.
+    async fn wait_until_gone(&self, title: &str, timeout: Duration) -> Result<(), RuntimeError> {
+        let target = exact_target(title);
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let output = Command::new("tmux")
+                .args(["-L", &self.server_name, "has-session", "-t", &target])
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(RuntimeError::Timeout);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Return the appropriate `ToolAdapter` for the given tool kind.
     fn get_adapter(tool: ToolKind) -> Box<dyn ToolAdapter> {
         adapter::adapter_for(tool)
     }
+}
+
+/// Build an exact-match tmux target spec for the named session's
+/// active window/pane.
+///
+/// Two pieces matter here:
+///
+/// 1. The `=` prefix forces an exact session-name match. Without it
+///    tmux falls back to prefix matching (per `tmux(1)` TARGET-SESSION),
+///    so a command aimed at `foo` could resolve to `foobar` as soon as
+///    `foo` itself is gone.
+/// 2. The trailing `:` makes the spec a valid target-pane (and
+///    target-window) as well as a target-session. `send-keys` and
+///    `capture-pane` take a target-pane and reject a bare `=foo`
+///    ("can't find pane: =foo"), but accept `=foo:`. has-session,
+///    kill-session, and list-windows accept either form.
+///
+/// Every `-t <title>` in this module funnels through this helper so
+/// that prefix-collision can't change behaviour.
+fn exact_target(title: &str) -> String {
+    format!("={title}:")
 }
 
 impl SessionRuntime for TmuxRuntime {
@@ -97,7 +147,8 @@ impl SessionRuntime for TmuxRuntime {
                 instructions: msg.clone(),
             });
             if !translated.is_empty() {
-                self.run_tmux(&["send-keys", "-t", &config.title, &translated, "Enter"])
+                let target = exact_target(&config.title);
+                self.run_tmux(&["send-keys", "-t", &target, &translated, "Enter"])
                     .await?;
             }
         }
@@ -125,7 +176,8 @@ impl SessionRuntime for TmuxRuntime {
             return Ok(());
         }
 
-        self.run_tmux(&["send-keys", "-t", &handle.title, &translated, "Enter"])
+        let target = exact_target(&handle.title);
+        self.run_tmux(&["send-keys", "-t", &target, &translated, "Enter"])
             .await?;
 
         debug!(title = %handle.title, "sent message to tmux session");
@@ -133,24 +185,19 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     async fn read_output(&self, handle: &SessionHandle) -> Result<String, CoreError> {
+        let target = exact_target(&handle.title);
         let raw = self
-            .run_tmux(&["capture-pane", "-t", &handle.title, "-p", "-S", "-100"])
+            .run_tmux(&["capture-pane", "-t", &target, "-p", "-S", "-100"])
             .await?;
         Ok(sigil_policy::normalize::strip_ansi(&raw))
     }
 
     async fn status(&self, handle: &SessionHandle) -> Result<SessionState, CoreError> {
-        // First check whether the tmux session exists at all.
-        // The server name is already passed via `-L` in run_tmux,
-        // so `-t` only needs the session name (handle.title).
+        // Use exact-match target so a sibling session whose name shares
+        // a prefix with `handle.title` can't satisfy the existence check.
+        let target = exact_target(&handle.title);
         let list_result = self
-            .run_tmux(&[
-                "list-windows",
-                "-t",
-                &handle.title,
-                "-F",
-                "#{window_activity}",
-            ])
+            .run_tmux(&["list-windows", "-t", &target, "-F", "#{window_activity}"])
             .await;
 
         if list_result.is_err() {
@@ -160,7 +207,7 @@ impl SessionRuntime for TmuxRuntime {
         // Session exists — capture pane, strip ANSI escapes, then let the
         // adapter detect state.
         let raw = self
-            .run_tmux(&["capture-pane", "-t", &handle.title, "-p", "-S", "-100"])
+            .run_tmux(&["capture-pane", "-t", &target, "-p", "-S", "-100"])
             .await?;
         let output = sigil_policy::normalize::strip_ansi(&raw);
 
@@ -178,16 +225,23 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     async fn stop(&self, handle: &SessionHandle) -> Result<(), CoreError> {
-        // Send Ctrl-C to interrupt the running process.
-        let _ = self
-            .run_tmux(&["send-keys", "-t", &handle.title, "C-c"])
-            .await;
+        let target = exact_target(&handle.title);
 
-        // Brief delay to let the interrupt propagate.
+        // Send Ctrl-C to interrupt the running process. Best-effort:
+        // gives the agent a chance to shut down gracefully before the
+        // session is killed.
+        let _ = self.run_tmux(&["send-keys", "-t", &target, "C-c"]).await;
+
+        // Brief delay to let the interrupt propagate to the foreground
+        // process before we tear the session down.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Kill the window.
-        self.run_tmux(&["kill-session", "-t", &handle.title])
+        // Kill the session.
+        self.run_tmux(&["kill-session", "-t", &target]).await?;
+
+        // Wait until tmux confirms the session is actually gone — see
+        // `wait_until_gone` for the race this closes.
+        self.wait_until_gone(&handle.title, Duration::from_secs(5))
             .await?;
 
         debug!(title = %handle.title, "stopped tmux session");
@@ -614,6 +668,75 @@ mod tests {
         let rt = TmuxRuntime::new("sigil-runtime-test-invalid");
         let result = rt.run_tmux(&["not-a-real-command"]).await;
         assert!(result.is_err(), "expected error for invalid tmux command");
+    }
+
+    #[test]
+    fn exact_target_uses_session_exact_match_form() {
+        // `=name:` is the form that resolves unambiguously for both
+        // target-session commands (has-session, kill-session) and
+        // target-pane commands (send-keys, capture-pane).
+        assert_eq!(exact_target("foo"), "=foo:");
+    }
+
+    /// Stop on `foo` must not match `foobar`. Without the `=name:`
+    /// exact-match form, tmux falls back to prefix resolution and the
+    /// teardown wait loop never sees `foo` go away.
+    #[tokio::test]
+    async fn stop_does_not_match_prefix_sibling_session() {
+        if TmuxRuntime::check_tmux().await.is_err() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+
+        let server = "sigil-runtime-test-prefix";
+        // Best-effort cleanup from any prior failed run.
+        let _ = Command::new("tmux")
+            .args(["-L", server, "kill-server"])
+            .output()
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+
+        // Create both `foo` and `foobar` on the same server. Stopping
+        // `foo` must leave `foobar` running.
+        let rt = TmuxRuntime::new(server);
+        let mk = |title: &str| SessionConfig {
+            path: path.clone(),
+            title: title.to_owned(),
+            tool: ToolKind::ClaudeCode,
+            group: None,
+            parent: None,
+            execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
+            sandboxed: false,
+            initial_message: None,
+            worktree_branch: None,
+            identity: None,
+            memory: None,
+        };
+        let foo = rt.launch(&mk("foo")).await.expect("launch foo");
+        let _foobar = rt.launch(&mk("foobar")).await.expect("launch foobar");
+
+        rt.stop(&foo).await.expect("stop foo");
+
+        // `foobar` must still be alive — i.e. `kill-session -t =foo:`
+        // didn't drag it down with prefix matching, and the
+        // wait_until_gone loop didn't time out by polling for the
+        // wrong name.
+        let still_there = Command::new("tmux")
+            .args(["-L", server, "has-session", "-t", "=foobar:"])
+            .output()
+            .await
+            .expect("has-session");
+        assert!(
+            still_there.status.success(),
+            "stopping `foo` should not affect `foobar`",
+        );
+
+        let _ = Command::new("tmux")
+            .args(["-L", server, "kill-server"])
+            .output()
+            .await;
     }
 
     #[tokio::test]
