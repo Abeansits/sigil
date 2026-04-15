@@ -8,17 +8,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-
-/// The result of normalizing a text input.
-#[derive(Clone, Debug)]
-pub struct NormalizeResult {
-    /// The cleaned text with invisible characters removed.
-    pub cleaned: String,
-    /// How many characters were stripped.
-    pub stripped_count: usize,
-    /// What categories of characters were stripped or flagged.
-    pub categories: Vec<String>,
-}
+pub use sigil_core::NormalizeResult;
 
 /// Strip ANSI escape sequences from terminal output.
 ///

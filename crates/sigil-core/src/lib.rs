@@ -11,9 +11,11 @@
 
 pub mod action;
 pub mod config;
+pub mod content;
 pub mod episode;
 pub mod error;
 pub mod id;
+pub mod normalize;
 pub mod origin;
 pub mod principal;
 pub mod protocol;
@@ -27,9 +29,15 @@ pub use config::{
     BridgeConfigSection, BridgePlatformConfig, BridgeUserEntry, MemoryConfig, MemoryConfigSection,
     parse_tier,
 };
+pub use content::{
+    ByteRange, ContentError, ContentSource, ContentType, Finding, Fingerprint,
+    REPORT_SCHEMA_VERSION, SanitizationRequirement, SanitizeReport, SanitizedContent, Severity,
+    UrlSource,
+};
 pub use episode::{EpisodeEvent, EpisodeId, EpisodeKind};
 pub use error::CoreError;
 pub use id::{GroupId, RequestId, SessionId};
+pub use normalize::NormalizeResult;
 pub use origin::ActionOrigin;
 pub use principal::{PlatformIdentity, Principal};
 pub use protocol::{AgentSignal, BridgeMessage, ConductorMessage, ReplyContext};
