@@ -170,7 +170,11 @@ where
             Action::ReadSessionOutput { session_id } => {
                 let session = self.store.get_session(session_id).await?;
                 let handle = record_to_handle(&session);
-                let output = self.runtime.read_output(&handle).await.map_err(runtime_err)?;
+                let output = self
+                    .runtime
+                    .read_output(&handle)
+                    .await
+                    .map_err(runtime_err)?;
                 Ok(DispatchResult::Text(output))
             }
             Action::ListGroups => {
@@ -230,12 +234,8 @@ where
                 )
                 .await
             }
-            Action::StartSession { session_id } => {
-                self.dispatch_start_session(*session_id).await
-            }
-            Action::StopSession { session_id } => {
-                self.dispatch_stop_session(*session_id).await
-            }
+            Action::StartSession { session_id } => self.dispatch_start_session(*session_id).await,
+            Action::StopSession { session_id } => self.dispatch_stop_session(*session_id).await,
             Action::RestartSession { session_id } => {
                 self.dispatch_restart_session(*session_id).await
             }
@@ -246,9 +246,7 @@ where
                 self.dispatch_send_message(*session_id, message.clone())
                     .await
             }
-            Action::RemoveSession { session_id } => {
-                self.dispatch_remove_session(*session_id).await
-            }
+            Action::RemoveSession { session_id } => self.dispatch_remove_session(*session_id).await,
 
             // --- T2+: Infrastructure / Privileged ---
             // These action variants are evaluated by policy but dispatched
