@@ -1840,14 +1840,17 @@ name = "sigil-core"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
+ "hmac",
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "time",
  "toml",
  "ulid",
+ "url",
 ]
 
 [[package]]
@@ -2706,6 +2709,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
