@@ -64,7 +64,15 @@ async fn status_counts_match_store_contents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store should init");
+    let store = Arc::new(Store::new(db_str).await.expect("store should init"));
+    let runtime = Arc::new(TmuxRuntime::new("sigil-test-uc2-status"));
+    let audit_path = dir.path().join("audit.jsonl");
+    let audit = Arc::new(
+        AuditLogWriter::new(&audit_path, b"uc2-key".to_vec())
+            .await
+            .expect("audit"),
+    );
+    let service = build_action_service(&store, &runtime, &audit);
 
     // Insert sessions directly into the store with different states.
     let records = [
@@ -80,12 +88,12 @@ async fn status_counts_match_store_contents() {
     }
 
     // Run status --json (it prints to stdout, we verify via store).
-    sigil_cli::commands::status::run(&store, true)
+    sigil_cli::commands::status::run(&service, true)
         .await
         .expect("status --json should succeed");
 
     // Run status (plain text).
-    sigil_cli::commands::status::run(&store, false)
+    sigil_cli::commands::status::run(&service, false)
         .await
         .expect("status should succeed");
 
@@ -122,13 +130,21 @@ async fn status_empty_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store should init");
+    let store = Arc::new(Store::new(db_str).await.expect("store should init"));
+    let runtime = Arc::new(TmuxRuntime::new("sigil-test-uc2-empty"));
+    let audit_path = dir.path().join("audit.jsonl");
+    let audit = Arc::new(
+        AuditLogWriter::new(&audit_path, b"uc2-key".to_vec())
+            .await
+            .expect("audit"),
+    );
+    let service = build_action_service(&store, &runtime, &audit);
 
-    sigil_cli::commands::status::run(&store, false)
+    sigil_cli::commands::status::run(&service, false)
         .await
         .expect("status should succeed on empty store");
 
-    sigil_cli::commands::status::run(&store, true)
+    sigil_cli::commands::status::run(&service, true)
         .await
         .expect("status --json should succeed on empty store");
 

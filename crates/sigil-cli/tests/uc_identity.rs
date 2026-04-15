@@ -178,9 +178,7 @@ async fn identity_reload_round_trip() {
 
     // ── RELOAD identity ────────────────────────────────────────────
     sigil_cli::commands::identity::run(
-        &store,
-        runtime.as_ref(),
-        &audit,
+        &service,
         IdentityCommands::Reload {
             name: title.clone(),
         },
@@ -218,9 +216,7 @@ async fn identity_reload_round_trip() {
 
     // ── SNAPSHOT identity ──────────────────────────────────────────
     sigil_cli::commands::identity::run(
-        &store,
-        runtime.as_ref(),
-        &audit,
+        &service,
         IdentityCommands::Snapshot {
             name: title.clone(),
         },
@@ -266,9 +262,7 @@ async fn identity_reload_no_spec_returns_error() {
 
     // Reload should fail with a clear error.
     let result = sigil_cli::commands::identity::run(
-        &store,
-        runtime.as_ref(),
-        &audit,
+        &service,
         IdentityCommands::Reload {
             name: title.clone(),
         },

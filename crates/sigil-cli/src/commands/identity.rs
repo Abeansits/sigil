@@ -1,46 +1,46 @@
 //! Identity subcommands — reload and snapshot.
+//!
+//! Both variants build an `Action::SendMessage` with the appropriate
+//! identity directive text and dispatch through [`ActionService`], so the
+//! real policy decision is evaluated and audited by the same pipeline
+//! that powers every other privileged CLI command.
 
-use std::sync::Arc;
+use anyhow::{Context, Result, bail};
 
-use anyhow::{Result, bail};
-
-use sigil_audit::AuditLogWriter;
-use sigil_core::protocol::ConductorMessage;
+use sigil_conductor::action_service::{ActionOutcome, ActionService, DispatchResult};
+use sigil_core::action::{Action, ActionRequest};
+use sigil_core::origin::ActionOrigin;
 use sigil_core::session::IdentitySpec;
-use sigil_core::traits::SessionRuntime;
-use sigil_store::Store;
+use sigil_core::traits::{LifecycleHooks, PolicyEngine, SessionRuntime};
 
 use crate::IdentityCommands;
-use crate::audit::log_event;
 use crate::commands::session::resolve_session;
 
 /// Route an `IdentityCommands` variant to its handler.
 ///
 /// # Errors
 ///
-/// Returns an error if any identity operation fails.
-pub async fn run<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &Arc<AuditLogWriter>,
-    cmd: IdentityCommands,
-) -> Result<()> {
+/// Returns an error if policy denies the request or the send fails.
+pub async fn run<R, P>(service: &ActionService<R, P>, cmd: IdentityCommands) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
     match cmd {
-        IdentityCommands::Reload { name } => reload(store, runtime, audit, &name).await,
-        IdentityCommands::Snapshot { name } => snapshot(store, runtime, audit, &name).await,
+        IdentityCommands::Reload { name } => reload(service, &name).await,
+        IdentityCommands::Snapshot { name } => snapshot(service, &name).await,
     }
 }
 
 /// Send a reload message to an active session, instructing it to re-read
 /// its identity files.
 #[allow(clippy::print_stdout)]
-async fn reload<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
-    name: &str,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
+async fn reload<R, P>(service: &ActionService<R, P>, name: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
     let spec = session
         .identity
@@ -48,26 +48,7 @@ async fn reload<R: SessionRuntime>(
         .ok_or_else(|| anyhow::anyhow!("session '{name}' has no identity spec configured"))?;
 
     let message = build_reload_message(spec);
-    let handle = sigil_conductor::action_service::record_to_handle(&session);
-
-    runtime
-        .send(
-            &handle,
-            ConductorMessage::TaskAssignment {
-                instructions: message,
-            },
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to send reload message: {e}"))?;
-
-    log_event(
-        audit,
-        "identity.reload",
-        "cli",
-        sigil_core::PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    dispatch_identity_send(service, session.id, message, "reload").await?;
 
     println!("Sent identity reload to '{}'.", session.title);
     Ok(())
@@ -76,42 +57,56 @@ async fn reload<R: SessionRuntime>(
 /// Send a snapshot message to an active session, instructing it to persist
 /// current state before context compaction.
 #[allow(clippy::print_stdout)]
-async fn snapshot<R: SessionRuntime>(
-    store: &Store,
-    runtime: &R,
-    audit: &AuditLogWriter,
-    name: &str,
-) -> Result<()> {
-    let session = resolve_session(store, name).await?;
+async fn snapshot<R, P>(service: &ActionService<R, P>, name: &str) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
 
     if session.identity.is_none() {
         bail!("session '{name}' has no identity spec configured");
     }
 
     let message = build_snapshot_message();
-    let handle = sigil_conductor::action_service::record_to_handle(&session);
-
-    runtime
-        .send(
-            &handle,
-            ConductorMessage::TaskAssignment {
-                instructions: message,
-            },
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to send snapshot message: {e}"))?;
-
-    log_event(
-        audit,
-        "identity.snapshot",
-        "cli",
-        sigil_core::PolicyDecision::Allow,
-        Some(session.id),
-    )
-    .await;
+    dispatch_identity_send(service, session.id, message, "snapshot").await?;
 
     println!("Sent identity snapshot to '{}'.", session.title);
     Ok(())
+}
+
+/// Build and execute a `SendMessage` action through `ActionService`.
+async fn dispatch_identity_send<R, P>(
+    service: &ActionService<R, P>,
+    session_id: sigil_core::id::SessionId,
+    message: String,
+    kind: &str,
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let request = ActionRequest::new(
+        Action::SendMessage {
+            session_id,
+            message,
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let outcome = service
+        .execute(request)
+        .await
+        .with_context(|| format!("identity {kind}"))?;
+
+    match outcome {
+        ActionOutcome::Completed(DispatchResult::Done) => Ok(()),
+        ActionOutcome::Completed(_) => bail!("unexpected dispatch result for SendMessage"),
+        ActionOutcome::Denied { reason } => bail!("policy denied: {reason}"),
+        ActionOutcome::NeedsApproval { description } => {
+            bail!("approval required: {description}")
+        }
+    }
 }
 
 /// Build the reload message listing identity files in order.

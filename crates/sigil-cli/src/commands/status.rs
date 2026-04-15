@@ -1,22 +1,40 @@
 //! The `status` command — show a summary of session counts by state.
+//!
+//! Routes through [`ActionService`] via `Action::ListSessions` so the read
+//! is policy-evaluated like every other privileged operation, even though
+//! T0 reads are expected to be allowed.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use sigil_conductor::action_service::{ActionOutcome, ActionService, DispatchResult};
+use sigil_core::action::{Action, ActionRequest};
+use sigil_core::origin::ActionOrigin;
 use sigil_core::session::SessionState;
-use sigil_store::Store;
+use sigil_core::traits::{LifecycleHooks, PolicyEngine, SessionRuntime};
 
-/// Run the status command: fetch all sessions, count by state, output
-/// as JSON or formatted text.
+/// Run the status command: fetch all sessions via `ActionService`, count
+/// by state, output as JSON or formatted text.
 ///
 /// # Errors
 ///
-/// Returns an error if the session list cannot be fetched.
+/// Returns an error if policy denies the read or the dispatch fails.
 #[allow(clippy::print_stdout)]
-pub async fn run(store: &Store, json: bool) -> Result<()> {
-    let sessions = store
-        .list_sessions()
-        .await
-        .context("failed to list sessions")?;
+pub async fn run<R, P>(service: &ActionService<R, P>, json: bool) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let request = ActionRequest::new(Action::ListSessions, ActionOrigin::LocalCli);
+    let outcome = service.execute(request).await.context("list sessions")?;
+
+    let sessions = match outcome {
+        ActionOutcome::Completed(DispatchResult::SessionList(sessions)) => sessions,
+        ActionOutcome::Completed(_) => bail!("unexpected dispatch result for ListSessions"),
+        ActionOutcome::Denied { reason } => bail!("policy denied: {reason}"),
+        ActionOutcome::NeedsApproval { description } => {
+            bail!("approval required: {description}")
+        }
+    };
 
     let mut running = 0u32;
     let mut waiting = 0u32;

@@ -52,6 +52,10 @@ pub enum DispatchResult {
     Text(String),
     /// Simple confirmation with no data payload.
     Done,
+    /// Policy allowed the action, but `ActionService` does not own its
+    /// execution. The caller is responsible for performing the side effect
+    /// (e.g., worktree git operations). Used for T2+ infrastructure actions.
+    AuthorizedNotDispatched,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +170,11 @@ where
             Action::ReadSessionOutput { session_id } => {
                 let session = self.store.get_session(session_id).await?;
                 let handle = record_to_handle(&session);
-                let output = self.runtime.read_output(&handle).await.map_err(runtime_err)?;
+                let output = self
+                    .runtime
+                    .read_output(&handle)
+                    .await
+                    .map_err(runtime_err)?;
                 Ok(DispatchResult::Text(output))
             }
             Action::ListGroups => {
@@ -226,12 +234,8 @@ where
                 )
                 .await
             }
-            Action::StartSession { session_id } => {
-                self.dispatch_start_session(*session_id).await
-            }
-            Action::StopSession { session_id } => {
-                self.dispatch_stop_session(*session_id).await
-            }
+            Action::StartSession { session_id } => self.dispatch_start_session(*session_id).await,
+            Action::StopSession { session_id } => self.dispatch_stop_session(*session_id).await,
             Action::RestartSession { session_id } => {
                 self.dispatch_restart_session(*session_id).await
             }
@@ -242,14 +246,17 @@ where
                 self.dispatch_send_message(*session_id, message.clone())
                     .await
             }
-            Action::RemoveSession { session_id } => {
-                self.dispatch_remove_session(*session_id).await
-            }
+            Action::RemoveSession { session_id } => self.dispatch_remove_session(*session_id).await,
 
             // --- T2+: Infrastructure / Privileged ---
             // These action variants are evaluated by policy but dispatched
             // by the caller (worktree commands, host operations, etc.).
             // The ActionService ensures they went through policy.
+            //
+            // This list is intentionally explicit and the match uses a
+            // fail-closed catch-all below rather than a wildcard so that a
+            // newly added `Action` variant cannot silently look like a
+            // successful authorized-but-not-dispatched execution.
             Action::CreateWorktree { .. }
             | Action::FinishWorktree { .. }
             | Action::SetSessionParent { .. }
@@ -262,9 +269,17 @@ where
             | Action::ExecuteHostCommand { .. }
             | Action::RestartService { .. }
             | Action::ExternalNetworkWrite { .. }
-            | Action::BreakGlass { .. }
-            // Future variants: policy-approved but not dispatched here.
-            | _ => Ok(DispatchResult::Done),
+            | Action::BreakGlass { .. } => Ok(DispatchResult::AuthorizedNotDispatched),
+
+            // Fail closed: an unknown variant (added to `Action` but not
+            // wired into this match) must not be silently reported as a
+            // successful authorized dispatch.
+            unknown => Err(ConductorError::Internal {
+                message: format!(
+                    "ActionService::dispatch: unsupported action variant {unknown:?}; \
+                     add an explicit arm in action_service::dispatch()"
+                ),
+            }),
         }
     }
 
@@ -596,7 +611,7 @@ fn runtime_err(e: sigil_core::CoreError) -> ConductorError {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::panic, clippy::wildcard_enum_match_arm)]
 
     use std::path::PathBuf;
 
@@ -690,5 +705,158 @@ mod tests {
             description: "test".into(),
         };
         assert!(matches!(needs, ActionOutcome::NeedsApproval { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch tests — verify T2+ actions return AuthorizedNotDispatched and
+    // every `execute` call produces an audit entry (allow/deny).
+    // -----------------------------------------------------------------------
+
+    use sigil_audit::AuditLogWriter;
+    use sigil_core::error::CoreError;
+    use sigil_core::origin::ActionOrigin;
+    use sigil_core::protocol::ConductorMessage;
+    use sigil_core::session::{IdentitySpec, SessionConfig, SessionHandle};
+
+    struct StubRuntime;
+
+    impl SessionRuntime for StubRuntime {
+        async fn launch(&self, _config: &SessionConfig) -> Result<SessionHandle, CoreError> {
+            Err(CoreError::Runtime {
+                message: "stub: launch unused".into(),
+            })
+        }
+
+        async fn send(
+            &self,
+            _handle: &SessionHandle,
+            _msg: ConductorMessage,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn read_output(&self, _handle: &SessionHandle) -> Result<String, CoreError> {
+            Ok(String::new())
+        }
+
+        async fn status(&self, _handle: &SessionHandle) -> Result<SessionState, CoreError> {
+            Ok(SessionState::Stopped)
+        }
+
+        async fn stop(&self, _handle: &SessionHandle) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    impl LifecycleHooks for StubRuntime {
+        async fn register_identity_hooks(
+            &self,
+            _handle: &SessionHandle,
+            _spec: &IdentitySpec,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    struct AllowPolicy;
+
+    impl PolicyEngine for AllowPolicy {
+        async fn evaluate(&self, _request: &ActionRequest) -> Result<PolicyDecision, CoreError> {
+            Ok(PolicyDecision::Allow)
+        }
+    }
+
+    struct DenyPolicy;
+
+    impl PolicyEngine for DenyPolicy {
+        async fn evaluate(&self, _request: &ActionRequest) -> Result<PolicyDecision, CoreError> {
+            Ok(PolicyDecision::Deny {
+                reason: "denied-by-test".into(),
+            })
+        }
+    }
+
+    async fn build_test_service<P: PolicyEngine>(
+        policy: P,
+    ) -> (ActionService<StubRuntime, P>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit = Arc::new(
+            AuditLogWriter::new(&dir.path().join("audit.jsonl"), b"t".to_vec())
+                .await
+                .expect("audit"),
+        );
+        let store = Arc::new(Store::new_in_memory().await.expect("store"));
+        let runtime = Arc::new(StubRuntime);
+        (ActionService::new(policy, runtime, audit, store), dir)
+    }
+
+    #[tokio::test]
+    async fn create_worktree_returns_authorized_not_dispatched() {
+        let (service, _dir) = build_test_service(AllowPolicy).await;
+        let sid = SessionId::new();
+        let request = ActionRequest::new(
+            Action::CreateWorktree {
+                session_id: sid,
+                branch: "feature/test".into(),
+            },
+            ActionOrigin::LocalCli,
+        );
+
+        let outcome = service.execute(request).await.expect("execute");
+        assert!(matches!(
+            outcome,
+            ActionOutcome::Completed(DispatchResult::AuthorizedNotDispatched)
+        ));
+    }
+
+    #[tokio::test]
+    async fn finish_worktree_returns_authorized_not_dispatched() {
+        let (service, _dir) = build_test_service(AllowPolicy).await;
+        let sid = SessionId::new();
+        let request = ActionRequest::new(
+            Action::FinishWorktree {
+                session_id: sid,
+                merge: true,
+            },
+            ActionOrigin::LocalCli,
+        );
+
+        let outcome = service.execute(request).await.expect("execute");
+        assert!(matches!(
+            outcome,
+            ActionOutcome::Completed(DispatchResult::AuthorizedNotDispatched)
+        ));
+    }
+
+    #[tokio::test]
+    async fn t2_action_under_deny_policy_returns_denied() {
+        let (service, _dir) = build_test_service(DenyPolicy).await;
+        let request = ActionRequest::new(
+            Action::CreateWorktree {
+                session_id: SessionId::new(),
+                branch: "feature/blocked".into(),
+            },
+            ActionOrigin::LocalCli,
+        );
+
+        let outcome = service.execute(request).await.expect("execute");
+        match outcome {
+            ActionOutcome::Denied { reason } => assert_eq!(reason, "denied-by-test"),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_sessions_flows_through_action_service() {
+        let (service, _dir) = build_test_service(AllowPolicy).await;
+        let request = ActionRequest::new(Action::ListSessions, ActionOrigin::LocalCli);
+
+        let outcome = service.execute(request).await.expect("execute");
+        match outcome {
+            ActionOutcome::Completed(DispatchResult::SessionList(list)) => {
+                assert!(list.is_empty());
+            }
+            other => panic!("expected SessionList, got {other:?}"),
+        }
     }
 }

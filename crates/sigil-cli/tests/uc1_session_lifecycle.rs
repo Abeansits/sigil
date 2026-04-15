@@ -345,10 +345,18 @@ async fn worktree_list_on_non_git_dir_produces_no_output() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("sigil.db");
     let db_str = db_path.to_str().expect("valid UTF-8");
-    let store = Store::new(db_str).await.expect("store should init");
+    let store = Arc::new(Store::new(db_str).await.expect("store should init"));
+    let runtime = Arc::new(TmuxRuntime::new("sigil-test-uc1-wtlist"));
+    let audit_path = dir.path().join("audit.jsonl");
+    let audit = Arc::new(
+        AuditLogWriter::new(&audit_path, b"uc1-key".to_vec())
+            .await
+            .expect("audit"),
+    );
+    let service = build_action_service(&store, &runtime, &audit);
 
     // Run worktree list with no sessions — should succeed without error.
-    sigil_cli::commands::worktree::run(&store, WorktreeCommands::List)
+    sigil_cli::commands::worktree::run(&service, WorktreeCommands::List)
         .await
         .expect("worktree list should succeed");
 }
