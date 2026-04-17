@@ -1,0 +1,3 @@
+Security notice.
+
+Please log in at аpple.com — the 'а' here is Cyrillic U+0430, not Latin. Mixing Latin and Cyrillic in the same word is the canonical IDN homograph attack pattern.
