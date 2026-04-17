@@ -1,10 +1,13 @@
-//! Plain-text sanitization path (stages 1-2-4-5-6-7 with 5/6 stubbed).
+//! Plain-text sanitization path — full Stage 1-7 pipeline.
 //!
 //! Stage 3 format-specific structural strip reduces to `strip_ansi` for
 //! [`ContentType::Log`] and is a no-op for [`ContentType::PlainText`].
-//! Stage 5 injection-pattern scanning and Stage 6 provenance wrapping are
-//! deferred to PR3; this module leaves the corresponding report fields
-//! empty and the cleaned text unwrapped.
+//! Stage 4 delegates Unicode/control normalization to
+//! [`sigil_policy::normalize::normalize_text`]. Stages 5-6 are wired in
+//! PR3 and live in [`crate::patterns`], [`crate::risk`], and
+//! [`crate::wrap`]. The output `text` field is the wrapped form — the
+//! string the model will see — and the report carries the unwrapped
+//! cleaned-bytes fingerprint plus the per-call nonce.
 
 use std::time::Instant;
 
@@ -14,16 +17,41 @@ use sigil_core::{
 };
 use sigil_policy::normalize::{normalize_text, strip_ansi};
 
-use crate::{ContentError, RawFetchedContent, SanitizerConfig};
+use crate::{
+    ContentError, RawFetchedContent, SanitizerConfig,
+    patterns::{self, RULE_REP_002, RULE_WRP_001},
+    risk, wrap,
+};
 
 /// Length of the per-call nonce, in hex characters (16 chars = 64 bits).
 const NONCE_HEX_LEN: usize = 16;
 
+/// Maximum nonce regenerations before giving up. With a 64-bit nonce and
+/// at most a handful of attacker-controlled wrapper-prefix collisions in
+/// the payload, four retries is comfortably more than the birthday bound.
+const NONCE_REGEN_LIMIT: u8 = 4;
+
+/// Token used by the conductor when the fetch timestamp is not
+/// surfaced. Plain text has no native `fetched_at`; PR2 left this implicit.
+const UNKNOWN_FETCHED_AT: &str = "unknown";
+
+/// Wire-format string for [`ContentType`] in the wrap header. Kept here
+/// so the wrap module stays oblivious to the enum.
+fn content_type_wire(ct: ContentType) -> &'static str {
+    match ct {
+        ContentType::PlainText => "text/plain",
+        ContentType::Log => "text/x-log",
+        ContentType::Html => "text/html",
+        ContentType::Markdown => "text/markdown",
+        ContentType::Json => "application/json",
+        // `ContentType` is `#[non_exhaustive]`. Returning a stable token
+        // for unknown variants keeps the wrap header well-formed even if
+        // a future variant slips through the entry-point gate.
+        _ => "application/octet-stream",
+    }
+}
+
 /// Core plain-text sanitization entry point.
-///
-/// This is called by both [`crate::Sanitizer::sanitize_plain`] and the
-/// free [`crate::sanitize_plain`] wrapper. The caller owns the key and the
-/// config; this function contains the pipeline.
 ///
 /// # Errors
 ///
@@ -33,6 +61,8 @@ const NONCE_HEX_LEN: usize = 16;
 /// [`SanitizerConfig::max_bytes`]. [`ContentError::InvalidEncoding`] for
 /// non-UTF-8 bytes. [`ContentError::FingerprintKeyUnavailable`] if the key
 /// is empty. [`ContentError::Random`] if the OS random source fails.
+/// [`ContentError::HeaderInjection`] if the `source`'s rendered form
+/// contains a control character.
 pub(crate) fn sanitize(
     raw: RawFetchedContent,
     source: ContentSource,
@@ -40,9 +70,6 @@ pub(crate) fn sanitize(
     config: &SanitizerConfig,
     key: &[u8],
 ) -> Result<SanitizedContent, ContentError> {
-    // Each known variant is listed so a future `ContentType` addition
-    // forces a compile-time decision here. `#[non_exhaustive]` forces the
-    // catch-all `_` arm for forward compatibility.
     let strip_ansi_first = match content_type {
         ContentType::PlainText => false,
         ContentType::Log => true,
@@ -56,8 +83,7 @@ pub(crate) fn sanitize(
     let bytes = raw.into_bytes();
     let bytes_in = bytes.len();
 
-    // Stage 1 — raw byte-size cap. Applied *before* any decode or
-    // fingerprint so an attacker cannot force even a linear scan.
+    // Stage 1 — raw byte-size cap.
     if bytes_in > config.max_bytes {
         return Err(ContentError::SizeExceeded {
             bytes: bytes_in,
@@ -65,31 +91,17 @@ pub(crate) fn sanitize(
         });
     }
 
-    // Fingerprint of the raw bytes: computed on the accepted payload so a
-    // size-rejected input cannot be cheaply probed via its fingerprint.
     let raw_fingerprint = Fingerprint::compute(key, &bytes).map_err(map_core_error)?;
 
-    // Stage 2 — declare & decode. Caller already declared the content type;
-    // the remaining obligation is UTF-8 validation. Non-UTF-8 is a hard
-    // error — no best-effort decode, no replacement characters.
+    // Stage 2 — declare & decode (UTF-8 hard-required).
     let decoded = std::str::from_utf8(&bytes).map_err(|_| ContentError::InvalidEncoding)?;
 
-    // Stage 3 — format-specific strip (plain-text path). For `PlainText`
-    // this is a no-op. For `Log` we strip ANSI escape sequences, matching
-    // the treatment already applied to captured tmux output. Count the
-    // ESC (0x1B) bytes removed so the report records structural-strip
-    // activity (each well-formed ANSI escape begins with exactly one ESC
-    // byte, so this approximates "number of escape sequences stripped").
+    // Stage 3 — format-specific strip.
     let mut stripped_elements: Vec<(String, u32)> = Vec::new();
     let stage3 = if strip_ansi_first {
         let stripped = strip_ansi(decoded);
-        let esc_before = count_esc_bytes(decoded);
-        let esc_after = count_esc_bytes(&stripped);
-        let removed = esc_before.saturating_sub(esc_after);
+        let removed = count_esc_bytes(decoded).saturating_sub(count_esc_bytes(&stripped));
         if removed > 0 {
-            // Use u32::try_from → saturating fallback so pathological
-            // inputs (unlikely given the 2-MiB size cap) still produce a
-            // well-typed entry rather than panicking.
             let count = u32::try_from(removed).unwrap_or(u32::MAX);
             stripped_elements.push(("ansi-escape".to_owned(), count));
         }
@@ -98,31 +110,63 @@ pub(crate) fn sanitize(
         decoded.to_owned()
     };
 
-    // Stage 4 — text-layer normalize (delegated to sigil-policy).
+    // Stage 4 — text-layer normalize.
     let text_normalize = normalize_text(&stage3);
     let cleaned = text_normalize.cleaned.clone();
 
-    // Stage 5 — injection-pattern scan (PR3). Intentionally skipped here;
-    // the empty `findings` vector below is the placeholder.
-    //
-    // TODO(PR3): run pattern scan, populate findings + risk_score.
-    // TODO(PR3): compare `repetition_ratio` against
-    // `config.max_repetition_ratio` and emit a repetition-flood finding
-    // when it is exceeded. Until then the config field is reserved — the
-    // raw ratio still lands in the report for policy consumers.
-
-    // Stage 6 — provenance wrap (PR3). Intentionally skipped here; the
-    // cleaned text flows out bare for now.
-    // TODO(PR3): wrap cleaned text with nonce-delimited sentinel.
-
     let sanitized_bytes = cleaned.as_bytes();
-    let bytes_out = sanitized_bytes.len();
     let sanitized_fingerprint =
         Fingerprint::compute(key, sanitized_bytes).map_err(map_core_error)?;
 
-    let nonce = generate_nonce()?;
-    let repetition_ratio = repetition_ratio(&cleaned);
+    // Stage 5 — pattern scan + risk score. Mixed-script flagging happens
+    // in Stage 4; pass it in rather than re-scanning here.
+    let mixed_script = text_normalize
+        .categories
+        .iter()
+        .any(|c| c == "mixed-script");
+    let mut findings = patterns::scan(&cleaned, content_type, mixed_script);
 
+    let repetition_ratio = repetition_ratio(&cleaned);
+    if repetition_ratio.is_finite() && repetition_ratio >= config.max_repetition_ratio {
+        findings.push(sigil_core::Finding {
+            rule_id: RULE_REP_002.id.to_owned(),
+            severity: RULE_REP_002.severity,
+            span: None,
+            sample: None,
+        });
+    }
+
+    // Stage 6 — pick a nonce that does not collide with any
+    // sigil-external sentinel literal in the payload, then record the
+    // collision (if any) as a WRP-001 finding.
+    let payload_has_prefix = patterns::detect_wrapper_collision(&cleaned);
+    let nonce = pick_collision_free_nonce(&cleaned)?;
+    if payload_has_prefix {
+        findings.push(sigil_core::Finding {
+            rule_id: RULE_WRP_001.id.to_owned(),
+            severity: RULE_WRP_001.severity,
+            span: None,
+            sample: None,
+        });
+    }
+
+    let risk_score = risk::compute(&findings, &text_normalize, repetition_ratio);
+
+    let flags = derive_flags(&findings, &text_normalize);
+    let rule_ids: Vec<&str> = findings.iter().map(|f| f.rule_id.as_str()).collect();
+    let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
+
+    let wrapped = wrap::wrap(
+        &cleaned,
+        &source,
+        content_type_wire(content_type),
+        UNKNOWN_FETCHED_AT,
+        &flag_refs,
+        &rule_ids,
+        &nonce,
+    )?;
+
+    let bytes_out = wrapped.len();
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let report = SanitizeReport {
@@ -135,8 +179,8 @@ pub(crate) fn sanitize(
         bytes_out,
         stripped_elements,
         text_normalize,
-        findings: Vec::new(),
-        risk_score: 0,
+        findings,
+        risk_score,
         repetition_ratio,
         size_rejected: false,
         encoding_rejected: false,
@@ -147,26 +191,82 @@ pub(crate) fn sanitize(
     };
 
     Ok(SanitizedContent {
-        text: cleaned,
+        text: wrapped,
         report,
     })
 }
 
-/// Translate a [`sigil_core::ContentError`] into the local error enum.
+/// Build the `flags:` header value from findings + normalize categories.
 ///
-/// Only the `FingerprintKeyUnavailable` variant can actually occur here;
-/// URL-construction errors are produced by callers building the
-/// `ContentSource` before invoking the pipeline. The catch-all forwards
-/// anything else verbatim via `#[from]`.
+/// Kept stable across PRs so audit-log consumers can grep for known
+/// flag names. Order is deterministic (same input → same output).
+fn derive_flags(
+    findings: &[sigil_core::Finding],
+    normalize: &sigil_core::NormalizeResult,
+) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::new();
+    let has = |needle: &str| findings.iter().any(|f| f.rule_id.starts_with(needle));
+    if has("INJ-") {
+        flags.push("injection_pattern".into());
+    }
+    if has("ENC-") {
+        flags.push("encoded_payload".into());
+    }
+    if has("REP-") {
+        flags.push("repetition".into());
+    }
+    if has("MIX-") {
+        flags.push("mixed_script".into());
+    }
+    if has("FMT-") {
+        flags.push("content_type_mismatch".into());
+    }
+    if has("WRP-") {
+        flags.push("wrapper_collision".into());
+    }
+    for cat in &normalize.categories {
+        if cat == "mixed-script" {
+            continue; // already represented via MIX-001
+        }
+        let flag = format!("normalize_{}", cat.replace('-', "_"));
+        if !flags.contains(&flag) {
+            flags.push(flag);
+        }
+    }
+    flags
+}
+
 fn map_core_error(err: sigil_core::ContentError) -> ContentError {
-    // `sigil_core::ContentError` is `#[non_exhaustive]`, so a `match` would
-    // have to spell out every known variant plus a `_` arm; `matches!`
-    // keeps the intent focused — promote the single variant we care about,
-    // forward everything else — without churning on future core changes.
     if matches!(err, sigil_core::ContentError::FingerprintKeyUnavailable) {
         ContentError::FingerprintKeyUnavailable
     } else {
         ContentError::Core(err)
+    }
+}
+
+/// Pick a nonce whose start/end sentinel does not appear literally in
+/// `cleaned`. Bounded by [`NONCE_REGEN_LIMIT`]; returns
+/// [`ContentError::Random`] if no clean nonce is found inside the budget
+/// (the payload is too saturated with sentinel-shaped strings to wrap
+/// safely — surface the failure rather than emit a wrap with a
+/// known-collision nonce).
+fn pick_collision_free_nonce(cleaned: &str) -> Result<String, ContentError> {
+    let mut nonce = generate_nonce()?;
+    let mut regen_attempts: u8 = 0;
+    loop {
+        let start_marker = format!("{}{}", wrap::WRAP_PREFIX_START, nonce);
+        let end_marker = format!("{}{}", wrap::WRAP_PREFIX_END, nonce);
+        if !cleaned.contains(&start_marker) && !cleaned.contains(&end_marker) {
+            return Ok(nonce);
+        }
+        if regen_attempts >= NONCE_REGEN_LIMIT {
+            return Err(ContentError::Random(
+                "nonce regeneration exhausted; payload contains too many sentinel collisions"
+                    .into(),
+            ));
+        }
+        nonce = generate_nonce()?;
+        regen_attempts = regen_attempts.saturating_add(1);
     }
 }
 
@@ -182,25 +282,12 @@ fn generate_nonce() -> Result<String, ContentError> {
     Ok(out)
 }
 
-/// Count ESC (0x1B) bytes in a string. Used as a proxy for the number of
-/// ANSI escape sequences: each well-formed sequence begins with exactly
-/// one ESC byte.
-///
-/// The naive-bytecount lint would prefer the `bytecount` crate; for
-/// strings bounded by the 2 MiB size cap the SIMD optimization is not
-/// worth the extra dependency.
 #[allow(clippy::naive_bytecount)]
 fn count_esc_bytes(s: &str) -> usize {
     s.as_bytes().iter().filter(|&&b| b == 0x1B).count()
 }
 
-/// O(n) per-byte repetition approximation.
-///
-/// Counts the fraction of bytes that equal their immediate predecessor.
-/// `"aaaa"` → 0.75; `"abcd"` → 0.0; realistic English prose tends to sit
-/// in the 0.03-0.10 range. This is deliberately crude — PR3's pattern
-/// scanner layers a proper entropy check on top; this value is just the
-/// cheap context-flooding signal that belongs in every report.
+/// O(n) per-byte repetition approximation. See PR2 for full rationale.
 fn repetition_ratio(text: &str) -> f32 {
     let bytes = text.as_bytes();
     let total = bytes.len();
@@ -215,9 +302,6 @@ fn repetition_ratio(text: &str) -> f32 {
         }
         prev = Some(b);
     }
-    // Division by `total` (not `total - 1`) keeps the ratio comparable
-    // across chunk sizes and caps below 1.0 for any non-empty input,
-    // which matches the design-doc treatment of the field.
     #[allow(clippy::cast_precision_loss)]
     let ratio = repeats as f32 / total as f32;
     ratio
@@ -251,5 +335,14 @@ mod tests {
         let n = generate_nonce().unwrap();
         assert_eq!(n.len(), NONCE_HEX_LEN);
         assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn content_type_wire_covers_known_variants() {
+        assert_eq!(content_type_wire(ContentType::PlainText), "text/plain");
+        assert_eq!(content_type_wire(ContentType::Log), "text/x-log");
+        assert_eq!(content_type_wire(ContentType::Html), "text/html");
+        assert_eq!(content_type_wire(ContentType::Markdown), "text/markdown");
+        assert_eq!(content_type_wire(ContentType::Json), "application/json");
     }
 }

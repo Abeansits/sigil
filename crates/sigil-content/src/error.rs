@@ -45,6 +45,25 @@ pub enum ContentError {
     #[error("random source unavailable: {0}")]
     Random(String),
 
+    /// A wrap-header value contained a control character (CR, LF, NUL,
+    /// DEL, or other byte `< 0x20`). Anti header-injection guard. Same
+    /// class of bug as HTTP response splitting; we refuse at the
+    /// serializer rather than try to escape.
+    #[error("header injection attempt in field {field} at byte offset {offset}")]
+    HeaderInjection {
+        /// Header field name that contained the control character.
+        field: &'static str,
+        /// Byte offset within the offending value where the control
+        /// character was found.
+        offset: usize,
+    },
+
+    /// Wrap assembly hit an unexpected `fmt::Write` failure. Should never
+    /// happen with `String` but the `write!` API returns `Result`, so the
+    /// error type carries the underlying message for diagnostics.
+    #[error("wrap assembly failed: {0}")]
+    WrapAssembly(String),
+
     /// An error from [`sigil_core`] propagated verbatim.
     #[error("core content error: {0}")]
     Core(#[from] sigil_core::ContentError),
