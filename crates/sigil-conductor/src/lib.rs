@@ -906,8 +906,7 @@ mod tests {
     async fn audit_line_count(path: &std::path::Path) -> usize {
         tokio::fs::read_to_string(path)
             .await
-            .map(|s| s.lines().filter(|l| !l.is_empty()).count())
-            .unwrap_or(0)
+            .map_or(0, |s| s.lines().filter(|l| !l.is_empty()).count())
     }
 
     /// Read the last chained entry's event payload as generic JSON. Returning

@@ -412,7 +412,7 @@ HEAD abc1234
         let wt_path = WorktreeManager::worktree_path(repo, branch);
 
         let create_result = WorktreeManager::create(repo, branch, &wt_path).await;
-        assert!(create_result.is_ok(), "create failed: {create_result:?}",);
+        assert!(create_result.is_ok(), "create failed: {create_result:?}");
 
         // List worktrees — should contain the main and the new one.
         let list_result = WorktreeManager::list(repo).await;
@@ -432,7 +432,7 @@ HEAD abc1234
 
         // Finish the worktree (with merge so branch -d succeeds).
         let finish_result = WorktreeManager::finish(repo, branch, &wt_path, true).await;
-        assert!(finish_result.is_ok(), "finish failed: {finish_result:?}",);
+        assert!(finish_result.is_ok(), "finish failed: {finish_result:?}");
 
         // After removal, listing should no longer contain the branch.
         let list_after = WorktreeManager::list(repo)
