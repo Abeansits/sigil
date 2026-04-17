@@ -26,11 +26,9 @@ pub fn validate_path(path: &Path, allowed_roots: &[PathBuf]) -> Result<PathBuf, 
 
     // Canonicalize the roots too so that symlinks (e.g., /var ->
     // /private/var on macOS) don't cause false negatives.
-    let root_matches = allowed_roots.iter().any(|root| {
-        std::fs::canonicalize(root)
-            .map(|cr| canonical.starts_with(cr))
-            .unwrap_or(false)
-    });
+    let root_matches = allowed_roots
+        .iter()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|cr| canonical.starts_with(cr)));
 
     if root_matches {
         Ok(canonical)
