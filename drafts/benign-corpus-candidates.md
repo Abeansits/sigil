@@ -231,11 +231,12 @@ Rule IDs match `docs/design/content-sanitization.md` §Stage 5. Expected pattern
 - **Summary:** Answers explain sandbox flags and their limits. Quotes `<iframe sandbox="allow-scripts">` examples.
 - **Likely trips:** prose `<iframe>`, `<script>`. Moderate.
 
-### C8. "How do I protect against SQL injection in Node.js?"
-- **URL:** https://stackoverflow.com/questions/8899802/
-- **Date:** 2012, actively updated
-- **Summary:** Parameterized-query Q&A. No HTML patterns; possibly mentions `1 OR 1=1` style payloads in prose.
-- **Likely trips:** Near-zero. Control fixture for the "plain security Q&A" case.
+### C8. "Preventing SQL injection in Node.js"
+- **URL:** https://stackoverflow.com/questions/15778572/
+- **Date:** 2013 (tagged `sql-injection`, `node.js`; score 112, 5 answers)
+- **Summary:** Canonical Stack Overflow Q&A on preventing SQL injection from a Node.js app. Answers walk through `mysql` driver escaping, parameterized placeholders (`?`), and `mysql2` prepared statements. No HTML patterns; injection-payload discussion is prose (`?` placeholder examples, `'1 OR 1=1'` mentioned once or twice at most).
+- **Likely trips:** Near-zero. Control fixture for the "plain security Q&A" case — pairs with `A8` and `B2` as the three low-density anchors Codex recommended.
+- **Substitution rationale:** The prior URL `/questions/8899802/` was `How do I do a bulk insert in mySQL using node.js` (not injection defense) — OpenHands-flagged mismatch during PR review. Replaced with the correctly-scoped Node/sql-injection thread at `/questions/15778572/`.
 
 ### C9. "Base64 encoding in the browser without a library"
 - **URL:** https://stackoverflow.com/questions/246801/
