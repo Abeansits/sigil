@@ -1,8 +1,9 @@
 # Benign Corpus Candidates — PR3 FP-Rate Gate
 
 **Date:** 2026-04-16
-**Target:** 20 posts selected from 30 candidates below (Sebastian picks).
+**Target:** 20 posts selected from 30 candidates below.
 **Spec:** `~/.agent-deck/conductor/ops/WORKQUEUE.md` → "Sanitize PR3".
+**Curation:** Vigil (per Sebastian's delegation 2026-04-17). See `## Selected 20` section.
 
 ## Selection goals
 
@@ -11,6 +12,28 @@
 - Target distribution: 10 security-research blogs + 10 pentest/writeup articles + 10 Stack Overflow Q&As.
 - Hard constraint: `measured_hits ≤ baseline_hits + 1` on the final 20 at `risk_score ≥ 50`.
 - Hard constraint: rule `FMT-001` (Content-Type mismatch, High) must have **zero hits**.
+
+## Selected 20 (Vigil pick — 2026-04-17)
+
+Sebastian delegated final curation. Adopted Codex's `9 blog / 8 pentest / 3 SO` skew over the original `10/10/10` (blog/pentest bring more pattern density per URL; SO URLs have weaker density and more editorial churn).
+
+**Blogs (9):** A1, A2, A3, A4, A5, A6, A7, A8, A10
+- Dropped A9 (Project Zero). Low-density anchor role already covered by A8 (Krebs), and A10 (OWASP Unicode Encoding) is the more canonical ENC-002 stressor than A9's hex blobs.
+
+**Pentest (8):** B1, B2, B3, B4, B5, B6, B8, B10
+- Dropped B7 (Orange Tsai) — URL/SSRF focused, less overlap with our INJ/ENC/MIX rules.
+- Dropped B9 (VulnHub Kioptrix) — redundant anchor; B2 (0xdf HTB Jerry) is the stronger near-zero control in this bucket.
+
+**Stack Overflow (3):** C1, C8, C9
+- C9 is essential: unique ENC-001 base64-shape calibration.
+- C1 is the canonical prose-`<script>` sanitization Q&A.
+- C8 is the anchor (Codex recommendation + density-map near-zero).
+
+**Shape:** 9 high/targeted-density blogs + 8 mixed pentest (incl. 3 targeted coverage fixtures B3 REP, B4/B5 MIX, B8 INJ-006 role-tokens) + 3 SO (1 ENC calibration, 1 mid-density XSS prose, 1 anchor). Three near-zero anchors total: A8 + B2 + C8.
+
+**FMT-001 risk:** Only B6 (PortSwigger request smuggling) has raw-HTTP prose that could theoretically trip FMT-001. Per the Notes section below: if it fires, that's a rule-calibration finding, not a fixture rejection. Keep B6, tune the rule.
+
+---
 
 ## Exclusions (already filtered from this draft)
 
