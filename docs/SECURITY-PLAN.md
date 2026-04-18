@@ -34,7 +34,7 @@ Implemented today:
 - bridge text normalization for zero-width, tag, directional-override, variation-selector, and control characters
 - mixed-script detection
 - ANSI stripping for tmux output before higher-level parsing
-- `sigil-content` sanitization pipeline for external content — plain-text, HTML, Markdown, and JSON paths with format-specific structural strip, text-layer normalize (composed from `sigil-policy::normalize`), injection-pattern scan with stable rule IDs, nonce-delimited provenance wrap, and keyed-HMAC fingerprints. Policy-layer `SanitizationRequirement` enforcement lands with PR6; conductor + MCP wiring lands with PR7 (pending PR6 merge).
+- `sigil-content` sanitization pipeline for external content — plain-text, HTML, Markdown, and JSON paths with format-specific structural strip, text-layer normalize (composed from `sigil-policy::normalize`), injection-pattern scan with stable rule IDs, nonce-delimited provenance wrap, and keyed-HMAC fingerprints. Policy-layer `SanitizationRequirement` enforcement (`Evaluator::evaluate_result`) gates actions that declare `Required(content_type)` on a matching `SanitizeReport`. Conductor dispatch for `Action::FetchExternalContent` runs fetch → sanitize → gate → audit with the report attached. MCP's `fetch_url` tool runs the same pipeline inline before the cleaned text reaches the agent.
 
 Current limitation:
 
@@ -83,7 +83,7 @@ Implemented:
 | Audit logging | Implemented and wired into CLI/conductor |
 | Grant persistence | Implemented |
 | Grant enforcement | Implemented |
-| Web content sanitization | Implemented (Phase 1 — plain-text, HTML, Markdown, JSON in `sigil-content`; conductor + MCP wiring in PR7 pending PR6) |
+| Web content sanitization | Implemented (Phase 1 — plain-text, HTML, Markdown, JSON in `sigil-content`; conductor + MCP wiring + end-to-end integration test in PR7) |
 | Content provenance tagging | Implemented (nonce-delimited in-band wrap + keyed-HMAC fingerprints in audit log) |
 | Key management | Keychain-backed on macOS (audit + sanitizer fingerprint HMAC key) |
 

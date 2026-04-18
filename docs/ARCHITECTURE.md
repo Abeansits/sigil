@@ -290,38 +290,47 @@ The `sigil-content` crate implements the ingest-edge sanitization pipeline descr
 ### Production flow
 
 ```text
-external bytes
+Action::FetchExternalContent { url, content_type }
       │
       ▼
 ┌────────────────────────────────────────────┐
-│ sigil-content::Sanitizer                   │
-│  Stage 1: size cap (pre-decode)            │
-│  Stage 2: declared-type decode (no sniff)  │
-│  Stage 3: format-specific strip            │
-│           (html / markdown / json / log)   │
-│  Stage 4: text-layer normalize             │
-│           (sigil-policy::normalize)        │
-│  Stage 5: injection-pattern scan           │
-│           (flag, don't strip)              │
-│  Stage 6: nonce-delimited provenance wrap  │
-│  Stage 7: keyed-HMAC fingerprint + report  │
+│ ActionService::execute                     │
+│   1. policy.evaluate  → Allow              │
+│   2. dispatch_fetch_external_content:      │
+│        fetcher.fetch(url) → bytes          │
+│                                            │
+│        ┌────────────────────────────────┐  │
+│        │ sigil-content::Sanitizer       │  │
+│        │  Stage 1: size cap (pre-decode)│  │
+│        │  Stage 2: declared-type decode │  │
+│        │  Stage 3: format-specific strip│  │
+│        │  Stage 4: text-layer normalize │  │
+│        │  Stage 5: injection scan       │  │
+│        │  Stage 6: nonce provenance wrap│  │
+│        │  Stage 7: HMAC fingerprints    │  │
+│        └────────────────────────────────┘  │
+│        → SanitizedContent { text, report } │
+│                                            │
+│   3. policy.evaluate_result(req, result)   │
+│      → SanitizationRequirement gate        │
+│   4. audit { decision, sanitize_report }   │
 └────────────────────────────────────────────┘
       │
-      ▼
-SanitizedContent { text, report }
-      │
       ▼                               ▼
-agent prompt                    audit log + policy evaluator
-(wrapped cleaned text)          (SanitizeReport + fingerprints)
+agent prompt / tool_result      HMAC-chained audit log
+(wrapped cleaned text + report) (SanitizeReport + fingerprints)
 ```
+
+Raw fetched bytes never leave the `dispatch_fetch_external_content` boundary. The sanitizer consumes them by value (`RawFetchedContent` is not `Clone` and has no public byte accessor), so the compile-time type system prevents unsanitized bytes from flowing into any `ActionOutcome::Completed` payload.
 
 ### Call sites
 
 Phase 1 integration surface:
 
-- `sigil content sanitize --file <path> --type <html|md|json|text|log>` — the CLI debug/red-team harness (implemented in this PR). Loads a file, runs the pipeline, prints the cleaned text and a summary of the `SanitizeReport` (or the full JSON report with `--json`).
-- **Conductor** (wired by PR7 Phase B, blocked on PR6): when an action carries a `SanitizationRequirement`, the conductor runs the sanitizer on the external-content result, attaches the `SanitizeReport` to `ActionResult`, and audit-logs the report. Actions without a requirement are untouched.
-- **MCP tool results** (wired by PR7 Phase B, blocked on PR6): tool-call results that return external content route through the sanitizer before the result is handed back to the calling agent.
+- `sigil content sanitize --file <path> --type <html|md|json|text|log>` — the CLI debug/red-team harness. Loads a file, runs the pipeline, prints the cleaned text and a summary of the `SanitizeReport` (or the full JSON report with `--json`).
+- **Conductor:** the `Action::FetchExternalContent { url, content_type }` variant routes through `ActionService::dispatch_fetch_external_content` — `ExternalContentFetcher::fetch` → `sanitize_{html,markdown,json,plain}` → `DispatchResult::ExternalContent { text, report }`. `ActionService::execute` then calls `PolicyEngine::evaluate_result` on the post-dispatch `ActionResult` (carrying the report) so the `SanitizationRequirement` gate is enforced. A second audit event captures the post-dispatch decision with the `SanitizeReport` attached.
+- **MCP tool results:** the `fetch_url` tool (added in PR7) dispatches through the same sanitizer the conductor uses. `McpServer::with_sanitizer` / `.with_fetcher` install the pipeline; post-`Allow` the server calls the fetcher, runs the sanitizer, and gates the reply through `Evaluator::evaluate_result` before packaging `{ text, report }` into the `ToolResult` data field. Raw fetched bytes never cross the MCP boundary.
+- **Fetcher abstraction:** `sigil-content::fetcher` ships the `ExternalContentFetcher` trait (`fn fetch(&self, url) -> FetchFuture`), a `FetchError` taxonomy, and a `DisabledFetcher` default. Production deployments will plug in an HTTP client behind the existing domain-filtering proxy; PR7 does not ship that client.
 
 Deferred to Phase 2 (design accommodates them; no wiring yet):
 
@@ -368,11 +377,10 @@ The `SanitizeReport` (defined in `sigil-core::content`) carries three independen
 - property-based tests with `proptest` across core, audit, and policy crates
 - external-content sanitization pipeline (`sigil-content`) — plain-text, HTML, Markdown, and JSON paths with nonce-delimited provenance wrap, keyed-HMAC fingerprints, and a stable rule-ID pattern scanner
 - `sigil content sanitize` CLI debug harness for the sanitization pipeline
-
-### In flight
-
-- policy-layer `SanitizationRequirement` enforcement on `Action`s (PR6)
-- conductor + MCP wiring that runs the sanitizer on external-content action results when `SanitizationRequirement` is set (PR7; lands together with this document)
+- policy-layer `SanitizationRequirement` enforcement (`Evaluator::evaluate_result`) — actions that declare `Required(content_type)` are gated by a matching `SanitizeReport`
+- `Action::FetchExternalContent` variant + conductor dispatch (`ActionService::dispatch_fetch_external_content`) with fetch + sanitize + post-dispatch policy gate + audit entry carrying the report
+- MCP `fetch_url` tool with in-process sanitize + `evaluate_result` gate
+- End-to-end integration test (`crates/sigil-conductor/tests/sanitize_e2e.rs`) covering HTML, Markdown, and JSON fixtures through the full pipeline into the audit log
 
 ### Not implemented in this workspace
 
