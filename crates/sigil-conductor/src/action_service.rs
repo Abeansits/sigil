@@ -13,7 +13,9 @@
 use std::sync::Arc;
 
 use sigil_audit::AuditLogWriter;
-use sigil_core::action::{Action, ActionRequest, PolicyDecision};
+use sigil_content::Sanitizer;
+use sigil_core::action::{Action, ActionRequest, ActionResult, PolicyDecision};
+use sigil_core::content::{SanitizationRequirement, SanitizeReport};
 use sigil_core::id::{GroupId, SessionId};
 use sigil_core::protocol::ConductorMessage;
 use sigil_core::session::{SessionConfig, SessionHandle, SessionRecord, SessionState, ToolKind};
@@ -23,6 +25,7 @@ use sigil_store::Store;
 use tracing::warn;
 
 use crate::error::ConductorError;
+use crate::sanitize::{DisabledFetcher, ExternalContentFetcher, fetch_and_sanitize};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -55,6 +58,15 @@ pub enum DispatchResult {
     /// execution. The caller is responsible for performing the side effect
     /// (e.g., worktree git operations). Used for T2+ infrastructure actions.
     AuthorizedNotDispatched,
+    /// External content fetched, sanitized, and ready for the caller.
+    /// The cleaned text is what the agent / caller sees; the report is
+    /// what the policy evaluator and audit log consume.
+    ExternalContent {
+        /// Sanitized text — safe to echo into an agent's context.
+        text: String,
+        /// Full sanitizer report for policy + audit.
+        report: SanitizeReport,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +77,23 @@ pub enum DispatchResult {
 ///
 /// Generic over `R: SessionRuntime` and `P: PolicyEngine` so the runtime
 /// and policy backends can be swapped (tmux/container, real/test evaluator).
+///
+/// External-content wiring: when the service is built with
+/// [`with_sanitizer`](Self::with_sanitizer) (and optionally
+/// [`with_fetcher`](Self::with_fetcher)), the dispatch arm for
+/// [`Action::FetchExternalContent`] runs the fetched bytes through the
+/// `sigil-content` pipeline, attaches the resulting `SanitizeReport`
+/// to an `ActionResult`, and runs the evaluator's post-dispatch
+/// `evaluate_result` gate before returning to the caller. Services
+/// built without a sanitizer deny every `FetchExternalContent`
+/// dispatch cleanly (no runtime panic, no silent passthrough).
 pub struct ActionService<R, P> {
     policy: P,
     runtime: Arc<R>,
     audit: Arc<AuditLogWriter>,
     store: Arc<Store>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
 }
 
 impl<R, P> ActionService<R, P>
@@ -78,13 +102,41 @@ where
     P: PolicyEngine,
 {
     /// Create a new action service with the given dependencies.
+    ///
+    /// The sanitizer and fetcher default to "disabled" — attempts to
+    /// dispatch [`Action::FetchExternalContent`] through this service
+    /// will deny cleanly. Use [`with_sanitizer`](Self::with_sanitizer)
+    /// and [`with_fetcher`](Self::with_fetcher) (chained) to enable
+    /// the external-content path.
     pub fn new(policy: P, runtime: Arc<R>, audit: Arc<AuditLogWriter>, store: Arc<Store>) -> Self {
         Self {
             policy,
             runtime,
             audit,
             store,
+            sanitizer: None,
+            fetcher: Arc::new(DisabledFetcher),
         }
+    }
+
+    /// Install a sanitizer for external-content actions. Without one,
+    /// `Action::FetchExternalContent` dispatches produce a
+    /// policy-compatible denial.
+    #[must_use]
+    pub fn with_sanitizer(mut self, sanitizer: Arc<Sanitizer>) -> Self {
+        self.sanitizer = Some(sanitizer);
+        self
+    }
+
+    /// Install a fetcher. The default
+    /// ([`DisabledFetcher`](crate::sanitize::DisabledFetcher))
+    /// returns [`FetchError::NotConfigured`](crate::sanitize::FetchError::NotConfigured)
+    /// for every URL; production and test wiring replace it with a
+    /// network client or a fixture-backed stub.
+    #[must_use]
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn ExternalContentFetcher>) -> Self {
+        self.fetcher = fetcher;
+        self
     }
 
     /// Execute an action through the full pipeline:
@@ -109,17 +161,28 @@ where
                     message: format!("policy evaluation failed: {e}"),
                 })?;
 
-        // 2. Audit — log the real decision before dispatch so the
-        //    decision is recorded even if dispatch fails. PR6 passes
-        //    no sanitize report; PR7 wires the conductor-side fetch /
-        //    sanitize path and populates this.
+        // 2. Pre-dispatch audit. For actions that produce a
+        //    SanitizeReport, the report is still `None` at this point
+        //    (it only exists post-dispatch); a second audit event
+        //    captures it below in `finalize_sanitize_outcome`. For
+        //    every other action this is the only audit entry.
         self.audit_decision(&request, &decision, None).await;
 
         // 3. Dispatch if allowed, building the outcome.
         let outcome = match &decision {
             PolicyDecision::Allow => {
                 let result = self.dispatch(&request).await?;
-                ActionOutcome::Completed(result)
+                if matches!(
+                    request.action.sanitization_requirement(),
+                    SanitizationRequirement::Required(_)
+                ) {
+                    // Post-dispatch gate: check `evaluate_result` and
+                    // emit a follow-up audit entry with the report
+                    // attached.
+                    self.finalize_sanitize_outcome(&request, result).await?
+                } else {
+                    ActionOutcome::Completed(result)
+                }
             }
             PolicyDecision::Deny { reason } => ActionOutcome::Denied {
                 reason: reason.clone(),
@@ -130,6 +193,65 @@ where
         };
 
         Ok(outcome)
+    }
+
+    /// Post-dispatch handling for actions declaring
+    /// [`SanitizationRequirement::Required`]. Extracts the report
+    /// from the [`DispatchResult`], runs the evaluator's
+    /// `evaluate_result` gate, and emits a second audit entry with the
+    /// report attached.
+    ///
+    /// If the post-dispatch gate denies (presence mismatch, content-type
+    /// mismatch, or — post-PR7 — threshold violation), the outcome is
+    /// downgraded to [`ActionOutcome::Denied`] with the evaluator's
+    /// reason.
+    async fn finalize_sanitize_outcome(
+        &self,
+        request: &ActionRequest,
+        dispatch: DispatchResult,
+    ) -> Result<ActionOutcome, ConductorError> {
+        // Pull the report out of the dispatch result when it carries
+        // one; otherwise build an empty `ActionResult` so the evaluator
+        // can still deny for "missing report" per PR6 semantics.
+        let report = match &dispatch {
+            DispatchResult::ExternalContent { report, .. } => Some(report.clone()),
+            // A well-behaved sanitize action produces ExternalContent.
+            // Anything else — e.g. a variant added without a matching
+            // dispatch arm — surfaces as "missing report" through the
+            // evaluator's gate below. We deliberately do not short-
+            // circuit here: the evaluator owns the deny shape.
+            _ => None,
+        };
+
+        let action_result = match report.clone() {
+            Some(r) => ActionResult::new().with_sanitize_report(r),
+            None => ActionResult::new(),
+        };
+
+        let post = self
+            .policy
+            .evaluate_result(request, &action_result)
+            .await
+            .map_err(|e| ConductorError::Internal {
+                message: format!("post-dispatch policy evaluation failed: {e}"),
+            })?;
+
+        // Second audit entry: the decision carries either the original
+        // `Allow` (now with the report attached) or the evaluator's
+        // post-dispatch `Deny`. Either way the audit log gets the
+        // report and the final verdict together.
+        self.audit_decision(request, &post, report).await;
+
+        match post {
+            PolicyDecision::Allow => Ok(ActionOutcome::Completed(dispatch)),
+            PolicyDecision::Deny { reason } => Ok(ActionOutcome::Denied { reason }),
+            // Post-dispatch should never produce NeedsApproval (that is
+            // a pre-dispatch concept), but map defensively so future
+            // variants can't be silently dropped.
+            PolicyDecision::NeedsApproval { description } => Ok(ActionOutcome::NeedsApproval {
+                description,
+            }),
+        }
     }
 
     /// Expose the store for read-only operations that callers may need
@@ -248,6 +370,12 @@ where
                     .await
             }
             Action::RemoveSession { session_id } => self.dispatch_remove_session(*session_id).await,
+
+            // --- T1 with grant: External-content fetch + sanitize ---
+            Action::FetchExternalContent { url, content_type } => {
+                self.dispatch_fetch_external_content(url.clone(), *content_type)
+                    .await
+            }
 
             // --- T2+: Infrastructure / Privileged ---
             // These action variants are evaluated by policy but dispatched
@@ -533,6 +661,45 @@ where
         Ok(DispatchResult::Session(session))
     }
 
+    /// Fetch an external URL and route the bytes through the
+    /// `sigil-content` sanitizer. Returns a
+    /// [`DispatchResult::ExternalContent`] carrying the cleaned text
+    /// and the full [`SanitizeReport`]. The post-dispatch gate in
+    /// [`execute`](Self::execute) consumes the report.
+    ///
+    /// Failure modes, all surfaced as `ConductorError::Internal` with a
+    /// descriptive message:
+    ///
+    /// - The service was built without `with_sanitizer` — the pipeline
+    ///   cannot run, so the dispatch fails cleanly rather than
+    ///   pretending to have produced sanitized bytes.
+    /// - The fetcher rejects the URL (network error, `NotConfigured`,
+    ///   `NotFound`, …).
+    /// - The sanitizer rejects the payload (oversize, invalid UTF-8,
+    ///   unsupported content type).
+    async fn dispatch_fetch_external_content(
+        &self,
+        url: String,
+        content_type: sigil_core::content::ContentType,
+    ) -> Result<DispatchResult, ConductorError> {
+        let sanitizer = self.sanitizer.as_ref().ok_or_else(|| {
+            ConductorError::Internal {
+                message: "FetchExternalContent dispatch: no sanitizer configured; \
+                         build ActionService with .with_sanitizer(...) to enable"
+                    .to_owned(),
+            }
+        })?;
+
+        let sanitized =
+            fetch_and_sanitize(self.fetcher.as_ref(), sanitizer.as_ref(), &url, content_type)
+                .await?;
+
+        Ok(DispatchResult::ExternalContent {
+            text: sanitized.text,
+            report: sanitized.report,
+        })
+    }
+
     // -----------------------------------------------------------------------
     // Audit
     // -----------------------------------------------------------------------
@@ -618,6 +785,7 @@ pub fn extract_session_id(action: &Action) -> Option<SessionId> {
         | Action::ExecuteHostCommand { .. }
         | Action::RestartService { .. }
         | Action::ExternalNetworkWrite { .. }
+        | Action::FetchExternalContent { .. }
         | Action::BreakGlass { .. }
         // Future variants without session IDs.
         | _ => None,

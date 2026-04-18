@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::content::{SanitizationRequirement, SanitizeReport};
+use crate::content::{ContentType, SanitizationRequirement, SanitizeReport};
 use crate::id::{GroupId, RequestId, SessionId};
 use crate::origin::ActionOrigin;
 use crate::session::{ConductorConfig, IdentitySpec, ToolKind};
@@ -86,6 +86,24 @@ pub enum Action {
     },
     RemoveSession {
         session_id: SessionId,
+    },
+    /// Fetch bytes from an external URL and route them through
+    /// `sigil-content` before they reach the caller.
+    ///
+    /// `content_type` is caller-declared (never sniffed). The policy
+    /// evaluator translates this into
+    /// [`SanitizationRequirement::Required`] so the post-dispatch gate
+    /// denies any result that is missing the matching
+    /// [`SanitizeReport`]. Only the sanitized text and the report
+    /// cross the trust boundary back to the caller — raw fetched bytes
+    /// never do.
+    ///
+    /// The capability is [`Capability::FetchExternalContent`] (T1 with
+    /// `requires_grant`). `LocalCli` auto-allows; agent origins must
+    /// hold an explicit grant.
+    FetchExternalContent {
+        url: String,
+        content_type: ContentType,
     },
 
     // --- T2: Modify Infrastructure (Sebastian only, or with grant) ---
@@ -194,6 +212,8 @@ impl Action {
 
             Self::SendMessage { .. } => Capability::SendMessage,
 
+            Self::FetchExternalContent { .. } => Capability::FetchExternalContent,
+
             Self::CreateWorktree { .. }
             | Self::FinishWorktree { .. }
             | Self::SetSessionParent { .. }
@@ -215,14 +235,47 @@ impl Action {
     /// Whether this action's [`ActionResult`] must carry a
     /// [`SanitizeReport`], and if so, over what content type.
     ///
-    /// No current variant fetches external content, so the default is
-    /// [`SanitizationRequirement::None`]. A future `FetchUrl` (or
-    /// equivalent) variant will override this to declare
-    /// [`SanitizationRequirement::Required`] — the policy evaluator then
-    /// enforces that the post-dispatch result carries a matching report.
+    /// [`Self::FetchExternalContent`] is the canonical producer of
+    /// external content; it declares
+    /// [`SanitizationRequirement::Required`] using the caller-supplied
+    /// [`ContentType`]. Every other current variant returns
+    /// [`SanitizationRequirement::None`] — they do not fetch or
+    /// surface external bytes. `#[non_exhaustive]` means a wildcard
+    /// arm here would silently default future variants to `None`, so
+    /// the match is exhaustive and new variants force a compile-time
+    /// review of their sanitization posture.
     #[must_use]
     pub fn sanitization_requirement(&self) -> SanitizationRequirement {
-        SanitizationRequirement::None
+        match self {
+            Self::FetchExternalContent { content_type, .. } => {
+                SanitizationRequirement::Required(*content_type)
+            }
+            Self::ListSessions
+            | Self::GetSessionStatus { .. }
+            | Self::ReadSessionOutput { .. }
+            | Self::ListGroups
+            | Self::GetSystemStatus
+            | Self::CreateSession { .. }
+            | Self::LaunchSession { .. }
+            | Self::StartSession { .. }
+            | Self::StopSession { .. }
+            | Self::RestartSession { .. }
+            | Self::SendMessage { .. }
+            | Self::RemoveSession { .. }
+            | Self::CreateWorktree { .. }
+            | Self::FinishWorktree { .. }
+            | Self::SetSessionParent { .. }
+            | Self::RenameSession { .. }
+            | Self::MoveSessionToGroup { .. }
+            | Self::ConfigureConductor { .. }
+            | Self::ReadHostFile { .. }
+            | Self::WriteHostFile { .. }
+            | Self::ExecuteHostCommand { .. }
+            | Self::ModifyGitState { .. }
+            | Self::ExternalNetworkWrite { .. }
+            | Self::RestartService { .. }
+            | Self::BreakGlass { .. } => SanitizationRequirement::None,
+        }
     }
 }
 

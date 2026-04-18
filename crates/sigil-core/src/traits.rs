@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use crate::action::{ActionRequest, PolicyDecision};
+use crate::action::{ActionRequest, ActionResult, PolicyDecision};
 use crate::content::SanitizeReport;
 use crate::error::CoreError;
 use crate::protocol::{AgentSignal, BridgeMessage, ConductorMessage, HookFormat, StatusPattern};
@@ -85,6 +85,26 @@ pub trait PolicyEngine: Send + Sync {
         &self,
         request: &ActionRequest,
     ) -> impl Future<Output = Result<PolicyDecision, CoreError>> + Send;
+
+    /// Post-dispatch check: the action has run and produced an
+    /// [`ActionResult`]. The evaluator inspects the result — in
+    /// particular, whether a `SanitizeReport` is present for actions
+    /// that declared `SanitizationRequirement::Required` — and returns
+    /// a final `Allow` / `Deny`.
+    ///
+    /// A default implementation returns `Allow`, so engines that have
+    /// no post-dispatch gate (e.g. test stubs) keep working unchanged.
+    /// `sigil-policy::PolicyService` overrides this to forward to
+    /// `Evaluator::evaluate_result`, which is where the real
+    /// `SanitizationRequirement` enforcement lives.
+    fn evaluate_result(
+        &self,
+        request: &ActionRequest,
+        result: &ActionResult,
+    ) -> impl Future<Output = Result<PolicyDecision, CoreError>> + Send {
+        let _ = (request, result);
+        async { Ok(PolicyDecision::Allow) }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ pub mod escalation;
 pub mod heartbeat;
 pub mod memory;
 pub mod reconcile;
+pub mod sanitize;
 
 use std::path::PathBuf;
 use std::sync::Arc;
