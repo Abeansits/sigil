@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use sigil_core::action::Action;
+use sigil_core::content::ContentType;
 use sigil_core::id::SessionId;
 
 /// The set of MCP tools exposed to agents.
@@ -37,6 +38,13 @@ pub enum McpTool {
     /// Read the output of a session.
     #[serde(rename = "read_session_output")]
     ReadSessionOutput(SessionIdParam),
+
+    /// Fetch external content and run it through the
+    /// `sigil-content` sanitization pipeline before the bytes reach
+    /// the agent. The tool never returns raw fetched bytes — only the
+    /// cleaned text and the accompanying `SanitizeReport`.
+    #[serde(rename = "fetch_url")]
+    FetchUrl(FetchUrlParams),
 }
 
 /// Parameters for the `request_approval` tool.
@@ -61,6 +69,43 @@ pub struct SessionIdParam {
 pub struct SendMessageParams {
     pub session_id: String,
     pub message: String,
+}
+
+/// Parameters for the `fetch_url` tool.
+///
+/// `content_type` is caller-declared (never sniffed). The design doc
+/// §Stage 2 rejects sniffing as a known attack vector. Accepted
+/// spellings: `"html"`, `"markdown"` / `"md"`, `"json"`, `"text"` /
+/// `"plain"`, `"log"`. Anything else is a parse error.
+#[derive(Clone, Debug, Deserialize)]
+pub struct FetchUrlParams {
+    pub url: String,
+    #[serde(rename = "content_type")]
+    pub content_type: String,
+}
+
+impl FetchUrlParams {
+    /// Resolve the wire-format string into a [`ContentType`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a descriptive string when the value does not match any
+    /// supported alias. The server maps this to an
+    /// `INVALID_PARAMS` JSON-RPC error so the agent sees a clean
+    /// rejection instead of a silent fallback.
+    pub fn resolve_content_type(&self) -> Result<ContentType, String> {
+        match self.content_type.to_ascii_lowercase().as_str() {
+            "html" => Ok(ContentType::Html),
+            "markdown" | "md" => Ok(ContentType::Markdown),
+            "json" => Ok(ContentType::Json),
+            "text" | "plain" | "plaintext" | "plain_text" => Ok(ContentType::PlainText),
+            "log" => Ok(ContentType::Log),
+            other => Err(format!(
+                "unsupported content_type '{other}'; expected one of: \
+                 html, markdown, json, text, log"
+            )),
+        }
+    }
 }
 
 /// The result of a tool call, returned to the agent.
@@ -95,6 +140,7 @@ pub struct ToolSchema {
 }
 
 /// Return the list of tool schemas for the `tools/list` response.
+#[allow(clippy::too_many_lines, reason = "one vec literal per tool — flat is clearer than helpers")]
 pub fn tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
@@ -176,6 +222,29 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                 "required": ["session_id"],
             }),
         },
+        ToolSchema {
+            name: "fetch_url",
+            description: "Fetch external content from a URL. The bytes are \
+                          routed through the sigil-content sanitizer before \
+                          reaching the caller; raw fetched bytes never cross \
+                          the trust boundary. Requires the FetchExternalContent \
+                          capability (grant-gated at T1).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch",
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "enum": ["html", "markdown", "json", "text", "log"],
+                        "description": "Declared content type (never sniffed)",
+                    },
+                },
+                "required": ["url", "content_type"],
+            }),
+        },
     ]
 }
 
@@ -205,6 +274,13 @@ impl McpTool {
             Self::ReadSessionOutput(p) => {
                 let session_id = parse_session_id(&p.session_id)?;
                 Ok(Action::ReadSessionOutput { session_id })
+            }
+            Self::FetchUrl(p) => {
+                let content_type = p.resolve_content_type()?;
+                Ok(Action::FetchExternalContent {
+                    url: p.url,
+                    content_type,
+                })
             }
         }
     }

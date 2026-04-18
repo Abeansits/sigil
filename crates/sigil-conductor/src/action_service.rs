@@ -33,6 +33,7 @@ use crate::sanitize::{DisabledFetcher, ExternalContentFetcher, fetch_and_sanitiz
 
 /// The outcome of executing an action through the pipeline.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant, reason = "Completed(DispatchResult::ExternalContent{report}) is ~400B; boxing it for every action punishes the common paths")]
 pub enum ActionOutcome {
     /// Action was allowed and the dispatch completed.
     Completed(DispatchResult),
@@ -45,6 +46,7 @@ pub enum ActionOutcome {
 /// Data returned from a successfully dispatched action.
 #[derive(Debug)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant, reason = "SanitizeReport is ~400B but fits naturally in DispatchResult; the type is not allocated on a hot path")]
 pub enum DispatchResult {
     /// A session record (create, show, start, stop, restart, remove).
     Session(SessionRecord),
@@ -220,7 +222,11 @@ where
             // dispatch arm — surfaces as "missing report" through the
             // evaluator's gate below. We deliberately do not short-
             // circuit here: the evaluator owns the deny shape.
-            _ => None,
+            DispatchResult::Session(_)
+            | DispatchResult::SessionList(_)
+            | DispatchResult::Text(_)
+            | DispatchResult::Done
+            | DispatchResult::AuthorizedNotDispatched => None,
         };
 
         let action_result = match report.clone() {
@@ -690,13 +696,13 @@ where
             }
         })?;
 
-        let sanitized =
+        let cleaned =
             fetch_and_sanitize(self.fetcher.as_ref(), sanitizer.as_ref(), &url, content_type)
                 .await?;
 
         Ok(DispatchResult::ExternalContent {
-            text: sanitized.text,
-            report: sanitized.report,
+            text: cleaned.text,
+            report: cleaned.report,
         })
     }
 

@@ -1949,6 +1949,7 @@ dependencies = [
  "sigil-core",
  "sigil-policy",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -1976,6 +1977,7 @@ dependencies = [
  "assert_matches",
  "serde",
  "serde_json",
+ "sigil-content",
  "sigil-core",
  "sigil-policy",
  "thiserror 2.0.18",

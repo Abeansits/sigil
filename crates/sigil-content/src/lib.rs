@@ -39,6 +39,7 @@ use sigil_core::{ContentSource, ContentType, SanitizedContent};
 
 pub mod config;
 pub mod error;
+pub mod fetcher;
 #[cfg(feature = "html")]
 pub mod html;
 #[cfg(feature = "json")]
@@ -55,6 +56,7 @@ pub use config::{
     SanitizerConfig,
 };
 pub use error::ContentError;
+pub use fetcher::{DisabledFetcher, ExternalContentFetcher, FetchError, FetchFuture};
 
 // Re-export core types consumers of this crate need so they do not have
 // to pull `sigil-core` into their Cargo.toml for basic usage.

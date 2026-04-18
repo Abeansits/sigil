@@ -36,91 +36,16 @@
 //! sanitizer rejects the input (size, encoding) or when the fetcher
 //! fails.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use sigil_content::{RawFetchedContent, Sanitizer};
+// The fetcher trait + default implementation + error taxonomy live in
+// `sigil-content` so both `sigil-conductor` and `sigil-mcp` can depend
+// on the same contract without one importing the other.
+pub use sigil_content::{DisabledFetcher, ExternalContentFetcher, FetchError, FetchFuture};
 use sigil_core::content::{ContentSource, ContentType, SanitizedContent};
 
 use crate::error::ConductorError;
-
-/// Boxed future returned by [`ExternalContentFetcher::fetch`].
-///
-/// The trait uses a boxed future instead of an `impl Future` return
-/// because `ActionService` stores the fetcher behind
-/// `Arc<dyn ExternalContentFetcher>` — `impl Future` return types are
-/// not dyn-compatible. The box is allocated once per fetch and is not
-/// on the hot path for any action (the underlying fetch dominates).
-pub type FetchFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<u8>, FetchError>> + Send + 'a>>;
-
-/// Fetcher for the bytes behind a URL declared by
-/// [`sigil_core::action::Action::FetchExternalContent`].
-///
-/// This trait deliberately does not prescribe a transport. Production
-/// wiring plugs in an HTTP client with the existing domain-filtering
-/// proxy; tests plug in a fixture-backed implementation. The trait is
-/// `Send + Sync` so an `Arc<dyn ExternalContentFetcher>` can be held by
-/// [`crate::action_service::ActionService`] and used across await
-/// points.
-pub trait ExternalContentFetcher: Send + Sync {
-    /// Fetch the raw bytes for `url`. The caller has already
-    /// declared the content type in the originating action; no
-    /// sniffing is performed here or downstream.
-    fn fetch<'a>(&'a self, url: &'a str) -> FetchFuture<'a>;
-}
-
-/// Reasons a fetch attempt can fail.
-///
-/// Separate from [`ConductorError`] so the dispatch arm can map a
-/// fetch failure to a typed denial reason that the audit log preserves
-/// verbatim. The variants are intentionally coarse — PR7 does not wire
-/// a real HTTP client, and a richer taxonomy (DNS / TLS / 4xx / 5xx /
-/// size limit) is part of the deferred fetch-infrastructure work.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum FetchError {
-    /// No fetcher has been configured on the `ActionService`.
-    /// Returned by [`DisabledFetcher`] and by the dispatch arm when
-    /// the service was built without `with_fetcher`.
-    #[error("external-content fetching is not configured on this ActionService")]
-    NotConfigured,
-
-    /// The fetcher found no bytes for the given URL. A fixture-backed
-    /// fetcher emits this for an unknown URL; a production fetcher
-    /// emits it for 404 / DNS-resolution failures.
-    #[error("no content found for URL: {url}")]
-    NotFound {
-        /// The URL that had no backing bytes.
-        url: String,
-    },
-
-    /// An implementation-specific failure (IO, decode, backing-store
-    /// error). The `source` carries the underlying message.
-    #[error("fetcher failure: {message}")]
-    Other {
-        /// Human-readable detail. Do not render secrets here — the
-        /// value is echoed into the policy-decision `Deny.reason` and
-        /// therefore into the audit log.
-        message: String,
-    },
-}
-
-/// A no-op fetcher that always returns [`FetchError::NotConfigured`].
-///
-/// The default on an `ActionService` built without `with_fetcher`.
-/// Production deployments that have not wired a real fetcher therefore
-/// produce a typed denial for any `FetchExternalContent` action rather
-/// than silently pretending to have fetched empty bytes.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DisabledFetcher;
-
-impl ExternalContentFetcher for DisabledFetcher {
-    fn fetch<'a>(&'a self, _url: &'a str) -> FetchFuture<'a> {
-        Box::pin(async { Err(FetchError::NotConfigured) })
-    }
-}
 
 /// Run the full fetch + sanitize pipeline for a single URL.
 ///
@@ -158,6 +83,14 @@ where
 /// the declared content type. Factored out of
 /// [`fetch_and_sanitize`] so tests (and a future bridge-attachment
 /// caller) can skip the fetch step.
+///
+/// # Errors
+///
+/// Returns [`ConductorError::Internal`] when:
+///
+/// - The declared `content_type` has no dispatch arm (a future
+///   `ContentType` variant that forgot to update the router).
+/// - The sanitizer rejects the payload (oversize, invalid UTF-8, etc.).
 pub fn run_sanitize(
     sanitizer: &Sanitizer,
     raw: RawFetchedContent,
@@ -167,7 +100,7 @@ pub fn run_sanitize(
     // `ContentType` is #[non_exhaustive]; unknown future variants fail
     // closed with a typed error rather than silently routing through
     // the plain-text path.
-    let sanitized = match content_type {
+    let cleaned = match content_type {
         ContentType::Html => sanitizer.sanitize_html(raw, source),
         ContentType::Markdown => sanitizer.sanitize_markdown(raw, source),
         ContentType::Json => sanitizer.sanitize_json(raw, source),
@@ -186,7 +119,7 @@ pub fn run_sanitize(
     .map_err(|e| ConductorError::Internal {
         message: format!("sanitize({content_type:?}) failed: {e}"),
     })?;
-    Ok(sanitized)
+    Ok(cleaned)
 }
 
 /// Convenience type alias for the shared pointer `ActionService` holds.
@@ -197,6 +130,7 @@ mod tests {
     #![allow(
         clippy::expect_used,
         clippy::panic,
+        clippy::wildcard_enum_match_arm,
         reason = "test code asserts on values that are provably safe to unwrap"
     )]
 
