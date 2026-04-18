@@ -165,6 +165,16 @@ impl<G: GrantStore> Evaluator<G> {
                 .await);
         }
 
+        // 7b. T0/T1 capabilities that still require an explicit grant
+        //     (e.g., FetchExternalContent). Tier-ceiling-passing is not
+        //     sufficient — without a grant, the capability is gated
+        //     through the same infrastructure-approval path as T2.
+        if capability.requires_grant() {
+            return Ok(self
+                .check_infrastructure_approval(request, capability, &principal.identity)
+                .await);
+        }
+
         // 8. T0-T1: allowed.
         Ok(PolicyDecision::Allow)
     }

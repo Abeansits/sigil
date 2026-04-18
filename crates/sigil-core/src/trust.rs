@@ -90,6 +90,25 @@ impl Capability {
             Self::BreakGlass => Tier::T3Plus,
         }
     }
+
+    /// Whether this capability requires an explicit approval grant even
+    /// though its [`minimum_tier`](Self::minimum_tier) would normally be
+    /// auto-allowed.
+    ///
+    /// The default evaluator flow auto-allows any T0/T1 capability once
+    /// tier ceiling and zone checks pass. A handful of T1 capabilities
+    /// (today: [`Self::FetchExternalContent`]) are architecturally T1
+    /// by blast radius but carry a "grant-required" gate on top —
+    /// fetching external content at agent tier without a grant would
+    /// bypass the sanitizer's role as policy-enforced input filtering.
+    ///
+    /// Capabilities at T2 or above are always grant-gated regardless of
+    /// what this returns; this flag only opts extra T0/T1 capabilities
+    /// into the same gating.
+    #[must_use]
+    pub fn requires_grant(&self) -> bool {
+        matches!(self, Self::FetchExternalContent)
+    }
 }
 
 /// Execution class determines container config, network policy, and tier ceiling.
@@ -127,6 +146,31 @@ mod tests {
         assert_eq!(Capability::ModifyInfrastructure.minimum_tier(), Tier::T2);
         assert_eq!(Capability::ReadHostFile.minimum_tier(), Tier::T3);
         assert_eq!(Capability::BreakGlass.minimum_tier(), Tier::T3Plus);
+    }
+
+    #[test]
+    fn fetch_external_content_requires_grant_despite_t1_tier() {
+        // FetchExternalContent is T1 for blast-radius reasons but
+        // carries an additional grant-required gate: sanitizer
+        // enforcement must never be bypassed by the default T0/T1
+        // auto-allow path. See Capability::requires_grant.
+        assert_eq!(Capability::FetchExternalContent.minimum_tier(), Tier::T1);
+        assert!(Capability::FetchExternalContent.requires_grant());
+    }
+
+    #[test]
+    fn ordinary_capabilities_do_not_require_grant() {
+        // requires_grant is an opt-in flag. T0/T1 "ordinary" capabilities
+        // stay on the default auto-allow path; T2+ capabilities are
+        // grant-gated by their tier regardless of this flag.
+        for cap in [
+            Capability::ReadSessionInfo,
+            Capability::ReadSystemStatus,
+            Capability::ManageSession,
+            Capability::SendMessage,
+        ] {
+            assert!(!cap.requires_grant(), "{cap:?} should not set requires_grant");
+        }
     }
 
     #[test]
