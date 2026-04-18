@@ -37,7 +37,7 @@ const UNKNOWN_FETCHED_AT: &str = "unknown";
 
 /// Wire-format string for [`ContentType`] in the wrap header. Kept here
 /// so the wrap module stays oblivious to the enum.
-fn content_type_wire(ct: ContentType) -> &'static str {
+pub(crate) fn content_type_wire(ct: ContentType) -> &'static str {
     match ct {
         ContentType::PlainText => "text/plain",
         ContentType::Log => "text/x-log",
@@ -110,6 +110,65 @@ pub(crate) fn sanitize(
         decoded.to_owned()
     };
 
+    run_post_strip_pipeline(PostStripInput {
+        stage3,
+        stripped_elements,
+        source,
+        content_type,
+        bytes_in,
+        raw_fingerprint,
+        started,
+        config,
+        key,
+    })
+}
+
+/// Inputs to the stage 4-7 tail of the pipeline, shared by every
+/// format-specific path. The format sanitizer runs stages 1-3 (size cap,
+/// decode, structural strip) and hands control here with the cleaned
+/// pre-normalize string, the stripped-element counts it recorded, and
+/// the metadata needed for report assembly.
+pub(crate) struct PostStripInput<'a> {
+    /// Result of the format-specific structural strip.
+    pub(crate) stage3: String,
+    /// `(kind, count)` entries the stripper produced — preserved verbatim
+    /// into the final report.
+    pub(crate) stripped_elements: Vec<(String, u32)>,
+    pub(crate) source: ContentSource,
+    pub(crate) content_type: ContentType,
+    /// Raw input byte length (stage 1 already enforced the cap).
+    pub(crate) bytes_in: usize,
+    /// HMAC of the raw input bytes, computed before the format decode.
+    pub(crate) raw_fingerprint: Fingerprint,
+    /// Timer start, captured at the head of the pipeline so `duration_ms`
+    /// reflects the full cost of the call, not just the tail.
+    pub(crate) started: Instant,
+    pub(crate) config: &'a SanitizerConfig,
+    pub(crate) key: &'a [u8],
+}
+
+/// Stage 4-7: text-layer normalize → pattern scan → nonce wrap → report.
+///
+/// This is the half of the pipeline that every format shares. HTML /
+/// Markdown / JSON paths do their own structural strip, convert the body
+/// to a plain string, and call into here with the accumulated stripped
+/// counts and fingerprint. Plain text and log both hit it via
+/// [`sanitize`] above.
+pub(crate) fn run_post_strip_pipeline(
+    input: PostStripInput<'_>,
+) -> Result<SanitizedContent, ContentError> {
+    let PostStripInput {
+        stage3,
+        stripped_elements,
+        source,
+        content_type,
+        bytes_in,
+        raw_fingerprint,
+        started,
+        config,
+        key,
+    } = input;
+
     // Stage 4 — text-layer normalize.
     let text_normalize = normalize_text(&stage3);
     let cleaned = text_normalize.cleaned.clone();
@@ -118,8 +177,7 @@ pub(crate) fn sanitize(
     let sanitized_fingerprint =
         Fingerprint::compute(key, sanitized_bytes).map_err(map_core_error)?;
 
-    // Stage 5 — pattern scan + risk score. Mixed-script flagging happens
-    // in Stage 4; pass it in rather than re-scanning here.
+    // Stage 5 — pattern scan + risk score.
     let mixed_script = text_normalize
         .categories
         .iter()
@@ -136,9 +194,8 @@ pub(crate) fn sanitize(
         });
     }
 
-    // Stage 6 — pick a nonce that does not collide with any
-    // sigil-external sentinel literal in the payload, then record the
-    // collision (if any) as a WRP-001 finding.
+    // Stage 6 — nonce-delimited wrap. Collision-regen bounded by
+    // [`NONCE_REGEN_LIMIT`].
     let payload_has_prefix = patterns::detect_wrapper_collision(&cleaned);
     let nonce = pick_collision_free_nonce(&cleaned)?;
     if payload_has_prefix {
@@ -236,7 +293,10 @@ fn derive_flags(
     flags
 }
 
-fn map_core_error(err: sigil_core::ContentError) -> ContentError {
+/// Translate a [`sigil_core::ContentError`] into the crate-local error.
+/// Shared with [`crate::html`] / future [`crate::markdown`] / [`crate::json`]
+/// paths so they don't each reinvent the mapping.
+pub(crate) fn map_core_error(err: sigil_core::ContentError) -> ContentError {
     if matches!(err, sigil_core::ContentError::FingerprintKeyUnavailable) {
         ContentError::FingerprintKeyUnavailable
     } else {
