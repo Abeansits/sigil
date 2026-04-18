@@ -33,7 +33,10 @@ use crate::sanitize::{DisabledFetcher, ExternalContentFetcher, fetch_and_sanitiz
 
 /// The outcome of executing an action through the pipeline.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant, reason = "Completed(DispatchResult::ExternalContent{report}) is ~400B; boxing it for every action punishes the common paths")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Completed(DispatchResult::ExternalContent{report}) is ~400B; boxing it for every action punishes the common paths"
+)]
 pub enum ActionOutcome {
     /// Action was allowed and the dispatch completed.
     Completed(DispatchResult),
@@ -46,7 +49,10 @@ pub enum ActionOutcome {
 /// Data returned from a successfully dispatched action.
 #[derive(Debug)]
 #[non_exhaustive]
-#[allow(clippy::large_enum_variant, reason = "SanitizeReport is ~400B but fits naturally in DispatchResult; the type is not allocated on a hot path")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SanitizeReport is ~400B but fits naturally in DispatchResult; the type is not allocated on a hot path"
+)]
 pub enum DispatchResult {
     /// A session record (create, show, start, stop, restart, remove).
     Session(SessionRecord),
@@ -254,9 +260,9 @@ where
             // Post-dispatch should never produce NeedsApproval (that is
             // a pre-dispatch concept), but map defensively so future
             // variants can't be silently dropped.
-            PolicyDecision::NeedsApproval { description } => Ok(ActionOutcome::NeedsApproval {
-                description,
-            }),
+            PolicyDecision::NeedsApproval { description } => {
+                Ok(ActionOutcome::NeedsApproval { description })
+            }
         }
     }
 
@@ -688,17 +694,22 @@ where
         url: String,
         content_type: sigil_core::content::ContentType,
     ) -> Result<DispatchResult, ConductorError> {
-        let sanitizer = self.sanitizer.as_ref().ok_or_else(|| {
-            ConductorError::Internal {
+        let sanitizer = self
+            .sanitizer
+            .as_ref()
+            .ok_or_else(|| ConductorError::Internal {
                 message: "FetchExternalContent dispatch: no sanitizer configured; \
                          build ActionService with .with_sanitizer(...) to enable"
                     .to_owned(),
-            }
-        })?;
+            })?;
 
-        let cleaned =
-            fetch_and_sanitize(self.fetcher.as_ref(), sanitizer.as_ref(), &url, content_type)
-                .await?;
+        let cleaned = fetch_and_sanitize(
+            self.fetcher.as_ref(),
+            sanitizer.as_ref(),
+            &url,
+            content_type,
+        )
+        .await?;
 
         Ok(DispatchResult::ExternalContent {
             text: cleaned.text,

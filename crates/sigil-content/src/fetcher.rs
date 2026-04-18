@@ -27,8 +27,7 @@ use std::pin::Pin;
 /// because callers store fetchers behind `Arc<dyn ...>` — `impl
 /// Future` return types are not dyn-compatible. One allocation per
 /// fetch; the HTTP round-trip dominates so this is not a hot path.
-pub type FetchFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<u8>, FetchError>> + Send + 'a>>;
+pub type FetchFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, FetchError>> + Send + 'a>>;
 
 /// Fetch the bytes behind a URL on behalf of the sanitization
 /// pipeline.

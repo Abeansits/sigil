@@ -140,7 +140,10 @@ pub struct ToolSchema {
 }
 
 /// Return the list of tool schemas for the `tools/list` response.
-#[allow(clippy::too_many_lines, reason = "one vec literal per tool — flat is clearer than helpers")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one vec literal per tool — flat is clearer than helpers"
+)]
 pub fn tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {

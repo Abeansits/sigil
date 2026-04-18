@@ -70,11 +70,14 @@ pub async fn fetch_and_sanitize<F>(
 where
     F: ExternalContentFetcher + ?Sized,
 {
-    let bytes = fetcher.fetch(url).await.map_err(|e| ConductorError::Internal {
-        message: format!("fetch failed for {url}: {e}"),
-    })?;
-    let source = ContentSource::from_url(url)
-        .unwrap_or_else(|_| ContentSource::Other(url.to_owned()));
+    let bytes = fetcher
+        .fetch(url)
+        .await
+        .map_err(|e| ConductorError::Internal {
+            message: format!("fetch failed for {url}: {e}"),
+        })?;
+    let source =
+        ContentSource::from_url(url).unwrap_or_else(|_| ContentSource::Other(url.to_owned()));
     let raw = RawFetchedContent::from_bytes(bytes);
     run_sanitize(sanitizer, raw, source, content_type)
 }
@@ -159,9 +162,13 @@ mod tests {
 
     impl ExternalContentFetcher for FixtureFetcher {
         fn fetch<'a>(&'a self, url: &'a str) -> FetchFuture<'a> {
-            let result = self.map.get(url).cloned().ok_or_else(|| FetchError::NotFound {
-                url: url.to_owned(),
-            });
+            let result = self
+                .map
+                .get(url)
+                .cloned()
+                .ok_or_else(|| FetchError::NotFound {
+                    url: url.to_owned(),
+                });
             Box::pin(async move { result })
         }
     }
@@ -172,7 +179,10 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_fetcher_errors_not_configured() {
-        let err = DisabledFetcher.fetch("https://x.example").await.expect_err("err");
+        let err = DisabledFetcher
+            .fetch("https://x.example")
+            .await
+            .expect_err("err");
         assert!(matches!(err, FetchError::NotConfigured));
     }
 
@@ -207,7 +217,10 @@ mod tests {
         .expect_err("not found");
         match err {
             ConductorError::Internal { message } => {
-                assert!(message.contains("missing"), "expected URL in error: {message}");
+                assert!(
+                    message.contains("missing"),
+                    "expected URL in error: {message}"
+                );
             }
             other => panic!("expected Internal, got {other:?}"),
         }

@@ -18,9 +18,7 @@
 
 use std::sync::Arc;
 
-use sigil_content::{
-    DisabledFetcher, ExternalContentFetcher, RawFetchedContent, Sanitizer,
-};
+use sigil_content::{DisabledFetcher, ExternalContentFetcher, RawFetchedContent, Sanitizer};
 use sigil_core::action::{Action, ActionRequest, ActionResult, PolicyDecision};
 use sigil_core::content::{ContentSource, ContentType};
 use sigil_core::id::SessionId;
@@ -225,7 +223,10 @@ impl<G: GrantStore> McpServer<G> {
     /// execution in MCP — that happens in the conductor via
     /// `ActionService`); the caller does not treat this as a
     /// regression.
-    #[allow(clippy::wildcard_enum_match_arm, reason = "only FetchExternalContent needs dispatch; everything else returns the policy-allowed stub")]
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "only FetchExternalContent needs dispatch; everything else returns the policy-allowed stub"
+    )]
     async fn dispatch_allowed(&self, request: &ActionRequest) -> ToolResult {
         match &request.action {
             Action::FetchExternalContent { url, content_type } => {
@@ -282,7 +283,11 @@ impl<G: GrantStore> McpServer<G> {
         // end-to-end even on the MCP path (not just the conductor).
         let report = cleaned.report.clone();
         let action_result = ActionResult::new().with_sanitize_report(report.clone());
-        match self.evaluator.evaluate_result(request, &action_result).await {
+        match self
+            .evaluator
+            .evaluate_result(request, &action_result)
+            .await
+        {
             Ok(PolicyDecision::Allow) => {
                 let data = serde_json::json!({
                     "text": cleaned.text,
@@ -316,10 +321,7 @@ impl<G: GrantStore> McpServer<G> {
 }
 
 /// Wrap a [`ToolResult`] into the MCP `tools/call` response envelope.
-fn package_tool_result(
-    id: Option<serde_json::Value>,
-    tool_result: &ToolResult,
-) -> JsonRpcResponse {
+fn package_tool_result(id: Option<serde_json::Value>, tool_result: &ToolResult) -> JsonRpcResponse {
     let result_text = match serde_json::to_string(tool_result) {
         Ok(text) => text,
         Err(e) => {
@@ -678,11 +680,11 @@ mod tests {
             }),
         );
         let resp = server.handle_request(&req).await;
-        assert!(resp.error.is_some(), "unknown content_type must be a JSON-RPC error");
-        assert_eq!(
-            resp.error.expect("error").code,
-            codes::INVALID_PARAMS,
+        assert!(
+            resp.error.is_some(),
+            "unknown content_type must be a JSON-RPC error"
         );
+        assert_eq!(resp.error.expect("error").code, codes::INVALID_PARAMS,);
     }
 
     #[tokio::test]
