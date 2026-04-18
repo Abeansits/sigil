@@ -112,6 +112,31 @@ pub enum Commands {
     /// Episodic memory operations.
     #[command(subcommand)]
     Memory(MemoryCommands),
+
+    /// External-content sanitization utilities.
+    #[command(subcommand)]
+    Content(ContentCommands),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContentCommands {
+    /// Sanitize a file and print the cleaned output + `SanitizeReport`.
+    Sanitize {
+        /// Path to the file to sanitize.
+        #[arg(long)]
+        file: String,
+        /// Declared content type — never sniffed.
+        #[arg(long = "type", value_enum, value_name = "KIND")]
+        kind: commands::content::ContentKind,
+        /// Override the `ContentSource` (URL or free-form identifier).
+        /// Defaults to `File { path }` for the input file.
+        #[arg(long)]
+        source: Option<String>,
+        /// Emit the full `SanitizedContent` (text + report) as pretty
+        /// JSON instead of the human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -528,6 +553,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         return commands::audit::run(cmd).await;
     }
 
+    // The `content` command group is a pure file-in/text-out utility.
+    // It needs the fingerprint HMAC key (same source as the audit key)
+    // but not the DB or runtime. Short-circuit before DB setup so
+    // `sigil content sanitize` works on a host without a store.
+    if let Commands::Content(cmd) = cli.command {
+        return run_content(cmd).await;
+    }
+
     let db_path = expand_tilde(&cli.db)?;
 
     // Ensure the parent directory exists for the database file.
@@ -613,10 +646,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Commands::Identity(cmd) => commands::identity::run(&action_service, cmd).await,
-        Commands::Audit(_) | Commands::Memory(_) => {
+        Commands::Audit(_) | Commands::Memory(_) | Commands::Content(_) => {
             // Already handled above.
             Ok(())
         }
+    }
+}
+
+async fn run_content(cmd: ContentCommands) -> Result<()> {
+    match cmd {
+        ContentCommands::Sanitize {
+            file,
+            kind,
+            source,
+            json,
+        } => commands::content::sanitize(&file, kind, source.as_deref(), json).await,
     }
 }
 
@@ -1387,6 +1431,79 @@ mod tests {
             }
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Content CLI parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_parses_content_sanitize_html() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "content",
+            "sanitize",
+            "--file",
+            "/tmp/x.html",
+            "--type",
+            "html",
+        ]);
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Content(ContentCommands::Sanitize {
+                file,
+                kind,
+                source,
+                json,
+            }) => {
+                assert_eq!(file, "/tmp/x.html");
+                assert!(matches!(kind, commands::content::ContentKind::Html));
+                assert!(source.is_none());
+                assert!(!json);
+            }
+            other => panic!("expected Content Sanitize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_content_sanitize_with_source_and_json() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "content",
+            "sanitize",
+            "--file",
+            "/tmp/x.md",
+            "--type",
+            "md",
+            "--source",
+            "https://example.com/p",
+            "--json",
+        ]);
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Content(ContentCommands::Sanitize {
+                kind, source, json, ..
+            }) => {
+                assert!(matches!(kind, commands::content::ContentKind::Md));
+                assert_eq!(source.as_deref(), Some("https://example.com/p"));
+                assert!(json);
+            }
+            other => panic!("expected Content Sanitize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_content_sanitize_rejects_unknown_type() {
+        let cli = Cli::try_parse_from([
+            "sigil", "content", "sanitize", "--file", "/tmp/x", "--type", "yaml",
+        ]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn cli_content_requires_subcommand() {
+        let cli = Cli::try_parse_from(["sigil", "content"]);
+        assert!(cli.is_err());
     }
 
     #[test]

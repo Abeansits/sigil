@@ -79,6 +79,24 @@ impl<G: GrantStore> PolicyService<G> {
 }
 
 impl<G: GrantStore> sigil_core::PolicyEngine for PolicyService<G> {
+    async fn evaluate_result(
+        &self,
+        request: &ActionRequest,
+        result: &sigil_core::action::ActionResult,
+    ) -> Result<PolicyDecision, CoreError> {
+        self.evaluator
+            .evaluate_result(request, result)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    request_id = %request.id,
+                    error = %e,
+                    "post-dispatch policy evaluation failed"
+                );
+                CoreError::from(e)
+            })
+    }
+
     async fn evaluate(&self, request: &ActionRequest) -> Result<PolicyDecision, CoreError> {
         let decision = self.evaluator.evaluate(request).await.map_err(|e| {
             tracing::warn!(

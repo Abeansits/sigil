@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sigil_content::{DisabledFetcher, ExternalContentFetcher, Sanitizer};
 use sigil_mcp::handle_stream;
 use sigil_policy::grants::GrantStore;
 use tokio::io::BufReader;
@@ -61,13 +62,40 @@ pub(crate) trait McpSpawner: Send + Sync {
 }
 
 /// Concrete spawner that captures an `Arc<G>` for a specific `GrantStore`.
+///
+/// Carries the sanitizer and fetcher that the `fetch_url` MCP tool
+/// consults. `sanitizer = None` disables `fetch_url` (the tool returns
+/// a clean `Error` status without attempting to fetch); the default
+/// fetcher is `DisabledFetcher`, which produces `FetchError::NotConfigured`
+/// for every URL. Callers that want a working `fetch_url` pipeline must
+/// install both via [`Self::with_sanitizer`] and [`Self::with_fetcher`].
 pub(crate) struct McpSpawnerImpl<G> {
     grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
 }
 
 impl<G> McpSpawnerImpl<G> {
     pub(crate) fn new(grants: Arc<G>) -> Self {
-        Self { grants }
+        Self {
+            grants,
+            sanitizer: None,
+            fetcher: Arc::new(DisabledFetcher),
+        }
+    }
+
+    /// Install a sanitizer for the MCP `fetch_url` tool. Without this,
+    /// `fetch_url` is a hard-disabled surface on spawned servers.
+    pub(crate) fn with_sanitizer(mut self, sanitizer: Arc<Sanitizer>) -> Self {
+        self.sanitizer = Some(sanitizer);
+        self
+    }
+
+    /// Install a fetcher for the MCP `fetch_url` tool. Defaults to
+    /// [`DisabledFetcher`].
+    pub(crate) fn with_fetcher(mut self, fetcher: Arc<dyn ExternalContentFetcher>) -> Self {
+        self.fetcher = fetcher;
+        self
     }
 }
 
@@ -79,13 +107,23 @@ impl<G: GrantStore + 'static> McpSpawner for McpSpawnerImpl<G> {
         Box<dyn std::future::Future<Output = Result<McpHandle, RuntimeError>> + Send + '_>,
     > {
         let grants = self.grants.clone();
+        let sanitizer = self.sanitizer.clone();
+        let fetcher = Arc::clone(&self.fetcher);
         Box::pin(async move {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
             let path_for_task = socket_path.clone();
             let task = tokio::spawn(async move {
-                if let Err(e) = run_mcp_socket(grants, &path_for_task, shutdown_rx, ready_tx).await
+                if let Err(e) = run_mcp_socket(
+                    grants,
+                    sanitizer,
+                    fetcher,
+                    &path_for_task,
+                    shutdown_rx,
+                    ready_tx,
+                )
+                .await
                 {
                     warn!(error = %e, "MCP socket server exited with error");
                 }
@@ -136,6 +174,8 @@ pub fn mcp_socket_path(session_title: &str) -> PathBuf {
 /// timing-based sleep.
 async fn run_mcp_socket<G: GrantStore + 'static>(
     grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
     socket_path: &Path,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     ready_tx: tokio::sync::oneshot::Sender<Result<(), RuntimeError>>,
@@ -176,9 +216,11 @@ async fn run_mcp_socket<G: GrantStore + 'static>(
                 match accept {
                     Ok((stream, _)) => {
                         let grants = grants.clone();
+                        let sanitizer = sanitizer.clone();
+                        let fetcher = Arc::clone(&fetcher);
                         let conn_shutdown = shutdown.clone();
                         connections.spawn(async move {
-                            handle_mcp_connection(grants, stream, conn_shutdown).await;
+                            handle_mcp_connection(grants, sanitizer, fetcher, stream, conn_shutdown).await;
                         });
                     }
                     Err(e) => {
@@ -207,6 +249,8 @@ async fn run_mcp_socket<G: GrantStore + 'static>(
 /// signal fires.
 async fn handle_mcp_connection<G: GrantStore>(
     grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
     stream: tokio::net::UnixStream,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -214,7 +258,7 @@ async fn handle_mcp_connection<G: GrantStore>(
     let reader = BufReader::new(reader);
 
     tokio::select! {
-        result = handle_stream(grants, reader, writer) => {
+        result = handle_stream(grants, sanitizer, fetcher, reader, writer) => {
             if let Err(e) = result {
                 debug!(error = %e, "MCP connection ended");
             }
@@ -260,7 +304,13 @@ mod tests {
 
         let path_clone = socket_path.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_mcp_socket(grants, &path_clone, shutdown_rx, ready_tx).await {
+            // The socket-level tests exercise policy and transport
+            // only; `fetch_url` happy-path coverage lives in the
+            // sigil-conductor E2E test.
+            let fetcher: Arc<dyn ExternalContentFetcher> = Arc::new(DisabledFetcher);
+            if let Err(e) =
+                run_mcp_socket(grants, None, fetcher, &path_clone, shutdown_rx, ready_tx).await
+            {
                 eprintln!("test MCP server error: {e}");
             }
         });

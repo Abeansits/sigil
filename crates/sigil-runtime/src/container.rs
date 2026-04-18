@@ -164,12 +164,40 @@ impl ContainerRuntime {
     /// on a Unix socket published into each container. The agent inside
     /// the container connects to `/tmp/sigil-mcp.sock` and sends
     /// JSON-RPC requests through the policy evaluator.
+    ///
+    /// This variant leaves the `fetch_url` tool hard-disabled
+    /// (`sanitizer = None`, `fetcher = DisabledFetcher`). Use
+    /// [`Self::with_mcp_sanitized`] to ship a working `fetch_url`
+    /// pipeline alongside the rest of the MCP surface.
     #[must_use]
     pub fn with_mcp<G: sigil_policy::grants::GrantStore + 'static>(
         mut self,
         grants: Arc<G>,
     ) -> Self {
         self.mcp_spawner = Some(Arc::new(McpSpawnerImpl::new(grants)));
+        self
+    }
+
+    /// Enable MCP with `fetch_url` wired end-to-end.
+    ///
+    /// Same as [`Self::with_mcp`] but installs a `sigil-content`
+    /// sanitizer and a fetcher on every spawned MCP server, so the
+    /// `fetch_url` tool dispatches the real sanitize-and-gate pipeline
+    /// instead of failing with "no sanitizer configured". The caller
+    /// owns the sanitizer key material (it loads from the audit HMAC
+    /// key source).
+    #[must_use]
+    pub fn with_mcp_sanitized<G: sigil_policy::grants::GrantStore + 'static>(
+        mut self,
+        grants: Arc<G>,
+        sanitizer: Arc<sigil_content::Sanitizer>,
+        fetcher: Arc<dyn sigil_content::ExternalContentFetcher>,
+    ) -> Self {
+        self.mcp_spawner = Some(Arc::new(
+            McpSpawnerImpl::new(grants)
+                .with_sanitizer(sanitizer)
+                .with_fetcher(fetcher),
+        ));
         self
     }
 

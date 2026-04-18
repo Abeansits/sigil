@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use crate::action::{ActionRequest, PolicyDecision};
+use crate::action::{ActionRequest, ActionResult, PolicyDecision};
 use crate::content::SanitizeReport;
 use crate::error::CoreError;
 use crate::protocol::{AgentSignal, BridgeMessage, ConductorMessage, HookFormat, StatusPattern};
@@ -85,6 +85,41 @@ pub trait PolicyEngine: Send + Sync {
         &self,
         request: &ActionRequest,
     ) -> impl Future<Output = Result<PolicyDecision, CoreError>> + Send;
+
+    /// Post-dispatch check: the action has run and produced an
+    /// [`ActionResult`]. The evaluator inspects the result — in
+    /// particular, whether a `SanitizeReport` is present for actions
+    /// that declared `SanitizationRequirement::Required` — and
+    /// returns a final `Allow` / `Deny`.
+    ///
+    /// The default implementation **fails closed**: it returns
+    /// `CoreError::Internal` with a descriptive message. Test stubs
+    /// and engines with no real post-dispatch gate must override this
+    /// explicitly (returning `Allow` is a conscious choice, not a
+    /// quiet default). `sigil-policy::PolicyService` overrides this to
+    /// forward to `Evaluator::evaluate_result`, which is where the
+    /// real `SanitizationRequirement` enforcement lives.
+    ///
+    /// The previous default returned `Allow`, which was a fail-open
+    /// footgun: a custom `PolicyEngine` that forgot to override would
+    /// silently pass sanitize-required actions without a report
+    /// reaching the gate. Fail-closed matches the "no silent
+    /// permissive defaults" principle in `docs/SECURITY-PLAN.md`.
+    fn evaluate_result(
+        &self,
+        request: &ActionRequest,
+        result: &ActionResult,
+    ) -> impl Future<Output = Result<PolicyDecision, CoreError>> + Send {
+        let _ = (request, result);
+        async {
+            Err(CoreError::Internal {
+                message: "PolicyEngine::evaluate_result not implemented; \
+                          implementations must override this trait method \
+                          (fail-closed default)"
+                    .into(),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

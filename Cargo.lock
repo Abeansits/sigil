@@ -1895,6 +1895,7 @@ dependencies = [
  "sigil-audit",
  "sigil-bridge",
  "sigil-conductor",
+ "sigil-content",
  "sigil-core",
  "sigil-memory",
  "sigil-policy",
@@ -1918,6 +1919,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sigil-audit",
+ "sigil-content",
  "sigil-core",
  "sigil-memory",
  "sigil-policy",
@@ -1947,6 +1949,7 @@ dependencies = [
  "sigil-core",
  "sigil-policy",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -1974,9 +1977,11 @@ dependencies = [
  "assert_matches",
  "serde",
  "serde_json",
+ "sigil-content",
  "sigil-core",
  "sigil-policy",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
  "ulid",
@@ -2026,6 +2031,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sigil-audit",
+ "sigil-content",
  "sigil-core",
  "sigil-mcp",
  "sigil-policy",

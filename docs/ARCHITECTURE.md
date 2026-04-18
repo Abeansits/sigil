@@ -20,6 +20,7 @@ sigil/
     sigil-conductor/
     sigil-bridge/
     sigil-mcp/
+    sigil-content/
     sigil-cli/
 ```
 
@@ -36,7 +37,8 @@ sigil/
 | `sigil-bridge` | Telegram/Slack parsing, identity allowlisting, rate limiting, routing, live loops |
 | `sigil-memory` | Operational memory — episode logging, mechanical consolidation of learnings |
 | `sigil-mcp` | Host-side MCP server for policy-mediated agent actions (JSON-RPC over stdin/stdout) |
-| `sigil-cli` | `sigil` binary, clap commands, bridge runner, audit verification, conductor runner |
+| `sigil-content` | External-content sanitization pipeline — HTML/Markdown/JSON/plain-text format-aware strip, text-layer normalize (composed from `sigil-policy::normalize`), injection-pattern scan, nonce-delimited provenance wrap, keyed-HMAC fingerprints. Pure transform — no policy decisions, no I/O. |
+| `sigil-cli` | `sigil` binary, clap commands, bridge runner, audit verification, conductor runner, `sigil content sanitize` debug harness |
 
 `ContainerRuntime` (feature-gated behind `container`) runs sessions in Apple Container VMs. The domain-filtering proxy and MCP socket server live in the same crate. The agent container image is defined in `container/Dockerfile`.
 
@@ -45,9 +47,10 @@ sigil/
 Compile-time workspace edges:
 
 ```text
-sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-core, sigil-runtime, sigil-store
+sigil-cli → sigil-audit, sigil-bridge, sigil-conductor, sigil-content, sigil-core, sigil-runtime, sigil-store
 sigil-conductor → sigil-audit, sigil-core, sigil-memory, sigil-policy, sigil-runtime, sigil-store
 sigil-bridge → sigil-audit, sigil-core, sigil-policy
+sigil-content → sigil-core, sigil-policy
 sigil-mcp → sigil-core, sigil-policy
 sigil-runtime → sigil-core, sigil-policy, sigil-audit [container], sigil-mcp [container]
 sigil-memory → sigil-core
@@ -64,6 +67,7 @@ Notes:
 - `sigil-bridge` and `sigil-conductor` remain decoupled at compile time; bridge code targets `MessageSink`.
 - `sigil-store` depends on `sigil-policy` because it implements the `GrantStore` trait and stores approval grants.
 - `sigil-runtime` depends on `sigil-mcp` and `sigil-audit` behind the `container` feature gate (MCP socket server + audit-logged proxy).
+- `sigil-content` depends on `sigil-policy::normalize` for the text-layer Unicode/control strip. The sanitizer is a pure transform that composes the existing normalizer rather than duplicating it.
 
 ## Core Runtime Model
 
@@ -279,6 +283,72 @@ Implemented subcommands:
 
 - `verify` — validates HMAC chain integrity of the audit log
 
+## Content Sanitization Pipeline
+
+The `sigil-content` crate implements the ingest-edge sanitization pipeline described in [`docs/design/content-sanitization.md`](design/content-sanitization.md). It runs on external content — bytes fetched from the web, attached to a bridge message, or returned by an MCP tool — **before** the content reaches an agent's context window.
+
+### Production flow
+
+```text
+Action::FetchExternalContent { url, content_type }
+      │
+      ▼
+┌────────────────────────────────────────────┐
+│ ActionService::execute                     │
+│   1. policy.evaluate  → Allow              │
+│   2. dispatch_fetch_external_content:      │
+│        fetcher.fetch(url) → bytes          │
+│                                            │
+│        ┌────────────────────────────────┐  │
+│        │ sigil-content::Sanitizer       │  │
+│        │  Stage 1: size cap (pre-decode)│  │
+│        │  Stage 2: declared-type decode │  │
+│        │  Stage 3: format-specific strip│  │
+│        │  Stage 4: text-layer normalize │  │
+│        │  Stage 5: injection scan       │  │
+│        │  Stage 6: nonce provenance wrap│  │
+│        │  Stage 7: HMAC fingerprints    │  │
+│        └────────────────────────────────┘  │
+│        → SanitizedContent { text, report } │
+│                                            │
+│   3. policy.evaluate_result(req, result)   │
+│      → SanitizationRequirement gate        │
+│   4. audit { decision, sanitize_report }   │
+└────────────────────────────────────────────┘
+      │
+      ▼                               ▼
+agent prompt / tool_result      HMAC-chained audit log
+(wrapped cleaned text + report) (SanitizeReport + fingerprints)
+```
+
+Raw fetched bytes never leave the `dispatch_fetch_external_content` boundary. The sanitizer consumes them by value (`RawFetchedContent` is not `Clone` and has no public byte accessor), so the compile-time type system prevents unsanitized bytes from flowing into any `ActionOutcome::Completed` payload.
+
+### Call sites
+
+Phase 1 integration surface:
+
+- `sigil content sanitize --file <path> --type <html|md|json|text|log>` — the CLI debug/red-team harness. Loads a file, runs the pipeline, prints the cleaned text and a summary of the `SanitizeReport` (or the full JSON report with `--json`).
+- **Conductor:** the `Action::FetchExternalContent { url, content_type }` variant routes through `ActionService::dispatch_fetch_external_content` — `ExternalContentFetcher::fetch` → `sanitize_{html,markdown,json,plain}` → `DispatchResult::ExternalContent { text, report }`. `ActionService::execute` then calls `PolicyEngine::evaluate_result` on the post-dispatch `ActionResult` (carrying the report) so the `SanitizationRequirement` gate is enforced. A second audit event captures the post-dispatch decision with the `SanitizeReport` attached.
+- **MCP tool results:** the `fetch_url` tool (added in PR7) dispatches through the same sanitizer the conductor uses. `McpServer::with_sanitizer` / `.with_fetcher` install the pipeline; post-`Allow` the server calls the fetcher, runs the sanitizer, and gates the reply through `Evaluator::evaluate_result` before packaging `{ text, report }` into the `ToolResult` data field. Raw fetched bytes never cross the MCP boundary.
+- **Fetcher abstraction:** `sigil-content::fetcher` ships the `ExternalContentFetcher` trait (`fn fetch(&self, url) -> FetchFuture`), a `FetchError` taxonomy, and a `DisabledFetcher` default. Production deployments will plug in an HTTP client behind the existing domain-filtering proxy; PR7 does not ship that client.
+
+Deferred to Phase 2 (design accommodates them; no wiring yet):
+
+- Bridge message attachments (Telegram photos/docs, Slack file shares).
+- External-file reads tagged by policy as `Ingress`.
+- Inter-agent message relay re-sanitization.
+
+### Design invariants
+
+- **Pure transform.** `sigil-content` emits `SanitizedContent + SanitizeReport` and never decides `Allow` / `Deny` / `NeedsApproval`. Those decisions live in `sigil-policy`, which consumes the `risk_score`, `findings`, and size/encoding rejection flags from the report.
+- **No sniffing.** Callers always declare the content type. A mismatch between declared type and body markers is flagged (`FMT-001`, `Severity::High`), not silently corrected.
+- **Keyed fingerprints.** `raw_fingerprint` and `sanitized_fingerprint` are `HMAC-SHA256` under a per-deployment key sourced from the same Keychain/env path as the audit HMAC key. No unkeyed-SHA fallback; the sanitizer hard-fails at construction if the key is unavailable.
+- **Parser differential mitigation.** Whatever the sanitizer emits is what the agent sees and what the auditor sees. The conductor never forwards raw fetched bytes to the model alongside the cleaned form.
+
+### Report shape
+
+The `SanitizeReport` (defined in `sigil-core::content`) carries three independent version numbers (`schema_version`, `rule_set_version`, `scoring_version`) so a report is reproducible against the rule catalog and scoring weights that produced it. See the design doc §Stage 7 for the full field inventory.
+
 ## What Is Implemented Today
 
 ### Fully wired
@@ -305,12 +375,18 @@ Implemented subcommands:
 - agent container image (`container/Dockerfile`) with Claude Code + Codex
 - operational memory — episode logging and mechanical consolidation (`sigil-memory`)
 - property-based tests with `proptest` across core, audit, and policy crates
+- external-content sanitization pipeline (`sigil-content`) — plain-text, HTML, Markdown, and JSON paths with nonce-delimited provenance wrap, keyed-HMAC fingerprints, and a stable rule-ID pattern scanner
+- `sigil content sanitize` CLI debug harness for the sanitization pipeline
+- policy-layer `SanitizationRequirement` enforcement (`Evaluator::evaluate_result`) — actions that declare `Required(content_type)` are gated by a matching `SanitizeReport`
+- `Action::FetchExternalContent` variant + conductor dispatch (`ActionService::dispatch_fetch_external_content`) with fetch + sanitize + post-dispatch policy gate + audit entry carrying the report
+- MCP `fetch_url` tool with in-process sanitize + `evaluate_result` gate
+- End-to-end integration test (`crates/sigil-conductor/tests/sanitize_e2e.rs`) covering HTML, Markdown, and JSON fixtures through the full pipeline into the audit log
 
 ### Not implemented in this workspace
 
-- Keychain-backed audit key management
 - workflow-bundle approvals
-- WebFetch/content sanitization pipeline
+- image / audio / PDF sanitization (Phase 2 of the content pipeline)
+- bridge attachment handling through the content pipeline
 
 ## Verification Snapshot
 

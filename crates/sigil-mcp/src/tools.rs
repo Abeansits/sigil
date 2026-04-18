@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use sigil_core::action::Action;
+use sigil_core::content::ContentType;
 use sigil_core::id::SessionId;
 
 /// The set of MCP tools exposed to agents.
@@ -37,17 +38,37 @@ pub enum McpTool {
     /// Read the output of a session.
     #[serde(rename = "read_session_output")]
     ReadSessionOutput(SessionIdParam),
+
+    /// Fetch external content and run it through the
+    /// `sigil-content` sanitization pipeline before the bytes reach
+    /// the agent. The tool never returns raw fetched bytes — only the
+    /// cleaned text and the accompanying `SanitizeReport`.
+    #[serde(rename = "fetch_url")]
+    FetchUrl(FetchUrlParams),
 }
 
 /// Parameters for the `request_approval` tool.
+///
+/// Each `action` variant uses a subset of the optional fields; the
+/// parser validates "required for this variant" at dispatch time.
+/// Adding `url` + `content_type` (for `FetchExternalContent`) is
+/// additive — existing `ReadHostFile` / `WriteHostFile` / `BreakGlass`
+/// callers keep working.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RequestApprovalParams {
-    /// The action being requested (e.g., `ReadHostFile`, `WriteHostFile`).
+    /// The action being requested (e.g., `ReadHostFile`,
+    /// `WriteHostFile`, `FetchExternalContent`, `BreakGlass`).
     pub action: String,
     /// Optional file path for file operations.
     pub path: Option<String>,
     /// Optional justification for the request.
     pub justification: Option<String>,
+    /// Optional URL for `FetchExternalContent` approval requests.
+    pub url: Option<String>,
+    /// Optional content type for `FetchExternalContent` approval
+    /// requests. Accepts the same string aliases as
+    /// [`FetchUrlParams::resolve_content_type`].
+    pub content_type: Option<String>,
 }
 
 /// A session ID parameter.
@@ -61,6 +82,33 @@ pub struct SessionIdParam {
 pub struct SendMessageParams {
     pub session_id: String,
     pub message: String,
+}
+
+/// Parameters for the `fetch_url` tool.
+///
+/// `content_type` is caller-declared (never sniffed). The design doc
+/// §Stage 2 rejects sniffing as a known attack vector. Accepted
+/// spellings: `"html"`, `"markdown"` / `"md"`, `"json"`, `"text"` /
+/// `"plain"`, `"log"`. Anything else is a parse error.
+#[derive(Clone, Debug, Deserialize)]
+pub struct FetchUrlParams {
+    pub url: String,
+    #[serde(rename = "content_type")]
+    pub content_type: String,
+}
+
+impl FetchUrlParams {
+    /// Resolve the wire-format string into a [`ContentType`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a descriptive string when the value does not match any
+    /// supported alias. The server maps this to an
+    /// `INVALID_PARAMS` JSON-RPC error so the agent sees a clean
+    /// rejection instead of a silent fallback.
+    pub fn resolve_content_type(&self) -> Result<ContentType, String> {
+        resolve_content_type(&self.content_type)
+    }
 }
 
 /// The result of a tool call, returned to the agent.
@@ -95,6 +143,10 @@ pub struct ToolSchema {
 }
 
 /// Return the list of tool schemas for the `tools/list` response.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one vec literal per tool — flat is clearer than helpers"
+)]
 pub fn tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
@@ -107,7 +159,12 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["ReadHostFile", "WriteHostFile", "BreakGlass"],
+                        "enum": [
+                            "ReadHostFile",
+                            "WriteHostFile",
+                            "FetchExternalContent",
+                            "BreakGlass",
+                        ],
                         "description": "The action to request",
                     },
                     "path": {
@@ -117,6 +174,15 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                     "justification": {
                         "type": "string",
                         "description": "Why this action is needed (required for BreakGlass)",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "URL for FetchExternalContent approvals",
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "enum": ["html", "markdown", "json", "text", "log"],
+                        "description": "Declared content type for FetchExternalContent (never sniffed)",
                     },
                 },
                 "required": ["action"],
@@ -176,6 +242,29 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
                 "required": ["session_id"],
             }),
         },
+        ToolSchema {
+            name: "fetch_url",
+            description: "Fetch external content from a URL. The bytes are \
+                          routed through the sigil-content sanitizer before \
+                          reaching the caller; raw fetched bytes never cross \
+                          the trust boundary. Requires the FetchExternalContent \
+                          capability (grant-gated at T1).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch",
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "enum": ["html", "markdown", "json", "text", "log"],
+                        "description": "Declared content type (never sniffed)",
+                    },
+                },
+                "required": ["url", "content_type"],
+            }),
+        },
     ]
 }
 
@@ -206,6 +295,13 @@ impl McpTool {
                 let session_id = parse_session_id(&p.session_id)?;
                 Ok(Action::ReadSessionOutput { session_id })
             }
+            Self::FetchUrl(p) => {
+                let content_type = p.resolve_content_type()?;
+                Ok(Action::FetchExternalContent {
+                    url: p.url,
+                    content_type,
+                })
+            }
         }
     }
 }
@@ -232,6 +328,28 @@ fn params_to_action(params: &RequestApprovalParams) -> Result<Action, String> {
                 content: Vec::new(), // Content handled separately
             })
         }
+        "FetchExternalContent" => {
+            // `fetch_url` is grant-gated at T1 (Capability::FetchExternalContent
+            // with `requires_grant`). Agents who receive `NeedsApproval` for
+            // the `fetch_url` tool need a way to formally request a grant,
+            // which is exactly what `request_approval` is for. (PR7 Codex
+            // review: earlier draft only recognized host-file / break-glass
+            // action names here, leaving agents with no in-protocol path
+            // to ask for a FetchExternalContent grant.)
+            let url = params
+                .url
+                .as_deref()
+                .ok_or("FetchExternalContent requires a 'url' parameter")?;
+            let content_type_str = params.content_type.as_deref().ok_or(
+                "FetchExternalContent requires a 'content_type' parameter \
+                 (html / markdown / json / text / log)",
+            )?;
+            let content_type = resolve_content_type(content_type_str)?;
+            Ok(Action::FetchExternalContent {
+                url: url.to_owned(),
+                content_type,
+            })
+        }
         "BreakGlass" => {
             let justification = params
                 .justification
@@ -248,6 +366,23 @@ fn params_to_action(params: &RequestApprovalParams) -> Result<Action, String> {
             })
         }
         other => Err(format!("unrecognized action: {other}")),
+    }
+}
+
+/// Resolve the wire-format content-type string into a [`ContentType`].
+/// Shared between [`FetchUrlParams`] and the `request_approval`
+/// `FetchExternalContent` path so the accepted aliases stay in sync.
+fn resolve_content_type(raw: &str) -> Result<ContentType, String> {
+    match raw.to_ascii_lowercase().as_str() {
+        "html" => Ok(ContentType::Html),
+        "markdown" | "md" => Ok(ContentType::Markdown),
+        "json" => Ok(ContentType::Json),
+        "text" | "plain" | "plaintext" | "plain_text" => Ok(ContentType::PlainText),
+        "log" => Ok(ContentType::Log),
+        other => Err(format!(
+            "unsupported content_type '{other}'; expected one of: \
+             html, markdown, json, text, log"
+        )),
     }
 }
 
@@ -283,6 +418,8 @@ mod tests {
             action: "ReadHostFile".into(),
             path: Some("/etc/hosts".into()),
             justification: None,
+            url: None,
+            content_type: None,
         });
         let action = tool.into_action().expect("should parse");
         assert!(matches!(action, Action::ReadHostFile { .. }));
@@ -294,6 +431,8 @@ mod tests {
             action: "ReadHostFile".into(),
             path: None,
             justification: None,
+            url: None,
+            content_type: None,
         });
         let result = tool.into_action();
         assert!(result.is_err());
@@ -305,6 +444,8 @@ mod tests {
             action: "DeleteEverything".into(),
             path: None,
             justification: None,
+            url: None,
+            content_type: None,
         });
         let result = tool.into_action();
         assert!(result.is_err());
@@ -323,6 +464,8 @@ mod tests {
             action: "BreakGlass".into(),
             path: None,
             justification: None,
+            url: None,
+            content_type: None,
         });
         let result = tool.into_action();
         assert!(result.is_err());
@@ -334,9 +477,84 @@ mod tests {
             action: "BreakGlass".into(),
             path: Some("/tmp".into()),
             justification: Some("debugging".into()),
+            url: None,
+            content_type: None,
         });
         let action = tool.into_action().expect("should parse");
         assert!(matches!(action, Action::BreakGlass { .. }));
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        clippy::wildcard_enum_match_arm,
+        reason = "exhaustive Action listing would dwarf the assertion"
+    )]
+    fn parse_request_approval_fetch_external_content_happy_path() {
+        let tool = McpTool::RequestApproval(RequestApprovalParams {
+            action: "FetchExternalContent".into(),
+            path: None,
+            justification: None,
+            url: Some("https://example.com/post".into()),
+            content_type: Some("html".into()),
+        });
+        let action = tool.into_action().expect("should parse");
+        match action {
+            Action::FetchExternalContent { url, content_type } => {
+                assert_eq!(url, "https://example.com/post");
+                assert_eq!(content_type, ContentType::Html);
+            }
+            other => panic!("expected FetchExternalContent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_request_approval_fetch_external_content_missing_url_errors() {
+        let tool = McpTool::RequestApproval(RequestApprovalParams {
+            action: "FetchExternalContent".into(),
+            path: None,
+            justification: None,
+            url: None,
+            content_type: Some("html".into()),
+        });
+        let err = tool.into_action().expect_err("must fail without url");
+        assert!(err.contains("url"), "error should mention url: {err}");
+    }
+
+    #[test]
+    fn parse_request_approval_fetch_external_content_missing_content_type_errors() {
+        let tool = McpTool::RequestApproval(RequestApprovalParams {
+            action: "FetchExternalContent".into(),
+            path: None,
+            justification: None,
+            url: Some("https://example.com/post".into()),
+            content_type: None,
+        });
+        let err = tool
+            .into_action()
+            .expect_err("must fail without content_type");
+        assert!(
+            err.contains("content_type"),
+            "error should mention content_type: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_request_approval_fetch_external_content_unknown_type_errors() {
+        let tool = McpTool::RequestApproval(RequestApprovalParams {
+            action: "FetchExternalContent".into(),
+            path: None,
+            justification: None,
+            url: Some("https://example.com/post".into()),
+            content_type: Some("yaml".into()),
+        });
+        let err = tool
+            .into_action()
+            .expect_err("must reject unknown content_type");
+        assert!(
+            err.contains("yaml"),
+            "error should quote the bad value: {err}"
+        );
     }
 
     #[test]

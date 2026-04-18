@@ -40,4 +40,12 @@ pub enum CoreError {
 
     #[error("memory error: {message}")]
     Memory { message: String },
+
+    /// Invariant or programmer error. Distinct from
+    /// [`CoreError::Runtime`] (external-world failure) so that a
+    /// crashed invariant cannot be mistaken for a transient runtime
+    /// glitch. Used by trait default implementations that must fail
+    /// closed when no concrete implementation is installed.
+    #[error("internal invariant violation: {message}")]
+    Internal { message: String },
 }

@@ -21,6 +21,7 @@ sigil-runtime = { path = "../sigil-runtime" }
 sigil-conductor = { path = "../sigil-conductor" }
 sigil-memory = { path = "../sigil-memory" }
 sigil-bridge = { path = "../sigil-bridge" }
+sigil-content = { path = "../sigil-content" }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true

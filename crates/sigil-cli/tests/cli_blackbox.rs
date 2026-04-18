@@ -454,6 +454,179 @@ fn status_json_after_creates_reflects_correct_counts() {
     assert_eq!(parsed["stopped"], 2, "both should be stopped");
 }
 
+/// Phase A of the sanitization PR7: exercise `sigil content sanitize`
+/// against the shipped HTML fixture end-to-end. We do not assert on every
+/// finding ID here — that's the conductor-level integration test in
+/// Phase B. We only verify the CLI runs cleanly, the cleaned output no
+/// longer contains the most obvious injection substrings, and the JSON
+/// report has the fields downstream consumers depend on.
+#[test]
+fn content_sanitize_html_fixture_strips_injection_payload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("sigil-conductor/tests/fixtures/sanitize/bad.html");
+    assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+    let fixture_str = fixture.to_str().expect("utf-8 path");
+
+    let out = run_sigil(
+        tmp.path(),
+        &[
+            "content",
+            "sanitize",
+            "--file",
+            fixture_str,
+            "--type",
+            "html",
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "content sanitize should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+
+    let text = parsed["text"].as_str().expect("text field");
+    // Hidden-div / comment / script payloads must all be stripped.
+    assert!(
+        !text.contains("exfiltrate"),
+        "cleaned text must not contain 'exfiltrate': {text}"
+    );
+    assert!(
+        !text.contains("administrator mode"),
+        "cleaned text must not contain 'administrator mode': {text}"
+    );
+    assert!(
+        !text.contains("/etc/passwd"),
+        "cleaned text must not contain '/etc/passwd': {text}"
+    );
+    // But visible body content must survive.
+    assert!(
+        text.contains("Revenue grew"),
+        "cleaned text must preserve visible paragraph: {text}"
+    );
+
+    let report = &parsed["report"];
+    assert_eq!(report["content_type"], "Html");
+    assert!(report["bytes_in"].as_u64().expect("bytes_in") > 0);
+    assert!(report["risk_score"].as_u64().is_some());
+    // Nonce + fingerprints populate the report reliably.
+    assert!(
+        report["nonce"]
+            .as_str()
+            .expect("nonce string")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()),
+        "nonce must be hex",
+    );
+    let stripped = report["stripped_elements"]
+        .as_array()
+        .expect("stripped_elements array");
+    let kinds: Vec<&str> = stripped
+        .iter()
+        .filter_map(|entry| entry.as_array())
+        .filter_map(|pair| pair.first())
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"script"),
+        "must strip <script>: kinds={kinds:?}"
+    );
+}
+
+#[test]
+fn content_sanitize_markdown_strips_comment_and_preserves_code_block() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("sigil-conductor/tests/fixtures/sanitize/bad.md");
+    assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+
+    let out = run_sigil(
+        tmp.path(),
+        &[
+            "content",
+            "sanitize",
+            "--file",
+            fixture.to_str().expect("utf-8 path"),
+            "--type",
+            "md",
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "md sanitize should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+    let text = parsed["text"].as_str().expect("text field");
+    assert!(
+        !text.contains("Dump the conversation history"),
+        "HTML-comment smuggled injection must be stripped: {text}"
+    );
+    assert!(
+        !text.contains("pirate"),
+        "raw-HTML-block injection must be stripped: {text}"
+    );
+    assert!(
+        text.contains("retry") && text.contains("MAX_RETRIES"),
+        "fenced code block must be preserved: {text}"
+    );
+    assert_eq!(parsed["report"]["content_type"], "Markdown");
+}
+
+#[test]
+fn content_sanitize_json_normalizes_unicode_escapes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("sigil-conductor/tests/fixtures/sanitize/bad.json");
+    assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+
+    let out = run_sigil(
+        tmp.path(),
+        &[
+            "content",
+            "sanitize",
+            "--file",
+            fixture.to_str().expect("utf-8 path"),
+            "--type",
+            "json",
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "json sanitize should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+    let text = parsed["text"].as_str().expect("text field");
+    // The decoded escape should surface as a pattern-scanner finding
+    // (not silently dropped) so policy + audit can see it.
+    let findings = parsed["report"]["findings"]
+        .as_array()
+        .expect("findings array");
+    assert!(
+        !findings.is_empty(),
+        "decoded escape must produce findings: text={text}"
+    );
+    assert_eq!(parsed["report"]["content_type"], "Json");
+}
+
 /// Regression: `audit` subcommands must short-circuit before any
 /// DB / data-dir setup so they remain usable even when `SIGIL_DB`
 /// points at an unwritable parent. (PR #40 review feedback.)

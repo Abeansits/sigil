@@ -18,7 +18,9 @@
 
 use std::sync::Arc;
 
-use sigil_core::action::{ActionRequest, PolicyDecision};
+use sigil_content::{DisabledFetcher, ExternalContentFetcher, RawFetchedContent, Sanitizer};
+use sigil_core::action::{Action, ActionRequest, ActionResult, PolicyDecision};
+use sigil_core::content::{ContentSource, ContentType};
 use sigil_core::id::SessionId;
 use sigil_core::origin::ActionOrigin;
 use sigil_policy::grants::GrantStore;
@@ -30,10 +32,21 @@ use crate::transport::{JsonRpcRequest, JsonRpcResponse};
 
 /// The MCP server. Holds a policy evaluator and the session ID of the
 /// agent that connects to it (set during initialization).
+///
+/// When built with [`McpServer::with_sanitizer`], external-content
+/// tool calls (`fetch_url`) run the fetched bytes through the
+/// `sigil-content` pipeline before the agent sees any data. Servers
+/// built without a sanitizer deny `fetch_url` requests cleanly through
+/// the same post-dispatch evaluator gate that the conductor uses.
 pub struct McpServer<G: GrantStore> {
     evaluator: Evaluator<G>,
     /// The session ID of the connected agent, set during `initialize`.
     agent_session_id: Option<SessionId>,
+    /// Optional sanitizer. `None` means every `fetch_url` call fails
+    /// cleanly — no silent passthrough.
+    sanitizer: Option<Arc<Sanitizer>>,
+    /// Fetcher implementation. Defaults to [`DisabledFetcher`].
+    fetcher: Arc<dyn ExternalContentFetcher>,
 }
 
 impl<G: GrantStore> McpServer<G> {
@@ -43,6 +56,8 @@ impl<G: GrantStore> McpServer<G> {
         Self {
             evaluator,
             agent_session_id: None,
+            sanitizer: None,
+            fetcher: Arc::new(DisabledFetcher),
         }
     }
 
@@ -52,7 +67,25 @@ impl<G: GrantStore> McpServer<G> {
         Self {
             evaluator: Evaluator::new(EvaluatorConfig::default(), grants),
             agent_session_id: None,
+            sanitizer: None,
+            fetcher: Arc::new(DisabledFetcher),
         }
+    }
+
+    /// Install a sanitizer. Without one, `fetch_url` tool calls produce
+    /// a clean `Error` status rather than returning unsanitized bytes.
+    #[must_use]
+    pub fn with_sanitizer(mut self, sanitizer: Arc<Sanitizer>) -> Self {
+        self.sanitizer = Some(sanitizer);
+        self
+    }
+
+    /// Install a fetcher for `fetch_url` tool calls. Defaults to
+    /// [`DisabledFetcher`].
+    #[must_use]
+    pub fn with_fetcher(mut self, fetcher: Arc<dyn ExternalContentFetcher>) -> Self {
+        self.fetcher = fetcher;
+        self
     }
 
     /// Handle a single JSON-RPC request and return a response.
@@ -159,37 +192,174 @@ impl<G: GrantStore> McpServer<G> {
         let action_request = ActionRequest::new(action, origin);
 
         // Evaluate through policy.
-        let tool_result = match self.evaluator.evaluate(&action_request).await {
-            Ok(decision) => decision_to_tool_result(&decision),
-            Err(e) => ToolResult {
-                status: ToolStatus::Error,
-                message: format!("policy evaluation failed: {e}"),
-                data: None,
-            },
-        };
-
-        // Wrap in MCP content format.
-        let result_text = match serde_json::to_string(&tool_result) {
-            Ok(text) => text,
+        let decision = match self.evaluator.evaluate(&action_request).await {
+            Ok(decision) => decision,
             Err(e) => {
-                return JsonRpcResponse::error(
-                    request.id.clone(),
-                    codes::INTERNAL_ERROR,
-                    format!("failed to serialize tool result: {e}"),
-                );
+                let tool_result = ToolResult {
+                    status: ToolStatus::Error,
+                    message: format!("policy evaluation failed: {e}"),
+                    data: None,
+                };
+                return package_tool_result(request.id.clone(), &tool_result);
             }
         };
 
-        let content = serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": result_text,
-            }],
-            "isError": tool_result.status == ToolStatus::Error || tool_result.status == ToolStatus::Denied,
-        });
+        let tool_result = match &decision {
+            PolicyDecision::Allow => self.dispatch_allowed(&action_request).await,
+            PolicyDecision::Deny { .. } | PolicyDecision::NeedsApproval { .. } => {
+                decision_to_tool_result(&decision)
+            }
+        };
 
-        JsonRpcResponse::success(request.id.clone(), content)
+        package_tool_result(request.id.clone(), &tool_result)
     }
+
+    /// Run the MCP side of a post-`Allow` tool call.
+    ///
+    /// For `FetchExternalContent`, this is where the sanitizer runs:
+    /// fetch → sanitize → `evaluate_result` gate → package the cleaned
+    /// text + report into the [`ToolResult`] data field. Every other
+    /// action's `Allow` today produces a "policy allowed" stub (no
+    /// execution in MCP — that happens in the conductor via
+    /// `ActionService`); the caller does not treat this as a
+    /// regression.
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "only FetchExternalContent needs dispatch; everything else returns the policy-allowed stub"
+    )]
+    async fn dispatch_allowed(&self, request: &ActionRequest) -> ToolResult {
+        match &request.action {
+            Action::FetchExternalContent { url, content_type } => {
+                self.dispatch_fetch_url(request, url, *content_type).await
+            }
+            _ => decision_to_tool_result(&PolicyDecision::Allow),
+        }
+    }
+
+    /// Fetch + sanitize + post-dispatch gate. Factored out so the
+    /// `Allow` dispatch stays readable.
+    async fn dispatch_fetch_url(
+        &self,
+        request: &ActionRequest,
+        url: &str,
+        content_type: ContentType,
+    ) -> ToolResult {
+        let Some(sanitizer) = self.sanitizer.as_ref() else {
+            return ToolResult {
+                status: ToolStatus::Error,
+                message: "fetch_url: no sanitizer configured on this MCP server".into(),
+                data: None,
+            };
+        };
+
+        // Fetch raw bytes.
+        let bytes = match self.fetcher.fetch(url).await {
+            Ok(b) => b,
+            Err(e) => {
+                return ToolResult {
+                    status: ToolStatus::Error,
+                    message: format!("fetch failed: {e}"),
+                    data: None,
+                };
+            }
+        };
+
+        // Sanitize.
+        let source =
+            ContentSource::from_url(url).unwrap_or_else(|_| ContentSource::Other(url.to_owned()));
+        let raw = RawFetchedContent::from_bytes(bytes);
+        let cleaned = match run_sanitize(sanitizer, raw, source, content_type) {
+            Ok(s) => s,
+            Err(e) => {
+                return ToolResult {
+                    status: ToolStatus::Error,
+                    message: format!("sanitize failed: {e}"),
+                    data: None,
+                };
+            }
+        };
+
+        // Post-dispatch policy gate — enforces SanitizationRequirement
+        // end-to-end even on the MCP path (not just the conductor).
+        let report = cleaned.report.clone();
+        let action_result = ActionResult::new().with_sanitize_report(report.clone());
+        match self
+            .evaluator
+            .evaluate_result(request, &action_result)
+            .await
+        {
+            Ok(PolicyDecision::Allow) => {
+                let data = serde_json::json!({
+                    "text": cleaned.text,
+                    "report": report,
+                });
+                ToolResult {
+                    status: ToolStatus::Allowed,
+                    message: "fetch_url: content sanitized and returned.".into(),
+                    data: Some(data),
+                }
+            }
+            Ok(PolicyDecision::Deny { reason }) => ToolResult {
+                status: ToolStatus::Denied,
+                message: format!("post-dispatch policy deny: {reason}"),
+                // Include the report so operators can see what was
+                // seen even when the content itself is blocked.
+                data: Some(serde_json::json!({ "report": report })),
+            },
+            Ok(PolicyDecision::NeedsApproval { description }) => ToolResult {
+                status: ToolStatus::NeedsApproval,
+                message: description,
+                data: None,
+            },
+            Err(e) => ToolResult {
+                status: ToolStatus::Error,
+                message: format!("post-dispatch policy eval failed: {e}"),
+                data: None,
+            },
+        }
+    }
+}
+
+/// Wrap a [`ToolResult`] into the MCP `tools/call` response envelope.
+fn package_tool_result(id: Option<serde_json::Value>, tool_result: &ToolResult) -> JsonRpcResponse {
+    let result_text = match serde_json::to_string(tool_result) {
+        Ok(text) => text,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                id,
+                codes::INTERNAL_ERROR,
+                format!("failed to serialize tool result: {e}"),
+            );
+        }
+    };
+
+    let content = serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result_text,
+        }],
+        "isError": tool_result.status == ToolStatus::Error || tool_result.status == ToolStatus::Denied,
+    });
+
+    JsonRpcResponse::success(id, content)
+}
+
+/// Dispatch raw bytes into the sanitizer entry point that matches
+/// the declared content type. Thin wrapper around
+/// [`sigil_content::dispatch_sanitize`] that stringifies the error so
+/// it slots into [`ToolResult::message`].
+///
+/// Shared with `sigil-conductor` via `sigil_content::dispatch_sanitize`
+/// — one format-dispatch switch for both call sites, so adding a new
+/// `ContentType` variant is a one-place change.
+fn run_sanitize(
+    sanitizer: &Sanitizer,
+    raw: RawFetchedContent,
+    source: ContentSource,
+    content_type: ContentType,
+) -> Result<sigil_core::content::SanitizedContent, String> {
+    sigil_content::dispatch_sanitize(sanitizer, raw, source, content_type)
+        .map_err(|e| format!("sanitize({content_type:?}): {e}"))
 }
 
 /// Convert a `PolicyDecision` to a `ToolResult`.
@@ -224,11 +394,23 @@ fn decision_to_tool_result(decision: &PolicyDecision) -> ToolResult {
 /// Both `run_stdio` and the Unix socket transport in `sigil-runtime`
 /// delegate to this function.
 ///
+/// `sanitizer` and `fetcher` gate the `fetch_url` tool: when both are
+/// provided, the pipeline runs end-to-end; when either is absent the
+/// tool returns a clean `Error` status to the caller. A production
+/// wiring must pass a real sanitizer here — the default no-sanitizer
+/// path is only appropriate for deployments that never expose
+/// external-content fetches to agents. (PR7 Codex review: the earlier
+/// draft hid this behind `McpServer::with_grants(grants)`, which meant
+/// the stdio and socket entrypoints always shipped `fetch_url`
+/// disabled regardless of what the caller wired elsewhere.)
+///
 /// # Errors
 ///
 /// Returns [`McpError`] on I/O or serialization failure.
 pub async fn handle_stream<G, R, W>(
     grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
     mut reader: R,
     mut writer: W,
 ) -> Result<(), McpError>
@@ -239,7 +421,10 @@ where
 {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    let mut server = McpServer::with_grants(grants);
+    let mut server = McpServer::with_grants(grants).with_fetcher(fetcher);
+    if let Some(s) = sanitizer {
+        server = server.with_sanitizer(s);
+    }
     let mut line = String::new();
 
     loop {
@@ -291,17 +476,29 @@ where
 /// line-delimited JSON-RPC messages from stdin, handles them, and
 /// writes responses to stdout.
 ///
+/// Pass `Some(sanitizer)` and a real `fetcher` to enable the
+/// `fetch_url` tool; pass `None` / [`DisabledFetcher`] to ship it as a
+/// hard-disabled surface. See [`handle_stream`] for the wiring
+/// contract.
+///
 /// # Errors
 ///
 /// Returns [`McpError::Io`] if stdin/stdout operations fail.
-pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
+pub async fn run_stdio<G: GrantStore>(
+    grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
+) -> Result<(), McpError> {
     use tokio::io::BufReader;
 
-    tracing::info!("sigil-mcp server starting on stdio");
+    tracing::info!(
+        fetch_url_enabled = sanitizer.is_some(),
+        "sigil-mcp server starting on stdio"
+    );
 
     let reader = BufReader::new(tokio::io::stdin());
     let writer = tokio::io::stdout();
-    handle_stream(grants, reader, writer).await?;
+    handle_stream(grants, sanitizer, fetcher, reader, writer).await?;
 
     tracing::info!("stdin closed, shutting down");
     Ok(())
@@ -431,6 +628,182 @@ mod tests {
     async fn initialize_with_session_id_sets_agent_origin() {
         let (server, session_id) = init_server().await;
         assert_eq!(server.agent_session_id, Some(session_id));
+    }
+
+    // -----------------------------------------------------------------------
+    // fetch_url tool — PR7 content-sanitization wiring
+    // -----------------------------------------------------------------------
+
+    /// Schema advertises the new tool with the right enum of content
+    /// types. Other schemas stay present (regression check).
+    #[tokio::test]
+    async fn tools_list_includes_fetch_url_schema() {
+        let mut server = make_server();
+        let req = make_request("tools/list", serde_json::json!({}));
+        let resp = server.handle_request(&req).await;
+        let tools = resp.result.expect("result")["tools"]
+            .as_array()
+            .expect("tools array")
+            .clone();
+        let fetch = tools
+            .iter()
+            .find(|t| t["name"] == "fetch_url")
+            .expect("fetch_url schema present");
+        let types = fetch["inputSchema"]["properties"]["content_type"]["enum"]
+            .as_array()
+            .expect("content_type enum");
+        let type_strs: Vec<&str> = types.iter().filter_map(|v| v.as_str()).collect();
+        assert!(type_strs.contains(&"html"));
+        assert!(type_strs.contains(&"markdown"));
+        assert!(type_strs.contains(&"json"));
+    }
+
+    /// Without a configured grant for `FetchExternalContent`, the
+    /// agent's `fetch_url` call hits the grant-gate and returns
+    /// `NeedsApproval` — no fetch, no sanitize, no silent passthrough.
+    #[tokio::test]
+    async fn fetch_url_without_grant_needs_approval() {
+        let (mut server, _) = init_server().await;
+        let req = make_request(
+            "tools/call",
+            serde_json::json!({
+                "name": "fetch_url",
+                "arguments": {
+                    "url": "https://example.com/a",
+                    "content_type": "html",
+                }
+            }),
+        );
+        let resp = server.handle_request(&req).await;
+        let result = resp.result.expect("result");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        let tool_result: ToolResult = serde_json::from_str(text).expect("tool result");
+        assert_eq!(tool_result.status, ToolStatus::NeedsApproval);
+    }
+
+    /// Regression for PR7 Codex P1: `handle_stream` used to construct
+    /// `McpServer::with_grants(...)` internally, throwing away any
+    /// sanitizer the caller wanted to wire. The signature now takes
+    /// the sanitizer + fetcher explicitly. This test exercises the
+    /// same path the stdio / socket entrypoints take, proving that a
+    /// wired sanitizer actually reaches the `fetch_url` dispatch.
+    ///
+    /// We issue a grant for `FetchExternalContent` inline so the
+    /// evaluator returns `Allow` and the tool call flows through to
+    /// `dispatch_fetch_url`, which is where the sanitizer is
+    /// consulted. Without a wired sanitizer the result would be
+    /// `status: Error, message: "no sanitizer configured"`. With the
+    /// fix, the call either succeeds (fetcher returns bytes →
+    /// sanitizer produces a report → `evaluate_result` Allow) or
+    /// fails cleanly on a real sanitizer-observable error — never on
+    /// the "no sanitizer configured" guard.
+    #[tokio::test]
+    async fn handle_stream_plumbs_sanitizer_end_to_end() {
+        use sigil_content::fetcher::DisabledFetcher;
+        use sigil_core::id::RequestId;
+        use sigil_core::trust::Capability;
+        use sigil_policy::PolicyError;
+        use sigil_policy::grants::{ApprovalGrant, GrantStore};
+        use time::{Duration, OffsetDateTime};
+
+        /// A grant store that hands out a fresh
+        /// `FetchExternalContent` grant for every lookup. Unblocks the
+        /// agent's tool call so the path through to the sanitizer is
+        /// exercised.
+        struct GrantAll;
+        impl GrantStore for GrantAll {
+            async fn find_grant(
+                &self,
+                principal: &str,
+                capability: Capability,
+                _resource: Option<&str>,
+            ) -> Result<Option<ApprovalGrant>, PolicyError> {
+                if capability == Capability::FetchExternalContent {
+                    Ok(Some(ApprovalGrant {
+                        id: RequestId::new(),
+                        principal_id: principal.to_owned(),
+                        capability,
+                        resource_scope: None,
+                        expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
+                        max_uses: None,
+                        uses: 0,
+                        issued_by: "test".into(),
+                        issued_at: OffsetDateTime::now_utc(),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            async fn save_grant(&self, _grant: &ApprovalGrant) -> Result<(), PolicyError> {
+                Ok(())
+            }
+        }
+
+        let sanitizer = Arc::new(Sanitizer::new(b"test-key").expect("sanitizer"));
+        let grants = Arc::new(GrantAll);
+
+        let mut server = McpServer::with_grants(Arc::clone(&grants))
+            .with_sanitizer(Arc::clone(&sanitizer))
+            .with_fetcher(Arc::new(DisabledFetcher));
+
+        // initialize with a session id so tool calls are accepted.
+        let init = make_request(
+            "initialize",
+            serde_json::json!({ "session_id": SessionId::new().to_string() }),
+        );
+        server.handle_request(&init).await;
+
+        let call = make_request(
+            "tools/call",
+            serde_json::json!({
+                "name": "fetch_url",
+                "arguments": {
+                    "url": "https://example.com/page",
+                    "content_type": "html",
+                }
+            }),
+        );
+        let resp = server.handle_request(&call).await;
+        let text = resp.result.expect("result")["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_owned();
+        let tool_result: ToolResult = serde_json::from_str(&text).expect("tool result");
+
+        // DisabledFetcher returns NotConfigured, so the tool result
+        // is an Error — but the error message must name the
+        // *fetcher* (not the sanitizer), proving the sanitizer
+        // *was* installed and the call flowed past its guard.
+        assert_eq!(tool_result.status, ToolStatus::Error);
+        let msg = tool_result.message;
+        assert!(
+            msg.contains("fetch") && !msg.contains("no sanitizer"),
+            "sanitizer must be plumbed; got {msg}"
+        );
+    }
+
+    /// Invalid `content_type` in arguments surfaces as
+    /// `INVALID_PARAMS` — the MCP server never falls back to a
+    /// default sanitize path.
+    #[tokio::test]
+    async fn fetch_url_rejects_unknown_content_type() {
+        let (mut server, _) = init_server().await;
+        let req = make_request(
+            "tools/call",
+            serde_json::json!({
+                "name": "fetch_url",
+                "arguments": {
+                    "url": "https://example.com/a",
+                    "content_type": "yaml",
+                }
+            }),
+        );
+        let resp = server.handle_request(&req).await;
+        assert!(
+            resp.error.is_some(),
+            "unknown content_type must be a JSON-RPC error"
+        );
+        assert_eq!(resp.error.expect("error").code, codes::INVALID_PARAMS,);
     }
 
     #[tokio::test]
