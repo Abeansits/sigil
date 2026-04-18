@@ -9,6 +9,7 @@ license.workspace = true
 sigil-core = { path = "../sigil-core" }
 sigil-policy = { path = "../sigil-policy" }
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 getrandom = "0.2"
 regex.workspace = true
@@ -18,6 +19,7 @@ regex.workspace = true
 # the walker is a plain DOM traversal.
 html5ever = { version = "0.38", optional = true }
 markup5ever_rcdom = { version = "0.38", optional = true }
+pulldown-cmark = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_matches.workspace = true
@@ -26,8 +28,8 @@ serde_json.workspace = true
 [features]
 default = ["html", "markdown", "json"]
 html = ["dep:html5ever", "dep:markup5ever_rcdom"]
-markdown = []
-json = []
+markdown = ["dep:pulldown-cmark"]
+json = ["dep:serde_json"]
 image = []
 pdf = []
 

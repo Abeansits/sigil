@@ -48,6 +48,7 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 # Misc
 regex = "1"
 url = { version = "2", features = ["serde"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # Network (bridge)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
