@@ -326,6 +326,8 @@ pub enum PolicyDecision {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
     use super::*;
     use crate::trust::Tier;
 
@@ -457,7 +459,9 @@ mod tests {
 
         let json = serde_json::to_string(&result).expect("serialize");
         let back: ActionResult = serde_json::from_str(&json).expect("deserialize");
-        let back_report = back.sanitize_report.expect("report present after round-trip");
+        let back_report = back
+            .sanitize_report
+            .expect("report present after round-trip");
         assert_eq!(back_report.nonce, report.nonce);
         assert_eq!(back_report.content_type, report.content_type);
         assert_eq!(back_report.raw_fingerprint, report.raw_fingerprint);
