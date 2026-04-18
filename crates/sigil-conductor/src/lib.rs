@@ -308,6 +308,7 @@ impl<R: SessionRuntime> Conductor<R> {
                 origin_summary: format!("{:?}", request.origin),
                 decision: decision.clone(),
                 session_id: action_service::extract_session_id(&request.action),
+                sanitize_report: None,
             };
             if let Err(e) = audit.append(&event).await {
                 warn!(error = %e, "failed to write audit event");
@@ -351,6 +352,7 @@ impl<R: SessionRuntime> Conductor<R> {
                     origin_summary: format!("{:?}", request.origin),
                     decision: decision.clone(),
                     session_id: action_service::extract_session_id(&request.action),
+                    sanitize_report: None,
                 };
                 if let Err(e) = audit.append(&event).await {
                     warn!(error = %e, "failed to write audit event");

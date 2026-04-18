@@ -646,6 +646,7 @@ async fn emit_audit(
         origin_summary: "network-proxy".to_owned(),
         decision,
         session_id,
+        sanitize_report: None,
     };
 
     if let Err(e) = sigil_core::traits::AuditWriter::append(writer, &event).await {

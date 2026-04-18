@@ -21,6 +21,7 @@ fn make_event(action_summary: &str, decision: PolicyDecision) -> AuditEvent {
         origin_summary: "integration-test".to_owned(),
         decision,
         session_id: None,
+        sanitize_report: None,
     }
 }
 

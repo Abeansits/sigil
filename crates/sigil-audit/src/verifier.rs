@@ -112,6 +112,7 @@ mod tests {
             origin_summary: "test origin".to_owned(),
             decision: PolicyDecision::Allow,
             session_id: None,
+            sanitize_report: None,
         }
     }
 

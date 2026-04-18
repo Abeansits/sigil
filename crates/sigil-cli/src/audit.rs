@@ -71,6 +71,7 @@ pub async fn log_event(
         origin_summary: origin.to_owned(),
         decision,
         session_id,
+        sanitize_report: None,
     };
 
     if let Err(e) = writer.append(&event).await {

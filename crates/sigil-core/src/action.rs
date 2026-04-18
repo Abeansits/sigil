@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::content::{SanitizationRequirement, SanitizeReport};
 use crate::id::{GroupId, RequestId, SessionId};
 use crate::origin::ActionOrigin;
 use crate::session::{ConductorConfig, IdentitySpec, ToolKind};
@@ -210,6 +211,19 @@ impl Action {
             Self::BreakGlass { .. } => Capability::BreakGlass,
         }
     }
+
+    /// Whether this action's [`ActionResult`] must carry a
+    /// [`SanitizeReport`], and if so, over what content type.
+    ///
+    /// No current variant fetches external content, so the default is
+    /// [`SanitizationRequirement::None`]. A future `FetchUrl` (or
+    /// equivalent) variant will override this to declare
+    /// [`SanitizationRequirement::Required`] — the policy evaluator then
+    /// enforces that the post-dispatch result carries a matching report.
+    #[must_use]
+    pub fn sanitization_requirement(&self) -> SanitizationRequirement {
+        SanitizationRequirement::None
+    }
 }
 
 /// Named, validated host commands. Not raw argv.
@@ -254,6 +268,49 @@ pub enum HttpMethod {
     Put,
     Patch,
     Delete,
+}
+
+/// Post-dispatch result of an [`ActionRequest`].
+///
+/// This is a thin envelope: the structural payload (session records,
+/// text, list views, …) lives in `sigil-conductor`'s `DispatchResult`
+/// to keep the core crate free of runtime dependencies. What core owns
+/// is the **policy-relevant** metadata produced alongside the payload —
+/// at PR6, that is the optional [`SanitizeReport`] attached to results
+/// of actions that fetched external content.
+///
+/// The evaluator's post-dispatch check consults `sanitize_report` to
+/// enforce [`SanitizationRequirement::Required`] on the originating
+/// action. Audit writers serialize the full struct so the report
+/// survives round-trip through the HMAC-chained audit log.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ActionResult {
+    /// The sanitizer report, when the dispatched action produced
+    /// external content. `None` when no sanitization took place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitize_report: Option<SanitizeReport>,
+}
+
+impl ActionResult {
+    /// An empty result — no sanitize report attached.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach a [`SanitizeReport`] to the result. Chainable builder.
+    #[must_use]
+    pub fn with_sanitize_report(mut self, report: SanitizeReport) -> Self {
+        self.sanitize_report = Some(report);
+        self
+    }
+
+    /// Whether this result carries a [`SanitizeReport`].
+    #[must_use]
+    pub fn has_sanitize_report(&self) -> bool {
+        self.sanitize_report.is_some()
+    }
 }
 
 /// The result of evaluating an action request through the policy engine.
@@ -317,6 +374,93 @@ mod tests {
         let r1 = ActionRequest::new(Action::ListSessions, origin.clone());
         let r2 = ActionRequest::new(Action::ListSessions, origin);
         assert_ne!(r1.id, r2.id);
+    }
+
+    #[test]
+    fn all_existing_actions_have_no_sanitization_requirement() {
+        // No Action variant fetches external content today, so every
+        // variant must default to SanitizationRequirement::None. This
+        // test guards the invariant so a future variant that declares
+        // a requirement can't be added without updating both the enum
+        // and this test (forcing the policy wiring to be considered).
+        let actions = [
+            Action::ListSessions,
+            Action::ListGroups,
+            Action::GetSystemStatus,
+            Action::StartSession {
+                session_id: SessionId::new(),
+            },
+            Action::ExternalNetworkWrite {
+                domain: "example.com".into(),
+                method: HttpMethod::Get,
+                path: "/".into(),
+            },
+        ];
+        for action in &actions {
+            assert_eq!(
+                action.sanitization_requirement(),
+                crate::content::SanitizationRequirement::None,
+                "{action:?} must default to None"
+            );
+        }
+    }
+
+    #[test]
+    fn action_result_new_has_no_report() {
+        let result = ActionResult::new();
+        assert!(!result.has_sanitize_report());
+        assert!(result.sanitize_report.is_none());
+    }
+
+    #[test]
+    fn action_result_round_trips_without_report() {
+        let result = ActionResult::new();
+        let json = serde_json::to_string(&result).expect("serialize");
+        // Empty report must not leak a `null` field — it should round-trip
+        // cleanly through older deserializers.
+        assert!(!json.contains("sanitize_report"), "got: {json}");
+        let back: ActionResult = serde_json::from_str(&json).expect("deserialize");
+        assert!(!back.has_sanitize_report());
+    }
+
+    #[test]
+    fn action_result_round_trips_with_report() {
+        use crate::content::{
+            ContentSource, ContentType, Fingerprint, REPORT_SCHEMA_VERSION, SanitizeReport,
+        };
+        use crate::normalize::NormalizeResult;
+
+        let key = b"test-audit-key";
+        let report = SanitizeReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            rule_set_version: 1,
+            scoring_version: 1,
+            source: ContentSource::from_url("https://example.com/doc").expect("url"),
+            content_type: ContentType::Html,
+            bytes_in: 10,
+            bytes_out: 8,
+            stripped_elements: vec![],
+            text_normalize: NormalizeResult::default(),
+            findings: vec![],
+            risk_score: 3,
+            repetition_ratio: 0.0,
+            size_rejected: false,
+            encoding_rejected: false,
+            nonce: "deadbeef".into(),
+            duration_ms: 1,
+            raw_fingerprint: Fingerprint::compute(key, b"raw").expect("fp"),
+            sanitized_fingerprint: Fingerprint::compute(key, b"clean").expect("fp"),
+        };
+
+        let result = ActionResult::new().with_sanitize_report(report.clone());
+        assert!(result.has_sanitize_report());
+
+        let json = serde_json::to_string(&result).expect("serialize");
+        let back: ActionResult = serde_json::from_str(&json).expect("deserialize");
+        let back_report = back.sanitize_report.expect("report present after round-trip");
+        assert_eq!(back_report.nonce, report.nonce);
+        assert_eq!(back_report.content_type, report.content_type);
+        assert_eq!(back_report.raw_fingerprint, report.raw_fingerprint);
     }
 }
 
