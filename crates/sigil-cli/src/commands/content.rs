@@ -10,7 +10,7 @@
 //! eyeball a suspicious fixture, regressions can be reproduced by hand,
 //! and CI can shell out to it for integration checks.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
@@ -56,6 +56,7 @@ impl ContentKind {
 /// as an `anyhow::Error` rather than a silent partial result; callers can
 /// distinguish cleanly from a successful call that produced a populated
 /// report.
+#[allow(clippy::print_stdout)]
 pub async fn sanitize(
     file: &str,
     kind: ContentKind,
@@ -67,7 +68,7 @@ pub async fn sanitize(
         .await
         .with_context(|| format!("failed to read {}", path.display()))?;
 
-    let source = resolve_source(&path, source_override)?;
+    let source = resolve_source(&path, source_override);
     let content_type = kind.as_core();
 
     let key = resolve_key().context("failed to resolve fingerprint HMAC key")?;
@@ -82,18 +83,18 @@ pub async fn sanitize(
         ContentKind::Text | ContentKind::Log => sanitizer
             .sanitize_plain(raw, source, content_type)
             .context("plain-text sanitization failed")?,
-        ContentKind::Md | ContentKind::Json => {
+        kind @ (ContentKind::Md | ContentKind::Json) => {
             // sanitize_markdown / sanitize_json land with PR5. Until
             // then, we fail cleanly with an actionable message rather
             // than pretending to handle the content and silently
             // dropping caller data.
+            let label = match kind {
+                ContentKind::Md => "Markdown",
+                ContentKind::Json => "JSON",
+                ContentKind::Html | ContentKind::Text | ContentKind::Log => unreachable!(),
+            };
             return Err(anyhow!(
-                "{} sanitizer not yet wired in this build (PR5 of the sanitize series)",
-                match kind {
-                    ContentKind::Md => "Markdown",
-                    ContentKind::Json => "JSON",
-                    _ => unreachable!(),
-                }
+                "{label} sanitizer not yet wired in this build (PR5 of the sanitize series)",
             ));
         }
     };
@@ -108,7 +109,7 @@ pub async fn sanitize(
     Ok(())
 }
 
-fn resolve_source(path: &Path, source_override: Option<&str>) -> Result<ContentSource> {
+fn resolve_source(path: &Path, source_override: Option<&str>) -> ContentSource {
     if let Some(raw) = source_override {
         // Accept either a URL (runs through the PII-safe constructor) or
         // a free-form identifier. `from_url` rejects inputs without a
@@ -116,15 +117,16 @@ fn resolve_source(path: &Path, source_override: Option<&str>) -> Result<ContentS
         // pass `--source foo`, you get a `ContentSource::Other("foo")`,
         // not an error.
         if let Ok(url) = ContentSource::from_url(raw) {
-            return Ok(url);
+            return url;
         }
-        return Ok(ContentSource::Other(raw.to_owned()));
+        return ContentSource::Other(raw.to_owned());
     }
-    Ok(ContentSource::File {
+    ContentSource::File {
         path: path.to_string_lossy().into_owned(),
-    })
+    }
 }
 
+#[allow(clippy::print_stdout)]
 fn print_human(sc: &SanitizedContent) {
     let r = &sc.report;
     println!("=== SanitizeReport ===");
@@ -161,14 +163,14 @@ fn print_human(sc: &SanitizedContent) {
         "text_normalize : stripped={} categories={:?}",
         tn.stripped_count, tn.categories
     );
-    if !r.findings.is_empty() {
+    if r.findings.is_empty() {
+        println!("findings       : (none)");
+    } else {
         println!("findings       :");
         for f in &r.findings {
             let sample = f.sample.as_deref().unwrap_or("");
             println!("  [{}] {:?}  {}", f.rule_id, f.severity, sample);
         }
-    } else {
-        println!("findings       : (none)");
     }
     println!();
     println!("=== Cleaned output ({} bytes) ===", r.bytes_out);
@@ -176,32 +178,30 @@ fn print_human(sc: &SanitizedContent) {
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
     for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
+        out.push(char::from(to_hex_digit(b >> 4)));
+        out.push(char::from(to_hex_digit(b & 0x0f)));
     }
     out
 }
 
-/// Resolve a relative file path against the current working directory so
-/// integration tests and manual invocation behave the same way.
-#[must_use]
-pub fn absolutize(path: &str) -> PathBuf {
-    let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&p))
-            .unwrap_or(p)
+const fn to_hex_digit(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        10..=15 => b'a' + (nibble - 10),
+        _ => b'?',
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::panic)]
+    #![allow(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::wildcard_enum_match_arm,
+        reason = "test code asserts on known-good variant construction"
+    )]
 
     use super::*;
 
@@ -210,14 +210,17 @@ mod tests {
         assert!(matches!(ContentKind::Html.as_core(), ContentType::Html));
         assert!(matches!(ContentKind::Md.as_core(), ContentType::Markdown));
         assert!(matches!(ContentKind::Json.as_core(), ContentType::Json));
-        assert!(matches!(ContentKind::Text.as_core(), ContentType::PlainText));
+        assert!(matches!(
+            ContentKind::Text.as_core(),
+            ContentType::PlainText
+        ));
         assert!(matches!(ContentKind::Log.as_core(), ContentType::Log));
     }
 
     #[test]
     fn resolve_source_defaults_to_file() {
         let path = Path::new("/tmp/fixture.html");
-        let src = resolve_source(path, None).expect("file source");
+        let src = resolve_source(path, None);
         match src {
             ContentSource::File { path } => assert_eq!(path, "/tmp/fixture.html"),
             other => panic!("expected File source, got {other:?}"),
@@ -227,8 +230,7 @@ mod tests {
     #[test]
     fn resolve_source_honors_url_override() {
         let path = Path::new("/tmp/x");
-        let src = resolve_source(path, Some("https://example.com/a?k=SECRET"))
-            .expect("url source");
+        let src = resolve_source(path, Some("https://example.com/a?k=SECRET"));
         match src {
             ContentSource::Url(u) => {
                 assert_eq!(u.host(), "example.com");
@@ -242,7 +244,7 @@ mod tests {
     #[test]
     fn resolve_source_falls_back_to_other_for_non_url_override() {
         let path = Path::new("/tmp/x");
-        let src = resolve_source(path, Some("corpus:benign:001")).expect("other source");
+        let src = resolve_source(path, Some("corpus:benign:001"));
         match src {
             ContentSource::Other(label) => assert_eq!(label, "corpus:benign:001"),
             other => panic!("expected Other source, got {other:?}"),

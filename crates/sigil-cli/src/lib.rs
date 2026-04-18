@@ -120,7 +120,7 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum ContentCommands {
-    /// Sanitize a file and print the cleaned output + SanitizeReport.
+    /// Sanitize a file and print the cleaned output + `SanitizeReport`.
     Sanitize {
         /// Path to the file to sanitize.
         #[arg(long)]
@@ -1495,13 +1495,7 @@ mod tests {
     #[test]
     fn cli_content_sanitize_rejects_unknown_type() {
         let cli = Cli::try_parse_from([
-            "sigil",
-            "content",
-            "sanitize",
-            "--file",
-            "/tmp/x",
-            "--type",
-            "yaml",
+            "sigil", "content", "sanitize", "--file", "/tmp/x", "--type", "yaml",
         ]);
         assert!(cli.is_err());
     }

@@ -535,7 +535,7 @@ fn content_sanitize_html_fixture_strips_injection_payload() {
         .filter_map(|v| v.as_str())
         .collect();
     assert!(
-        kinds.iter().any(|k| *k == "script"),
+        kinds.contains(&"script"),
         "must strip <script>: kinds={kinds:?}"
     );
 }
