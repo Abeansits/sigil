@@ -12,8 +12,12 @@ serde.workspace = true
 thiserror.workspace = true
 getrandom = "0.2"
 regex.workspace = true
-scraper = { version = "0.21", default-features = false, optional = true }
-ego-tree = { version = "0.9", optional = true }
+# HTML parser — html5ever + rcdom only, no CSS-selector crate. scraper
+# bundles `selectors` + `cssparser`, both MPL-2.0, which clashes with
+# the permissive-only deny.toml policy. We don't need selectors anyway;
+# the walker is a plain DOM traversal.
+html5ever = { version = "0.38", optional = true }
+markup5ever_rcdom = { version = "0.38", optional = true }
 
 [dev-dependencies]
 assert_matches.workspace = true
@@ -21,7 +25,7 @@ serde_json.workspace = true
 
 [features]
 default = ["html", "markdown", "json"]
-html = ["dep:scraper", "dep:ego-tree"]
+html = ["dep:html5ever", "dep:markup5ever_rcdom"]
 markdown = []
 json = []
 image = []

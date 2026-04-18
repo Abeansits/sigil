@@ -1,9 +1,9 @@
 //! HTML sanitizer — Stage 3 for [`ContentType::Html`].
 //!
-//! Parses the input with the tolerant [`scraper`] tree builder (which
-//! wraps `html5ever`), walks the DOM, and extracts the visible text
-//! payload while dropping everything that carries instruction-injection
-//! risk:
+//! Parses the input with the tolerant [`html5ever`] tree builder using
+//! [`markup5ever_rcdom::RcDom`] as the sink, walks the DOM, and extracts
+//! the visible text payload while dropping everything that carries
+//! instruction-injection risk:
 //!
 //! - `<script>`, `<style>`, `<template>`, `<noscript>` subtrees.
 //! - HTML comments.
@@ -33,11 +33,15 @@
 //! bias direction.
 
 use std::collections::{BTreeMap, HashSet};
+use std::rc::Rc;
 use std::sync::LazyLock;
 use std::time::Instant;
 
+use html5ever::tendril::TendrilSink as _;
+use html5ever::tree_builder::TreeBuilderOpts;
+use html5ever::{ParseOpts, parse_document};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use regex::Regex;
-use scraper::{Html, Node};
 use sigil_core::{ContentSource, ContentType, Fingerprint, SanitizedContent};
 
 use crate::{
@@ -210,15 +214,24 @@ pub(crate) fn sanitize(
 
 /// Parse `html` and return `(extracted_text, stripped_counts)`.
 ///
-/// The parser is [`scraper::Html::parse_document`], which is html5ever's
-/// tolerant tree builder — malformed HTML does not panic; it is
-/// reconstructed into a best-effort tree.
+/// The parser is [`html5ever::parse_document`] driving an
+/// [`RcDom`] — the same tolerant tree builder that every major
+/// Rust-based browser scraper uses. Malformed HTML does not panic; it
+/// is reconstructed into a best-effort tree.
 fn extract_text(html: &str) -> (String, BTreeMap<String, u32>) {
-    let doc = Html::parse_document(html);
-    let hidden_classes = find_hidden_classes(&doc);
+    let opts = ParseOpts {
+        tree_builder: TreeBuilderOpts {
+            drop_doctype: true,
+            ..TreeBuilderOpts::default()
+        },
+        ..ParseOpts::default()
+    };
+    let dom: RcDom = parse_document(RcDom::default(), opts).one(html);
+
+    let hidden_classes = find_hidden_classes(&dom.document);
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
     let mut out = String::with_capacity(html.len() / 2);
-    walk(doc.tree.root(), &hidden_classes, &mut out, &mut counts);
+    walk(dom.document.clone(), &hidden_classes, &mut out, &mut counts);
     (out, counts)
 }
 
@@ -227,24 +240,28 @@ fn extract_text(html: &str) -> (String, BTreeMap<String, u32>) {
 /// block matches [`HIDDEN_PROP_RE`]. CSS comments are stripped first so
 /// the obfuscation patterns `display/**/:none` / `display:none/*x*/`
 /// don't slip through.
-fn find_hidden_classes(doc: &Html) -> HashSet<String> {
+///
+/// Iterative DFS — avoids Rust recursion on adversarial DOMs.
+fn find_hidden_classes(root: &Handle) -> HashSet<String> {
     let mut set: HashSet<String> = HashSet::new();
     let mut css = String::new();
-    for node in doc.tree.nodes() {
-        let Some(el) = node.value().as_element() else {
-            continue;
-        };
-        if !el.name().eq_ignore_ascii_case("style") {
-            continue;
-        }
-        css.clear();
-        for child in node.children() {
-            if let Some(t) = child.value().as_text() {
-                css.push_str(t);
+    let mut stack: Vec<Handle> = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if let NodeData::Element { name, .. } = &node.data
+            && name.local.as_ref().eq_ignore_ascii_case("style")
+        {
+            css.clear();
+            for child in node.children.borrow().iter() {
+                if let NodeData::Text { contents } = &child.data {
+                    css.push_str(&contents.borrow());
+                }
             }
+            let decommented = strip_css_comments(&css);
+            collect_hidden_classes_from_css(&decommented, &mut set);
         }
-        let decommented = strip_css_comments(&css);
-        collect_hidden_classes_from_css(&decommented, &mut set);
+        for child in node.children.borrow().iter() {
+            stack.push(child.clone());
+        }
     }
     set
 }
@@ -352,10 +369,10 @@ fn unescape_css_ident(input: &str) -> String {
 /// cap an attacker can still nest elements deeper than any reasonable
 /// stack bound. The iterative shape caps memory to heap-allocated
 /// vector growth instead.
-enum Frame<'a> {
+enum Frame {
     /// First visit: decide whether to drop, which counters to bump, and
     /// push a trailing `ExitBlock` + children in reverse order.
-    Enter(ego_tree::NodeRef<'a, Node>),
+    Enter(Handle),
     /// Post-children visit: close a block-level element with a newline
     /// separator so the downstream normalizer's whitespace-collapse
     /// doesn't smash two paragraphs into one.
@@ -365,18 +382,18 @@ enum Frame<'a> {
 /// Iterative DOM walker. `counts` accumulates stripped-element tallies
 /// keyed by kind; `out` accumulates visible text.
 ///
-/// Uses an explicit `Vec<Frame<'a>>` stack in place of Rust recursion.
+/// Uses an explicit `Vec<Frame>` stack in place of Rust recursion.
 /// This is the `DoS` mitigation Codex flagged: deeply nested adversarial
 /// HTML can force recursion past the default 8 MiB thread stack, which
 /// aborts the process. Heap growth is bounded by the DOM size, which is
 /// already capped at 2 MiB by Stage 1.
-fn walk<'a>(
-    root: ego_tree::NodeRef<'a, Node>,
+fn walk(
+    root: Handle,
     hidden_classes: &HashSet<String>,
     out: &mut String,
     counts: &mut BTreeMap<String, u32>,
 ) {
-    let mut stack: Vec<Frame<'a>> = Vec::new();
+    let mut stack: Vec<Frame> = Vec::new();
     stack.push(Frame::Enter(root));
 
     while let Some(frame) = stack.pop() {
@@ -386,21 +403,21 @@ fn walk<'a>(
                     out.push('\n');
                 }
             }
-            Frame::Enter(node) => match node.value() {
-                Node::Document | Node::Fragment => {
-                    push_children_reversed(&mut stack, node);
+            Frame::Enter(node) => match &node.data {
+                NodeData::Document => {
+                    push_children_reversed(&mut stack, &node);
                 }
-                Node::Doctype(_) | Node::ProcessingInstruction(_) => {
+                NodeData::Doctype { .. } | NodeData::ProcessingInstruction { .. } => {
                     // No visible text, no injection channel — ignore.
                 }
-                Node::Comment(_) => {
+                NodeData::Comment { .. } => {
                     bump(counts, "comment");
                 }
-                Node::Text(t) => {
-                    out.push_str(t);
+                NodeData::Text { contents } => {
+                    out.push_str(&contents.borrow());
                 }
-                Node::Element(el) => {
-                    let name_lc = el.name().to_ascii_lowercase();
+                NodeData::Element { name, attrs, .. } => {
+                    let name_lc = name.local.as_ref().to_ascii_lowercase();
 
                     // Subtree-strip elements — drop the whole descendant
                     // chain. These carry executable / stylistic / metadata
@@ -413,12 +430,14 @@ fn walk<'a>(
                         _ => {}
                     }
 
-                    if el.attr("hidden").is_some() {
+                    let attrs = attrs.borrow();
+
+                    if element_attr(&attrs, "hidden").is_some() {
                         bump(counts, "hidden-attr");
                         continue;
                     }
 
-                    if let Some(style) = el.attr("style")
+                    if let Some(style) = element_attr(&attrs, "style")
                         && style_attr_is_hidden(style)
                     {
                         bump(counts, &format!("hidden-style-{name_lc}"));
@@ -426,7 +445,7 @@ fn walk<'a>(
                     }
 
                     if !hidden_classes.is_empty()
-                        && let Some(class_attr) = el.attr("class")
+                        && let Some(class_attr) = element_attr(&attrs, "class")
                         && class_attr
                             .split_whitespace()
                             .any(|c| hidden_classes.contains(c))
@@ -441,27 +460,27 @@ fn walk<'a>(
                     // was on the page. `alt` on `<img>` is legitimate
                     // caption content; `alt` on anything else is almost
                     // certainly attacker-shaped.
-                    if el.attr("aria-label").is_some() {
+                    if element_attr(&attrs, "aria-label").is_some() {
                         bump(counts, "aria-label");
                     }
-                    if el.attr("title").is_some() {
+                    if element_attr(&attrs, "title").is_some() {
                         bump(counts, "title-attr");
                     }
-                    if name_lc != "img" && el.attr("alt").is_some() {
+                    if name_lc != "img" && element_attr(&attrs, "alt").is_some() {
                         bump(counts, "alt-non-img");
                     }
+
+                    drop(attrs);
 
                     let is_block = BLOCK_ELEMENTS.contains(&name_lc.as_str());
                     if is_block && !out.is_empty() && !out.ends_with('\n') {
                         out.push('\n');
                     }
 
-                    // Push the close-block frame first so it pops after
-                    // every child has been processed (LIFO ordering).
                     if is_block {
                         stack.push(Frame::ExitBlock);
                     }
-                    push_children_reversed(&mut stack, node);
+                    push_children_reversed(&mut stack, &node);
                 }
             },
         }
@@ -470,13 +489,21 @@ fn walk<'a>(
 
 /// Push every child of `node` onto `stack` in reverse so that when the
 /// stack is popped, siblings come out in document order.
-fn push_children_reversed<'a>(stack: &mut Vec<Frame<'a>>, node: ego_tree::NodeRef<'a, Node>) {
-    // `ego_tree::Children` is not a `DoubleEndedIterator`, so we
-    // materialise the child list before reversing.
-    let children: Vec<_> = node.children().collect();
-    for child in children.into_iter().rev() {
-        stack.push(Frame::Enter(child));
+fn push_children_reversed(stack: &mut Vec<Frame>, node: &Handle) {
+    let children = node.children.borrow();
+    for child in children.iter().rev() {
+        stack.push(Frame::Enter(Rc::clone(child)));
     }
+}
+
+/// Look up an attribute on an `RcDom` element by local name,
+/// case-insensitively. html5ever stores attribute names as `QualName`,
+/// where `local` is the tag-ish `LocalName` string.
+fn element_attr<'a>(attrs: &'a [html5ever::Attribute], wanted: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .find(|a| a.name.local.as_ref().eq_ignore_ascii_case(wanted))
+        .map(|a| a.value.as_ref())
 }
 
 fn bump(counts: &mut BTreeMap<String, u32>, key: &str) {
