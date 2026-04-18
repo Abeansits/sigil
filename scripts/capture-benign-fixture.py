@@ -2,8 +2,8 @@
 # Canonical capture tool for the `sigil-content` benign corpus
 # (`crates/sigil-content/fixtures/benign/*.txt`).
 #
-# Usage:
-#     ./scripts/capture-benign-fixture.py <url> > fixtures/benign/<name>.txt
+# Usage (from repo root):
+#     ./scripts/capture-benign-fixture.py <url> > crates/sigil-content/fixtures/benign/<name>.txt
 #
 # Pipeline:
 #   1. Fetch the URL with a realistic browser User-Agent (pages we care
@@ -78,7 +78,31 @@ class Extractor(HTMLParser):
 def fetch(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", errors="replace")
+        body = r.read()
+        charset = _detect_charset(r, body)
+    return body.decode(charset, errors="replace")
+
+
+def _detect_charset(response, body: bytes) -> str:
+    # 1. HTTP Content-Type charset (authoritative when present).
+    ctype = response.headers.get("Content-Type", "")
+    m = re.search(r"charset=([^\s;]+)", ctype, re.IGNORECASE)
+    if m:
+        return m.group(1).strip('"').strip("'")
+    # 2. HTML meta charset — look at the first ~2KB only; past that we
+    #    risk hitting decoded payloads that happen to mention "charset".
+    head = body[:2048]
+    try:
+        head_text = head.decode("ascii", errors="ignore")
+    except Exception:
+        head_text = ""
+    m = re.search(r'<meta[^>]+charset=["\']?([a-zA-Z0-9_\-]+)', head_text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    # 3. Fall back to UTF-8 — modern pages default to it and decode
+    #    errors are reported as replacement chars, which is loud enough
+    #    to catch during fixture review.
+    return "utf-8"
 
 
 def normalize(html: str) -> str:
