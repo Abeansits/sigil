@@ -507,10 +507,25 @@ fn has_strong_html_markers(text: &str) -> bool {
         return true;
     }
     let close_tags = RE_FMT_CLOSE.find_iter(text).count();
-    let mut openers: HashSet<&str> = HashSet::new();
+    // The opener regex is case-insensitive, but captured tag names retain
+    // their original case. Canonicalize to lowercase before counting so
+    // `<SCRIPT>` and `<script>` collapse to one distinct opener. Without
+    // this, mixed-case content (e.g. legacy HTML quoted in prose) could
+    // satisfy the path-B distinct-opener threshold on case alone and
+    // emit a spurious High-severity FMT-001.
+    let mut openers: HashSet<String> = HashSet::new();
     for m in RE_FMT_OPENER.captures_iter(text) {
         if let Some(name) = m.get(1).map(|g| g.as_str()) {
-            openers.insert(name);
+            // The opener regex's tag-name alternation is ASCII-only by
+            // construction; assert in debug builds so a future
+            // alternation expansion that quietly admits non-ASCII would
+            // surface here instead of silently picking
+            // `to_ascii_lowercase`'s no-op fallback.
+            debug_assert!(
+                name.is_ascii(),
+                "FMT-001 opener capture must be ASCII (got {name:?})"
+            );
+            openers.insert(name.to_ascii_lowercase());
         }
     }
     openers.len() >= FMT_HTML_DISTINCT_OPENER_THRESHOLD
@@ -735,6 +750,22 @@ mod tests {
         }
         let f = scan(&body, ContentType::PlainText, false);
         assert!(!ids(&f).contains(&"FMT-001"));
+    }
+
+    #[test]
+    fn fmt_001_distinct_opener_count_is_case_insensitive() {
+        // `<SCRIPT>` and `<script>` (or any other case mix) must collapse
+        // to a single distinct opener — counting them as two would let
+        // mixed-case prose smuggle a path-B FMT-001 hit.
+        let mut body = String::from("<SCRIPT>x</SCRIPT><script>y</script>");
+        for _ in 0..=FMT_HTML_CLOSE_TAG_THRESHOLD {
+            body.push_str("</p>");
+        }
+        let f = scan(&body, ContentType::PlainText, false);
+        assert!(
+            !ids(&f).contains(&"FMT-001"),
+            "case-only differences must not satisfy the distinct-opener threshold",
+        );
     }
 
     #[test]
