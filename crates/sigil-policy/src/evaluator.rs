@@ -35,6 +35,13 @@ pub struct EvaluatorConfig {
     /// (e.g., `AllowedUser.tier_ceiling`) feed directly into
     /// policy evaluation.
     pub user_tier_ceilings: HashMap<PlatformIdentity, Tier>,
+
+    /// Thresholds for the post-dispatch sanitization gate (see
+    /// [`Evaluator::evaluate_result`]). PR6 ships the struct empty —
+    /// the check is presence-and-content-type only. PR7 populates
+    /// risk-score / rule-id / size-/encoding-rejection thresholds
+    /// here, and the evaluator's gate reads from this field.
+    pub sanitization: crate::sanitization::SanitizationConfig,
 }
 
 /// The core policy evaluator. Delegates to a [`GrantStore`] for

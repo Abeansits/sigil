@@ -166,7 +166,10 @@ pub(crate) fn evaluator_config_from_identity(
         );
     }
 
-    sigil_policy::EvaluatorConfig { user_tier_ceilings }
+    sigil_policy::EvaluatorConfig {
+        user_tier_ceilings,
+        ..Default::default()
+    }
 }
 
 // ── Telegram ────────────────────────────────────────────────────────

@@ -347,6 +347,8 @@ New step: for actions that produce external content, the `Runtime` or MCP tool i
 
 Add `Capability::FetchExternalContent` at tier `T1` (Builder-class). Only execution classes with `ExternalNetworkWrite` or a future `ExternalNetworkRead` can request it, and all requests route through the sanitizer.
 
+**Two-axis gating.** `Tier` in `sigil-core` serves two roles that normally line up but split here: it is both (a) the *ceiling* an origin principal must meet to attempt the capability, and (b) the *default gating policy* (T0/T1 auto-pass, T2+ grant-required). `FetchExternalContent` is correctly T1 for the ceiling axis — the `Builder` and `ResearchWorker` execution classes have a T1 ceiling and must be able to reach this capability, and the grant check runs *after* the ceiling check, so a T2 placement would hard-deny them before the grant path is consulted. For the gating axis we want grant-required behaviour instead of auto-pass. PR6 implements this as a second, orthogonal axis: `Capability::requires_grant()` — `false` for every existing capability, `true` for `FetchExternalContent`. The evaluator routes any T0/T1 capability whose `requires_grant()` is `true` through the same approval path as T2. If this pattern recurs (a second capability hits the same split), the right refactor is to separate `Tier` into a pure ceiling enum and a distinct `Gating` enum; until then the flag is the minimal orthogonal addition.
+
 ## Implementation Plan
 
 Seven PRs, merged in order. Each leaves the workspace compiling and green. Follows the same shape as the memory-system plan (PR #25).

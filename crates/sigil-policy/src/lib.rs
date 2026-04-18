@@ -26,6 +26,7 @@ pub mod fatigue;
 pub mod grants;
 pub mod normalize;
 pub mod paths;
+pub mod sanitization;
 pub mod zone;
 
 pub use error::PolicyError;
@@ -34,6 +35,7 @@ pub use fatigue::{FatigueGuard, FatigueLevel};
 pub use grants::{ApprovalGrant, GrantStore, NoopGrantStore};
 pub use normalize::{NormalizeResult, normalize_text, strip_ansi};
 pub use paths::{quick_path_check, validate_path};
+pub use sanitization::SanitizationConfig;
 
 use std::fmt;
 use std::sync::Arc;

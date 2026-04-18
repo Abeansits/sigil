@@ -169,7 +169,10 @@ mod tests {
             Capability::ManageSession,
             Capability::SendMessage,
         ] {
-            assert!(!cap.requires_grant(), "{cap:?} should not set requires_grant");
+            assert!(
+                !cap.requires_grant(),
+                "{cap:?} should not set requires_grant"
+            );
         }
     }
 
