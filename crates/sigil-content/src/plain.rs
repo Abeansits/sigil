@@ -12,8 +12,8 @@
 use std::time::Instant;
 
 use sigil_core::{
-    ContentSource, ContentType, Fingerprint, REPORT_SCHEMA_VERSION, SanitizeReport,
-    SanitizedContent,
+    ContentSource, ContentType, Fingerprint, NormalizeResult, REPORT_SCHEMA_VERSION,
+    SanitizeReport, SanitizedContent,
 };
 use sigil_policy::normalize::{normalize_text, strip_ansi};
 
@@ -33,7 +33,7 @@ const NONCE_REGEN_LIMIT: u8 = 4;
 
 /// Token used by the conductor when the fetch timestamp is not
 /// surfaced. Plain text has no native `fetched_at`; PR2 left this implicit.
-const UNKNOWN_FETCHED_AT: &str = "unknown";
+pub(crate) const UNKNOWN_FETCHED_AT: &str = "unknown";
 
 /// Wire-format string for [`ContentType`] in the wrap header. Kept here
 /// so the wrap module stays oblivious to the enum.
@@ -118,6 +118,7 @@ pub(crate) fn sanitize(
         bytes_in,
         raw_fingerprint,
         started,
+        prenormalized: None,
         config,
         key,
     })
@@ -143,6 +144,19 @@ pub(crate) struct PostStripInput<'a> {
     /// Timer start, captured at the head of the pipeline so `duration_ms`
     /// reflects the full cost of the call, not just the tail.
     pub(crate) started: Instant,
+    /// Pre-computed Stage 4 result for callers (the JSON path) that
+    /// normalize per-leaf before re-serializing. When `Some`,
+    /// [`run_post_strip_pipeline`] uses this `NormalizeResult` directly
+    /// rather than re-running `normalize_text` on `stage3` — otherwise
+    /// the downstream `risk::compute` and `derive_flags` passes would
+    /// see `stripped_count == 0` even though the walker actually
+    /// stripped zero-widths / directional overrides / control chars
+    /// from string leaves and object keys, and those payloads would
+    /// fall below policy thresholds they should cross.
+    ///
+    /// `cleaned` on the supplied result is ignored — `stage3` is the
+    /// canonical post-Stage-3 body and is used as-is.
+    pub(crate) prenormalized: Option<NormalizeResult>,
     pub(crate) config: &'a SanitizerConfig,
     pub(crate) key: &'a [u8],
 }
@@ -165,12 +179,36 @@ pub(crate) fn run_post_strip_pipeline(
         bytes_in,
         raw_fingerprint,
         started,
+        prenormalized,
         config,
         key,
     } = input;
 
     // Stage 4 — text-layer normalize.
-    let text_normalize = normalize_text(&stage3);
+    //
+    // For paths whose Stage 3 output still contains potentially dirty
+    // bytes (plain-text, Log, Markdown, HTML), we run `normalize_text`
+    // here to strip invisible characters and produce the final
+    // `cleaned` body.
+    //
+    // The JSON path normalizes each string leaf and object key during
+    // its Stage 3 walk so that key-collision detection is possible; it
+    // hands us the aggregated `NormalizeResult` via `prenormalized` and
+    // the already-clean serialized body as `stage3`. We use the
+    // caller-supplied counts and categories so that `risk::compute` and
+    // `derive_flags` see the same normalize signal any other path would
+    // have surfaced — a JSON payload that hides zero-widths in nested
+    // string values must not score lower than the same content in a
+    // plain-text wrapper.
+    let text_normalize = if let Some(nr) = prenormalized {
+        NormalizeResult {
+            cleaned: stage3.clone(),
+            stripped_count: nr.stripped_count,
+            categories: nr.categories,
+        }
+    } else {
+        normalize_text(&stage3)
+    };
     let cleaned = text_normalize.cleaned.clone();
 
     let sanitized_bytes = cleaned.as_bytes();
@@ -294,7 +332,7 @@ fn derive_flags(
 }
 
 /// Translate a [`sigil_core::ContentError`] into the crate-local error.
-/// Shared with [`crate::html`] / future [`crate::markdown`] / [`crate::json`]
+/// Shared with [`crate::html`] / [`crate::markdown`] / [`crate::json`]
 /// paths so they don't each reinvent the mapping.
 pub(crate) fn map_core_error(err: sigil_core::ContentError) -> ContentError {
     if matches!(err, sigil_core::ContentError::FingerprintKeyUnavailable) {

@@ -64,6 +64,23 @@ pub enum ContentError {
     #[error("wrap assembly failed: {0}")]
     WrapAssembly(String),
 
+    /// Declared `Json` body failed to parse. The message is the
+    /// `serde_json::Error::to_string()` form; we wrap it in a `String`
+    /// rather than `#[from] serde_json::Error` so the error type stays
+    /// independent of `serde_json` being a compiled-in dependency.
+    #[error("JSON parse failed: {0}")]
+    JsonParse(String),
+
+    /// JSON nesting exceeded [`crate::json::MAX_NESTING_DEPTH`].
+    /// Hard-stop to cap recursion-based `DoS`.
+    #[error("JSON nesting depth {depth} exceeds max {max}")]
+    JsonTooDeep {
+        /// Depth at which the walker bailed.
+        depth: usize,
+        /// Configured nesting ceiling.
+        max: usize,
+    },
+
     /// An error from [`sigil_core`] propagated verbatim.
     #[error("core content error: {0}")]
     Core(#[from] sigil_core::ContentError),

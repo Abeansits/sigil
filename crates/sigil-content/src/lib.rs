@@ -41,6 +41,10 @@ pub mod config;
 pub mod error;
 #[cfg(feature = "html")]
 pub mod html;
+#[cfg(feature = "json")]
+pub mod json;
+#[cfg(feature = "markdown")]
+pub mod markdown;
 pub mod patterns;
 pub mod plain;
 pub mod risk;
@@ -205,6 +209,43 @@ impl Sanitizer {
     ) -> Result<SanitizedContent, ContentError> {
         html::sanitize(raw, source, &self.config, &self.key)
     }
+
+    /// Run the Markdown path.
+    ///
+    /// Content type is implicitly [`ContentType::Markdown`]; the caller
+    /// does not pass it. Bytes must decode as UTF-8 and must be within
+    /// [`SanitizerConfig::max_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// See [`markdown::sanitize`].
+    #[cfg(feature = "markdown")]
+    pub fn sanitize_markdown(
+        &self,
+        raw: RawFetchedContent,
+        source: ContentSource,
+    ) -> Result<SanitizedContent, ContentError> {
+        markdown::sanitize(raw, source, &self.config, &self.key)
+    }
+
+    /// Run the JSON path.
+    ///
+    /// Content type is implicitly [`ContentType::Json`]; the caller does
+    /// not pass it. Bytes must decode as UTF-8 and must be within
+    /// [`SanitizerConfig::max_bytes`]; the top-level value must parse as
+    /// JSON; nesting must be within [`crate::json::MAX_NESTING_DEPTH`].
+    ///
+    /// # Errors
+    ///
+    /// See [`json::sanitize`].
+    #[cfg(feature = "json")]
+    pub fn sanitize_json(
+        &self,
+        raw: RawFetchedContent,
+        source: ContentSource,
+    ) -> Result<SanitizedContent, ContentError> {
+        json::sanitize(raw, source, &self.config, &self.key)
+    }
 }
 
 impl fmt::Debug for Sanitizer {
@@ -261,6 +302,50 @@ pub fn sanitize_html(
         return Err(ContentError::FingerprintKeyUnavailable);
     }
     html::sanitize(raw, source, config, key)
+}
+
+/// Free-function entry point for the Markdown path.
+///
+/// Equivalent to constructing a short-lived [`Sanitizer`] and calling
+/// [`Sanitizer::sanitize_markdown`].
+///
+/// # Errors
+///
+/// Same as [`Sanitizer::sanitize_markdown`], plus
+/// [`ContentError::FingerprintKeyUnavailable`] if `key` is empty.
+#[cfg(feature = "markdown")]
+pub fn sanitize_markdown(
+    raw: RawFetchedContent,
+    source: ContentSource,
+    config: &SanitizerConfig,
+    key: &[u8],
+) -> Result<SanitizedContent, ContentError> {
+    if key.is_empty() {
+        return Err(ContentError::FingerprintKeyUnavailable);
+    }
+    markdown::sanitize(raw, source, config, key)
+}
+
+/// Free-function entry point for the JSON path.
+///
+/// Equivalent to constructing a short-lived [`Sanitizer`] and calling
+/// [`Sanitizer::sanitize_json`].
+///
+/// # Errors
+///
+/// Same as [`Sanitizer::sanitize_json`], plus
+/// [`ContentError::FingerprintKeyUnavailable`] if `key` is empty.
+#[cfg(feature = "json")]
+pub fn sanitize_json(
+    raw: RawFetchedContent,
+    source: ContentSource,
+    config: &SanitizerConfig,
+    key: &[u8],
+) -> Result<SanitizedContent, ContentError> {
+    if key.is_empty() {
+        return Err(ContentError::FingerprintKeyUnavailable);
+    }
+    json::sanitize(raw, source, config, key)
 }
 
 #[cfg(test)]
