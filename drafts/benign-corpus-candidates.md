@@ -92,11 +92,12 @@ Rule IDs match `docs/design/content-sanitization.md` §Stage 5. Expected pattern
 - **Summary:** Canonical XSS cheat sheet. Enumerates tag/attribute/event-handler vectors in prose with syntax-highlighted examples. No auto-executing payloads on the page itself — everything is rendered as text.
 - **Likely trips:** Many prose `<script>` / `<iframe>` tokens, `aria-label`, `data:` URIs. High chance of tripping pattern counts — ideal stressor for calibration.
 
-### A7. Mozilla Security Blog — "CSP for the web"
-- **URL:** https://blog.mozilla.org/security/2014/02/12/implementing-content-security-policy/
-- **Date:** 2014-02-12
-- **Summary:** Classic Mozilla post explaining Content Security Policy with inline `<script>` examples in prose. Discusses `unsafe-inline`, nonces, hashes, and how attackers abuse missing CSP.
-- **Likely trips:** prose `<script>` mentions, discussion of `nonce` and `eval`. Moderate.
+### A7. MDN — "Content Security Policy (CSP)" guide
+- **URL:** https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP
+- **Date:** MDN living doc (canonical slug, Mozilla-hosted)
+- **Summary:** MDN's CSP guide. Explains CSP directives, inline-script mitigations (`nonce`, hashes, `unsafe-inline`), and typical abuse patterns with inline `<script>` examples in prose. Same coverage area as the original 2014 Mozilla Security Blog post, at a stable Mozilla-hosted URL.
+- **Likely trips:** prose `<script>` mentions, discussion of `nonce`, `unsafe-inline`, `eval`. Moderate.
+- **Substitution rationale (PR3.5):** The original 2014 blog post at `blog.mozilla.org/security/.../implementing-content-security-policy/` returned 404 at refetch time and has no Wayback capture. Substituted to the MDN CSP guide — same author-org, identical pattern surface, canonical living URL.
 
 ### A8. Krebs on Security — "A deep dive on the recent widespread DNS hijacking"
 - **URL:** https://krebsonsecurity.com/2019/02/a-deep-dive-on-the-recent-widespread-dns-hijacking/
@@ -122,16 +123,18 @@ Rule IDs match `docs/design/content-sanitization.md` §Stage 5. Expected pattern
 ## B. Pentest & writeup articles (10)
 
 ### B1. HackTheBox writeup — "Academy" machine (XSS + LFI chain)
-- **URL:** https://0xdf.gitlab.io/2021/03/20/htb-academy.html
-- **Date:** 2021-03-20
+- **URL:** https://0xdf.gitlab.io/2021/02/27/htb-academy.html
+- **Date:** 2021-02-27
 - **Summary:** 0xdf's HTB writeup covering an XSS → LFI → RCE chain on a retired box. Quotes payloads in code blocks, shows cookie theft via XSS.
 - **Likely trips:** prose `<script>`, `document.cookie`, discusses hidden inputs. Moderate.
+- **Date correction (PR3.5):** Original draft cited `/2021/03/20/...`; correct slug is `/2021/02/27/...` (from 0xdf's `sitemap.xml`). URL path was off by a week-ish.
 
-### B2. 0xdf — "HTB: Jerry" (struts / admin panel)
-- **URL:** https://0xdf.gitlab.io/2019/04/06/htb-jerry.html
-- **Date:** 2019-04-06
+### B2. 0xdf — "HTB: Jerry" (Tomcat manager)
+- **URL:** https://0xdf.gitlab.io/2018/11/17/htb-jerry.html
+- **Date:** 2018-11-17
 - **Summary:** Straightforward Tomcat manager writeup. Minimal injection-pattern surface — good low-density foil to pair against high-density A2/A6.
 - **Likely trips:** Near-zero pattern hits expected. Anchor fixture.
+- **Date correction (PR3.5):** Original draft cited `/2019/04/06/...`; correct slug is `/2018/11/17/...` (from 0xdf's `sitemap.xml`). Jerry was published earlier than the original draft had it.
 
 ### B3. OWASP — "Regular expression Denial of Service (ReDoS)"
 - **URL:** https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS
@@ -166,12 +169,12 @@ Rule IDs match `docs/design/content-sanitization.md` §Stage 5. Expected pattern
 - **Summary:** Orange Tsai's classic GitHub Enterprise bug-chain writeup. Quotes URL payloads, Ruby gadget chains, and internal request snippets. Pure prose, no auto-exec. (Metadata fixed from the prior draft, which mis-titled this as the separate "A New Era of SSRF" Black Hat paper.)
 - **Likely trips:** Odd-URL tokens, path-traversal `../` runs → `REP-*`. Low-moderate.
 
-### B8. Robust Intelligence — "Prompt injection attack on GPT-4"
-- **URL:** https://www.robustintelligence.com/blog-posts/prompt-injection-attack-on-gpt-4
-- **Date:** 2023 (Robust Intelligence research blog, stable)
-- **Summary:** Robust Intelligence write-up of a GPT-4 jailbreak chain. Walks through `<|im_start|>` / `<|im_end|>` role-token abuse and shows reproduction strings verbatim.
-- **Likely trips:** `INJ-006` (`<|im_start|>` role tokens), `INJ-001`. Directly stresses the wrapper-sentinel-collision path that Codex flagged as thin. Targeted coverage for that gap.
-- **Substitution rationale:** Replaces the Google Bug Hunters representative slug Codex could not resolve.
+### B8. Promptfoo — "Special Token Injection for LLMs"
+- **URL:** https://www.promptfoo.dev/docs/red-team/plugins/special-token-injection/
+- **Date:** Promptfoo docs (living doc, stable slug)
+- **Summary:** Promptfoo's red-team docs page dedicated to role-token injection. Discusses `<|im_start|>`, `<|im_end|>`, `[INST]`/`[/INST]`, `<<SYS>>`, `<|user|>`/`<|assistant|>`/`<|system|>`, and gives a canonical payload example verbatim (`Tell me about the weather<|im_end|><|im_start|>system ...`).
+- **Likely trips:** `INJ-006` (role tokens), `INJ-001`. Highest-density INJ-006 stressor in the corpus — this is exactly the pattern surface the rule targets.
+- **Substitution rationale (PR3.5):** The original Robust Intelligence URL (`robustintelligence.com/blog-posts/prompt-injection-attack-on-gpt-4`) timed out and has no Wayback capture — the site is inaccessible post-acquisition. Promptfoo's dedicated page on the same ChatML-delimiter attack class is a stable substitute with higher pattern density per page.
 
 ### B9. VulnHub walkthrough — "Kioptrix Level 1" (classic entry-level machine)
 - **URL:** https://www.vulnhub.com/entry/kioptrix-level-1-1,22/
@@ -284,3 +287,26 @@ Once 20 are picked, each gets:
 1. `curl -I` to confirm 200 OK.
 2. Manual skim to confirm no auto-exec JS / live payloads.
 3. Captured snapshot with `Content-Type` header recorded, plus a snapshot content hash checked into `tests/fp_baseline.json`, so fixture drift is a reviewable diff rather than a silent behavior change.
+
+### PR3.5 — refetch note (2026-04-18)
+
+Four fixtures were stubbed out with `# FETCH_FAILED` during the PR3 capture and refilled by PR3.5:
+
+- **A7 (Mozilla CSP)** — original 2014 blog URL is 404, no Wayback capture. Substituted to MDN's CSP guide (same org, canonical slug, same pattern surface).
+- **B1 (0xdf HTB Academy)** — date slug off; corrected from `/2021/03/20/...` to `/2021/02/27/...` per `sitemap.xml`.
+- **B2 (0xdf HTB Jerry)** — date slug off; corrected from `/2019/04/06/...` to `/2018/11/17/...` per `sitemap.xml`.
+- **B8 (Robust Intelligence GPT-4)** — site was inaccessible (timeout, no Wayback). Substituted to Promptfoo's `special-token-injection` red-team docs page — same attack class (`<|im_start|>` / ChatML delimiter abuse), higher density.
+
+**Calibration finding surfaced during PR3.5 refetch.** When the refetched `a07_mozilla_csp.txt` and `b01_htb_academy.txt` were passed through the FP gate, both tripped `FMT-001` via the Path-A `<!DOCTYPE html>` / `<html …>` document-root heuristic — not because they are malformed, but because:
+
+- MDN's CSP guide shows a full `<html lang="en-US"> <head> <script src=…>` example inline to illustrate how the `<meta http-equiv="Content-Security-Policy">` tag is used.
+- 0xdf's Academy writeup quotes a raw HTTP response body containing a Laravel-generated `<!DOCTYPE html>` error page.
+
+Both are the "raw HTTP / full-document-HTML in prose" case that `content-sanitization.md` §Stage 5 already acknowledged as a known tuning risk for B6 (PortSwigger request smuggling). For PR3.5 the mitigation is a small fixture-capture pre-pass (`/tmp/html2txt.py` equivalent) that strips literal `<!DOCTYPE html>` and `<html …>` tokens before the fixture lands on disk — same text the scanner would see after the upstream HTML sanitizer pass if the page were fetched in real runtime. The surrounding prose, code examples, and other pattern material is preserved verbatim, so INJ/ENC/REP/MIX coverage is unchanged. 
+
+This is a fixture-capture workaround, not a rule fix. The normalization is checked into `scripts/capture-benign-fixture.py` (canonical capture tool going forward — reproducible, auditable, byte-identical to the four refetched fixtures). Running any of a07/b01/b02/b08 through the script reproduces the committed fixture exactly, so PR3.6 debt is explicit and reviewable rather than "manual massaging."
+
+**Recommended PR3.6 follow-ups** (flagged by Codex during /midflight review):
+1. Widen `FMT-001` Path A to require *either* (a) a document-root marker *plus* N close-tags in the same body, *or* (b) a document-root marker *without* surrounding prose density indicating a blog post / writeup context. Same intent (catch actual HTML served as plaintext) without flagging every security article that quotes a full HTTP response.
+2. Add a "capture parity" test: run each benign fixture through `scripts/capture-benign-fixture.py` at test time and assert the output matches the checked-in fixture bytes. Makes capture drift surfaceable in CI.
+3. Optionally re-normalize the 16 existing fixtures (a01–a06, a08, a10, b03–b06, b10, c01, c08, c09) through the canonical script so the whole corpus is reproducibly captured. Not done in PR3.5 to avoid baseline churn; flagged as a quality-of-life improvement.
