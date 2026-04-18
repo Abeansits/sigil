@@ -266,11 +266,7 @@ fn benign_corpus_fp_gate() {
     let current_baseline = load_baseline(&baseline_path);
 
     if let Some(baseline) = current_baseline {
-        assert_eq!(
-            baseline.threshold, RISK_GATE_THRESHOLD,
-            "threshold drift between baseline ({}) and code ({RISK_GATE_THRESHOLD}) — update baseline in a reviewable commit",
-            baseline.threshold,
-        );
+        assert_baseline_matches(&baseline, &scores, &skipped);
         let allowed = baseline.baseline_hits.saturating_add(1);
         assert!(
             measured_hits <= allowed,
@@ -290,6 +286,42 @@ fn benign_corpus_fp_gate() {
         panic!(
             "fp_baseline.json did not exist — wrote initial baseline with {measured_hits} hits over {} fixtures. Review and commit.",
             scores.len(),
+        );
+    }
+}
+
+/// Assert that the locked baseline still matches the current run on:
+/// - threshold (code/baseline contract drift)
+/// - corpus size (fixture-set drift)
+/// - fixture identity (delete+add swaps that keep the count constant)
+///
+/// Each failure mode panics with a message pointing the operator at the
+/// specific drift and the remediation (re-run the baseline snapshot and
+/// commit `fp_baseline.json` in the same change).
+fn assert_baseline_matches(
+    baseline: &FpBaseline,
+    scores: &BTreeMap<String, u8>,
+    skipped: &[String],
+) {
+    assert_eq!(
+        baseline.threshold, RISK_GATE_THRESHOLD,
+        "threshold drift between baseline ({}) and code ({RISK_GATE_THRESHOLD}) — update baseline in a reviewable commit",
+        baseline.threshold,
+    );
+    assert_eq!(
+        scores.len(),
+        baseline.corpus_size,
+        "benign corpus drift: baseline expected {expected} fixtures, this run scanned {actual}.\nskipped={skipped:?}\nIf this is intentional (fixture added or removed), re-run the baseline snapshot and commit `fp_baseline.json` in the same change.",
+        expected = baseline.corpus_size,
+        actual = scores.len(),
+    );
+    let baseline_keys: BTreeSet<&str> = baseline.scores.keys().map(String::as_str).collect();
+    let current_keys: BTreeSet<&str> = scores.keys().map(String::as_str).collect();
+    if baseline_keys != current_keys {
+        let added: Vec<&str> = current_keys.difference(&baseline_keys).copied().collect();
+        let removed: Vec<&str> = baseline_keys.difference(&current_keys).copied().collect();
+        panic!(
+            "benign corpus identity drift: added={added:?}, removed={removed:?}.\nIf intentional, re-run the baseline snapshot and commit `fp_baseline.json`.",
         );
     }
 }
