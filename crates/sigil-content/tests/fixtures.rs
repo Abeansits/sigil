@@ -197,7 +197,6 @@ fn benign_corpus_fp_gate() {
     let s = sanitizer();
     let dir = fixtures_dir("benign");
     let mut scores: BTreeMap<String, u8> = BTreeMap::new();
-    let mut high_severity_hits: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut fmt_001_hits: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
@@ -232,12 +231,6 @@ fn benign_corpus_fp_gate() {
         scores.insert(name.to_owned(), out.report.risk_score);
 
         for f in &out.report.findings {
-            if f.severity >= Severity::High {
-                high_severity_hits
-                    .entry(name.to_owned())
-                    .or_default()
-                    .insert(f.rule_id.clone());
-            }
             if f.rule_id == "FMT-001" {
                 fmt_001_hits.push(name.to_owned());
             }
@@ -249,12 +242,15 @@ fn benign_corpus_fp_gate() {
         .filter(|s| **s >= RISK_GATE_THRESHOLD)
         .count();
 
-    // Anti-gaming: zero High-severity hits on the benign corpus. This is
-    // a hard gate; no `+1` slack.
-    assert!(
-        high_severity_hits.is_empty(),
-        "benign fixtures tripped High-severity rules (hard gate): {high_severity_hits:#?}",
-    );
+    // Hard gate: zero `FMT-001` hits on the benign corpus. A server lying
+    // about `Content-Type` is never benign signal — see `CALIBRATION.md`.
+    //
+    // The previous "zero High-severity hits" anti-gaming gate was retired
+    // when `INJ-*` rules were promoted to High (round-3 calibration,
+    // Sebastian 2026-04-17). Real attack phrasings deserve High severity
+    // even though benign security writing quotes them; the absolute-delta
+    // baseline check (`measured_hits <= baseline_hits + 1`) is the
+    // remaining regression detector.
     assert!(
         fmt_001_hits.is_empty(),
         "benign fixtures tripped FMT-001 (must be zero): {fmt_001_hits:?}",

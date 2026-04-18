@@ -1,12 +1,12 @@
 {
   "threshold": 50,
   "corpus_size": 16,
-  "baseline_hits": 0,
+  "baseline_hits": 2,
   "scores": {
-    "a01_simon_prompt_injection.txt": 20,
+    "a01_simon_prompt_injection.txt": 50,
     "a02_simon_worst_that_can_happen.txt": 0,
     "a03_simon_delimiters.txt": 0,
-    "a04_embrace_the_red_indirect.txt": 20,
+    "a04_embrace_the_red_indirect.txt": 50,
     "a05_portswigger_web_llm.txt": 0,
     "a06_portswigger_xss_cheatsheet.txt": 0,
     "a08_krebs_dns_hijacking.txt": 12,

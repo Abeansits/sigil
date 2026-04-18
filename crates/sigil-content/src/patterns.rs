@@ -9,13 +9,26 @@
 //! injection is supposed to contain the strings the scanner looks for —
 //! the FP-rate gate over the benign corpus locks that property in CI.
 //!
-//! Severity calibration is deliberately conservative on the injection
-//! prose rules (`INJ-*` are all `Medium`). The anti-gaming clause for the
-//! benign-corpus FP gate forbids any `Severity::High` hit on benign
-//! fixtures, and benign security writing routinely quotes attacker
-//! payloads verbatim. `FMT-001` is the one `High` rule because a server
-//! that declares plain text and serves HTML is actively lying about
-//! content type — we never expect that on benign fixtures.
+//! Severity calibration follows a "start permissive, dial up" principle
+//! (Sebastian, 2026-04-17). Real injection patterns deserve `High`
+//! severity even though the FP gate over the benign corpus will trip on
+//! security writing that quotes them — Simon-Willison-style writeups
+//! literally contain "ignore previous instructions" and `<|im_start|>`
+//! verbatim. Locking those at Medium understates the threat. The FP-rate
+//! gate's job is to detect *regressions* against a measured baseline,
+//! not to keep the baseline at zero. See `CALIBRATION.md`.
+//!
+//! - `INJ-001..007` — `High`. The canonical attack phrasings.
+//! - `FMT-001` — `High`. Hard-gated to zero hits on the benign corpus
+//!   (a lying server is never benign signal). The two-signal heuristic
+//!   in [`has_strong_html_markers`] keeps that property while the
+//!   close-tag threshold sits at the permissive-to-start floor.
+//! - `MIX-001`, `ENC-003` — `Medium`. Suspicious but not always attack
+//!   shape (Unicode TR #39 prose has mixed-script examples; data URIs
+//!   appear in legit Markdown).
+//! - `ENC-001/002`, `REP-001/002`, `INJ` low-confidence — `Low`. Weak
+//!   signals that combine into the score but don't push the gate alone.
+//! - `WRP-001` — `Info`. Observability only, score-neutral.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -35,39 +48,43 @@ pub struct PatternRule {
 }
 
 // Stable rule IDs. Do not rename without bumping `RULE_SET_VERSION`.
+//
+// `INJ-*` severities promoted Medium → High (PR3 round-3 calibration,
+// Sebastian 2026-04-17). The benign FP gate now expects a non-zero
+// baseline; the gate's job is regression detection, not zero-suppression.
 pub const RULE_INJ_001: PatternRule = PatternRule {
     id: "INJ-001",
-    severity: Severity::Medium,
+    severity: Severity::High,
     description: "ignore previous/prior instructions",
 };
 pub const RULE_INJ_002: PatternRule = PatternRule {
     id: "INJ-002",
-    severity: Severity::Medium,
+    severity: Severity::High,
     description: "disregard system prompt",
 };
 pub const RULE_INJ_003: PatternRule = PatternRule {
     id: "INJ-003",
-    severity: Severity::Medium,
+    severity: Severity::High,
     description: "[SYSTEM] / <|system|> role tag",
 };
 pub const RULE_INJ_004: PatternRule = PatternRule {
     id: "INJ-004",
-    severity: Severity::Medium,
+    severity: Severity::High,
     description: "new instructions: prefix",
 };
 pub const RULE_INJ_005: PatternRule = PatternRule {
     id: "INJ-005",
-    severity: Severity::Medium,
+    severity: Severity::High,
     description: "you are now / DAN-style preface",
 };
 pub const RULE_INJ_006: PatternRule = PatternRule {
     id: "INJ-006",
-    severity: Severity::Medium,
+    severity: Severity::High,
     description: "<|im_start|> / <|im_end|> role tokens",
 };
 pub const RULE_INJ_007: PatternRule = PatternRule {
     id: "INJ-007",
-    severity: Severity::Low,
+    severity: Severity::High,
     description: "jailbreak / dev-mode keywords",
 };
 
@@ -136,10 +153,19 @@ const LONG_TOKEN_MIN_LEN: usize = 200;
 /// Close-tag count that contributes a structural-HTML signal to
 /// [`RULE_FMT_001`].
 ///
-/// The benign corpus empirically tops out near ~60 close-tags in a
-/// dense XSS-cheat-sheet-style extraction; 100 sits above that and
-/// still serves as the "this is structurally HTML" companion signal
-/// in the two-signal heuristic below.
+/// **Held at 100 for PR3.** Sebastian's round-3 calibration request was
+/// to drop this to 20 ("start permissive, dial up"; see
+/// `CALIBRATION.md`). Empirically that conflicts with the hard
+/// "FMT-001 zero on benign" constraint: the `PortSwigger` XSS cheat
+/// sheet (`a06_portswigger_xss_cheatsheet.txt`) contains 5 distinct
+/// execution-bearing openers (svg, template, form, style, script) and
+/// 62 close-tags as legitimate attack-surface enumeration; any
+/// close-tag floor < 62 trips path-B on it. Opener-set tightening
+/// does not help — every opener in the regex appears in the cheat
+/// sheet's prose. Flagged for Sebastian on PR #52: either accept
+/// FMT-001 hits on benign (relax the hard gate), exclude HTML-prose
+/// fixtures from the FP corpus, or bring path-B opener semantics into
+/// alignment with the threat model in a follow-up.
 const FMT_HTML_CLOSE_TAG_THRESHOLD: usize = 100;
 
 /// Number of distinct opener-only structural tags above which `FMT-001`
