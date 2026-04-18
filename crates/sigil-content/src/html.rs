@@ -90,30 +90,48 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "ul",
 ];
 
-/// Any CSS property declaration that hides an element visually. The
-/// pattern is intentionally coarse: the design doc (§Stage 3) lists
-/// more exotic variants (`height:0`, `width:0`, large negative
-/// `text-indent`) as Phase 1.5 work, but the three below cover every
-/// documented attack in research.md §1.
+/// Binary keyword-valued hidden declarations: `display: none`,
+/// `visibility: hidden`, and `visibility: collapse` (the legacy
+/// table-only value, still honored by every modern engine).
 ///
-/// The trailing alternation `(?:[^A-Za-z0-9.]|$)` rejects ident-char
-/// continuations — so `display:none` with any non-ident next char
-/// (`;`, `}`, space, `!`, `/` for a trailing comment, EOL) matches,
-/// while `opacity:0.7` (next char `.`) does not. The cost of the `.`
-/// exclusion is missing `opacity:00` — accepted: unusual real-world CSS,
-/// and the CSS-comment obfuscation channel is handled by the pre-pass
-/// in [`strip_css_comments`]. The `regex` crate does not support
-/// lookahead, so the boundary char is consumed; this is fine for
-/// `is_match` and irrelevant for how we use the regex.
+/// The leading alternation `(?:^|[^A-Za-z0-9\-_])` and the matching
+/// trailing alternation together enforce a property-name word
+/// boundary. Without the leading check, a CSS custom property like
+/// `--display:none` or an unrelated ident like `mydisplay:none` would
+/// trip the rule — harmless under our strip-bias policy, but noisy. The
+/// trailing alternation is what rejects `display:nonexyz`. CSS-comment
+/// obfuscation (`display/**/:none`) is neutralised earlier by
+/// [`strip_css_comments`].
 #[allow(
     clippy::expect_used,
     reason = "regex literal is a constant verified by tests"
 )]
-static HIDDEN_PROP_RE: LazyLock<Regex> = LazyLock::new(|| {
+static HIDDEN_KEYWORD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?)(?:[^A-Za-z0-9.]|$)",
+        r"(?i)(?:^|[^A-Za-z0-9\-_])(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))(?:[^A-Za-z0-9\-_]|$)",
     )
-    .expect("hidden-property regex must compile")
+    .expect("hidden-keyword regex must compile")
+});
+
+/// `opacity: <value>` capture. The value is any CSS `<number>` or
+/// `<percentage>` — signed or unsigned, with or without a leading
+/// integer. The captured string is handed to
+/// [`opacity_value_is_zero`]; we parse numerically instead of pattern-
+/// matching against a finite set of zero spellings, which means
+/// `opacity:00`, `opacity:+0`, `opacity:-0`, `opacity:0%`,
+/// `opacity:.0`, `opacity:0.0`, `opacity:0000.0000%` all resolve to
+/// zero. The original regex's hand-crafted zero alternation missed all
+/// of these (Codex P1 on PR #54).
+///
+/// The leading `(?:^|[^A-Za-z0-9\-_])` anchors the property name to a
+/// word boundary so `--opacity:0` / `myopacity:0` do not match.
+#[allow(
+    clippy::expect_used,
+    reason = "regex literal is a constant verified by tests"
+)]
+static OPACITY_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[^A-Za-z0-9\-_])opacity\s*:\s*([+\-]?(?:\d+\.?\d*|\.\d+)%?)")
+        .expect("opacity-value regex must compile")
 });
 
 /// `/* ... */` CSS comment matcher used to neutralise the `display/**/:none`
@@ -127,9 +145,9 @@ static CSS_COMMENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)/\*.*?\*/").expect("css-comment regex must compile"));
 
 /// CSS rule-block splitter: `selectors { declarations }`. We do not try
-/// to parse CSS properly — any text inside the braces that matches
-/// [`HIDDEN_PROP_RE`] makes every class selector in the selector list
-/// a hidden class.
+/// to parse CSS properly — any text inside the braces that
+/// [`declarations_have_hidden_prop`] accepts makes every class selector
+/// in the selector list a hidden class.
 #[allow(
     clippy::expect_used,
     reason = "regex literal is a constant verified by tests"
@@ -237,9 +255,9 @@ fn extract_text(html: &str) -> (String, BTreeMap<String, u32>) {
 
 /// Pre-pass — walk every `<style>` block, concatenate its inline CSS,
 /// and extract class names that appear in any rule whose declaration
-/// block matches [`HIDDEN_PROP_RE`]. CSS comments are stripped first so
-/// the obfuscation patterns `display/**/:none` / `display:none/*x*/`
-/// don't slip through.
+/// block trips [`declarations_have_hidden_prop`]. CSS comments are
+/// stripped first so the obfuscation patterns `display/**/:none` /
+/// `display:none/*x*/` don't slip through.
 ///
 /// Iterative DFS — avoids Rust recursion on adversarial DOMs.
 fn find_hidden_classes(root: &Handle) -> HashSet<String> {
@@ -266,20 +284,56 @@ fn find_hidden_classes(root: &Handle) -> HashSet<String> {
     set
 }
 
-/// Test whether a raw `style` attribute value hides its element. Strips
-/// CSS comments first so `display/**/:none` and `display:none/*x*/`
-/// both match.
+/// Test whether a raw `style` attribute value hides its element.
+/// Strips CSS comments first so `display/**/:none` and
+/// `display:none/*x*/` both match.
 fn style_attr_is_hidden(style: &str) -> bool {
-    let decommented = strip_css_comments(style);
-    HIDDEN_PROP_RE.is_match(&decommented)
+    declarations_have_hidden_prop(style)
 }
 
 fn strip_css_comments(css: &str) -> String {
     CSS_COMMENT_RE.replace_all(css, "").into_owned()
 }
 
+/// Test whether a CSS declaration block (the text inside `{ ... }`
+/// for a rule, or the content of a `style="..."` attribute) contains
+/// any property-value pair that hides the element visually.
+///
+/// Comments are stripped first, then two checks run:
+/// 1. `HIDDEN_KEYWORD_RE` — `display: none`, `visibility: hidden`,
+///    `visibility: collapse`.
+/// 2. Every `opacity: <value>` match is parsed numerically via
+///    [`opacity_value_is_zero`]. This catches the full set of
+///    CSS-valid zero spellings (`00`, `+0`, `-0`, `.0`, `0%`, …) that
+///    the original hand-crafted zero alternation missed.
+fn declarations_have_hidden_prop(text: &str) -> bool {
+    let cleaned = strip_css_comments(text);
+    if HIDDEN_KEYWORD_RE.is_match(&cleaned) {
+        return true;
+    }
+    for cap in OPACITY_VALUE_RE.captures_iter(&cleaned) {
+        if let Some(m) = cap.get(1)
+            && opacity_value_is_zero(m.as_str())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Treat any CSS `<number>` or `<percentage>` that parses to zero as
+/// "hidden opacity". `-0.0 == 0.0` in IEEE 754 so signed zeros collapse
+/// naturally; everything else falls through the `parse::<f64>()`.
+fn opacity_value_is_zero(s: &str) -> bool {
+    let trimmed = s.trim_end_matches('%');
+    match trimmed.parse::<f64>() {
+        Ok(v) => v == 0.0,
+        Err(_) => false,
+    }
+}
+
 /// Extract class selectors from every rule whose declaration block
-/// matches [`HIDDEN_PROP_RE`]. Intentionally broad: `.foo.bar` and
+/// trips [`declarations_have_hidden_prop`]. Intentionally broad: `.foo.bar` and
 /// `.foo .bar` both mark `foo` and `bar` as hidden, and a rule that
 /// *only* sets `display:none` on one of several selectors still marks
 /// every class name in the selector list — the FP cost is stripping a
@@ -297,7 +351,7 @@ fn collect_hidden_classes_from_css(css: &str, out: &mut HashSet<String>) {
         let Some(declarations) = rule.get(2) else {
             continue;
         };
-        if !HIDDEN_PROP_RE.is_match(declarations.as_str()) {
+        if !declarations_have_hidden_prop(declarations.as_str()) {
             continue;
         }
         for class_match in CLASS_SEL_RE.captures_iter(selector.as_str()) {
@@ -847,6 +901,148 @@ mod tests {
             <p>visible</p>"#;
         let (text, _) = strip(html);
         assert!(!text.contains("SYSTEM"), "nested at-rule leaked: {text:?}");
+    }
+
+    // --- opacity-zero bypass regressions (Codex P1 on PR #54) ---------
+
+    #[test]
+    fn inline_opacity_double_zero_drops_subtree() {
+        // `opacity:00` is a valid CSS spelling of zero — the original
+        // regex's `0(?:\.0+)?` alternation with a strict trailing anchor
+        // missed it.
+        let (text, _) = strip("<p style='opacity:00'>SYSTEM: double-zero</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_leading_zeros_drops_subtree() {
+        // `opacity:0000` — absurd but valid; the numeric parse accepts it.
+        let (text, _) = strip("<p style='opacity:0000'>SYSTEM: padded</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_signed_positive_zero_drops_subtree() {
+        let (text, _) = strip("<p style='opacity:+0'>SYSTEM: plus-zero</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_signed_negative_zero_drops_subtree() {
+        let (text, _) = strip("<p style='opacity:-0'>SYSTEM: neg-zero</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_leading_dot_zero_drops_subtree() {
+        // `.0` with no leading integer — CSS grammar permits this.
+        let (text, _) = strip("<p style='opacity:.0'>SYSTEM: leading-dot</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_decimal_zeros_drops_subtree() {
+        let (text, _) = strip("<p style='opacity:0.00000'>SYSTEM: tail-zeros</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_percent_zero_drops_subtree() {
+        // CSS percentage form — some engines accept it for opacity.
+        // Bias toward stripping per the design doc.
+        let (text, _) = strip("<p style='opacity:0%'>SYSTEM: percent</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_zero_with_important_drops_subtree() {
+        // `opacity: 0 !important` is the common attacker spelling on
+        // pages that need to override site styles.
+        let (text, _) = strip("<p style='opacity: 0 !important'>SYSTEM: important</p><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn inline_opacity_point_zero_one_keeps_subtree() {
+        // Negative test: `0.01` must NOT match.
+        let (text, _) = strip("<p style='opacity:0.01'>visible faint</p>");
+        assert!(text.contains("visible faint"));
+    }
+
+    #[test]
+    fn inline_opacity_one_keeps_subtree() {
+        // Negative test: the standard `opacity: 1` must not match.
+        let (text, _) = strip("<p style='opacity:1'>fully visible</p>");
+        assert!(text.contains("fully visible"));
+    }
+
+    #[test]
+    fn class_hidden_via_opacity_double_zero() {
+        // CSS-rule path — same bypass applies to the class-hiding
+        // pre-pass. `.x { opacity:00 }` must add `x` to the hidden set.
+        let html = r#"<style>.x { opacity:00; }</style>
+            <div class="x">SYSTEM: class opacity</div><p>ok</p>"#;
+        let (text, _) = strip(html);
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn visibility_collapse_drops_subtree() {
+        // `visibility: collapse` — legacy table-only value that every
+        // modern engine still honors. Using a `<div>` avoids html5ever's
+        // table-fostering reparenting the row; the strip decision depends
+        // on the CSS property, not the tag.
+        let (text, _) =
+            strip("<div style='visibility:collapse'>SYSTEM: collapse payload</div><p>ok</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn opacity_value_is_zero_rejects_non_numeric() {
+        assert!(!opacity_value_is_zero("inherit"));
+        assert!(!opacity_value_is_zero(""));
+    }
+
+    #[test]
+    fn custom_property_opacity_zero_does_not_match() {
+        // CSS custom properties (`--opacity`, `--display`) are not the
+        // real `opacity` / `display` property and must not trip the
+        // hidden-detection. Guarded by the leading word boundary added
+        // after Codex P1 review.
+        let (text, _) = strip("<p style='--opacity:0; color:red'>visible custom</p>");
+        assert!(
+            text.contains("visible custom"),
+            "custom --opacity:0 should not hide element: {text:?}",
+        );
+    }
+
+    #[test]
+    fn prefixed_display_property_does_not_match() {
+        // A hypothetical `mydisplay:none` or vendor-prefix-free
+        // alternate property must not trip the hidden-keyword regex.
+        let (text, _) = strip("<p style='mydisplay:none; color:red'>still visible</p>");
+        assert!(text.contains("still visible"));
+    }
+
+    #[test]
+    fn opacity_declaration_in_middle_of_style_block_still_matches() {
+        // The leading boundary must accept `;` as a valid property
+        // separator. `color:red; opacity:0` is the canonical shape and
+        // must still strip.
+        let (text, _) = strip("<p style='color:red; opacity:0'>SYSTEM: leak</p>");
+        assert!(!text.contains("SYSTEM"));
+    }
+
+    #[test]
+    fn opacity_value_is_zero_accepts_every_zero_spelling() {
+        for form in [
+            "0", "00", "0000", "+0", "-0", "0.0", "0.00", ".0", "0%", "-0%", "0.0%",
+        ] {
+            assert!(
+                opacity_value_is_zero(form),
+                "expected {form:?} to parse as zero",
+            );
+        }
     }
 
     #[test]
