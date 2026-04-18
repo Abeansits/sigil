@@ -394,11 +394,23 @@ fn decision_to_tool_result(decision: &PolicyDecision) -> ToolResult {
 /// Both `run_stdio` and the Unix socket transport in `sigil-runtime`
 /// delegate to this function.
 ///
+/// `sanitizer` and `fetcher` gate the `fetch_url` tool: when both are
+/// provided, the pipeline runs end-to-end; when either is absent the
+/// tool returns a clean `Error` status to the caller. A production
+/// wiring must pass a real sanitizer here — the default no-sanitizer
+/// path is only appropriate for deployments that never expose
+/// external-content fetches to agents. (PR7 Codex review: the earlier
+/// draft hid this behind `McpServer::with_grants(grants)`, which meant
+/// the stdio and socket entrypoints always shipped `fetch_url`
+/// disabled regardless of what the caller wired elsewhere.)
+///
 /// # Errors
 ///
 /// Returns [`McpError`] on I/O or serialization failure.
 pub async fn handle_stream<G, R, W>(
     grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
     mut reader: R,
     mut writer: W,
 ) -> Result<(), McpError>
@@ -409,7 +421,10 @@ where
 {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    let mut server = McpServer::with_grants(grants);
+    let mut server = McpServer::with_grants(grants).with_fetcher(fetcher);
+    if let Some(s) = sanitizer {
+        server = server.with_sanitizer(s);
+    }
     let mut line = String::new();
 
     loop {
@@ -461,17 +476,29 @@ where
 /// line-delimited JSON-RPC messages from stdin, handles them, and
 /// writes responses to stdout.
 ///
+/// Pass `Some(sanitizer)` and a real `fetcher` to enable the
+/// `fetch_url` tool; pass `None` / [`DisabledFetcher`] to ship it as a
+/// hard-disabled surface. See [`handle_stream`] for the wiring
+/// contract.
+///
 /// # Errors
 ///
 /// Returns [`McpError::Io`] if stdin/stdout operations fail.
-pub async fn run_stdio<G: GrantStore>(grants: Arc<G>) -> Result<(), McpError> {
+pub async fn run_stdio<G: GrantStore>(
+    grants: Arc<G>,
+    sanitizer: Option<Arc<Sanitizer>>,
+    fetcher: Arc<dyn ExternalContentFetcher>,
+) -> Result<(), McpError> {
     use tokio::io::BufReader;
 
-    tracing::info!("sigil-mcp server starting on stdio");
+    tracing::info!(
+        fetch_url_enabled = sanitizer.is_some(),
+        "sigil-mcp server starting on stdio"
+    );
 
     let reader = BufReader::new(tokio::io::stdin());
     let writer = tokio::io::stdout();
-    handle_stream(grants, reader, writer).await?;
+    handle_stream(grants, sanitizer, fetcher, reader, writer).await?;
 
     tracing::info!("stdin closed, shutting down");
     Ok(())
@@ -652,6 +679,107 @@ mod tests {
         let text = result["content"][0]["text"].as_str().expect("text");
         let tool_result: ToolResult = serde_json::from_str(text).expect("tool result");
         assert_eq!(tool_result.status, ToolStatus::NeedsApproval);
+    }
+
+    /// Regression for PR7 Codex P1: `handle_stream` used to construct
+    /// `McpServer::with_grants(...)` internally, throwing away any
+    /// sanitizer the caller wanted to wire. The signature now takes
+    /// the sanitizer + fetcher explicitly. This test exercises the
+    /// same path the stdio / socket entrypoints take, proving that a
+    /// wired sanitizer actually reaches the `fetch_url` dispatch.
+    ///
+    /// We issue a grant for `FetchExternalContent` inline so the
+    /// evaluator returns `Allow` and the tool call flows through to
+    /// `dispatch_fetch_url`, which is where the sanitizer is
+    /// consulted. Without a wired sanitizer the result would be
+    /// `status: Error, message: "no sanitizer configured"`. With the
+    /// fix, the call either succeeds (fetcher returns bytes →
+    /// sanitizer produces a report → `evaluate_result` Allow) or
+    /// fails cleanly on a real sanitizer-observable error — never on
+    /// the "no sanitizer configured" guard.
+    #[tokio::test]
+    async fn handle_stream_plumbs_sanitizer_end_to_end() {
+        use sigil_content::fetcher::DisabledFetcher;
+        use sigil_core::id::RequestId;
+        use sigil_core::trust::Capability;
+        use sigil_policy::PolicyError;
+        use sigil_policy::grants::{ApprovalGrant, GrantStore};
+        use time::{Duration, OffsetDateTime};
+
+        /// A grant store that hands out a fresh
+        /// `FetchExternalContent` grant for every lookup. Unblocks the
+        /// agent's tool call so the path through to the sanitizer is
+        /// exercised.
+        struct GrantAll;
+        impl GrantStore for GrantAll {
+            async fn find_grant(
+                &self,
+                principal: &str,
+                capability: Capability,
+                _resource: Option<&str>,
+            ) -> Result<Option<ApprovalGrant>, PolicyError> {
+                if capability == Capability::FetchExternalContent {
+                    Ok(Some(ApprovalGrant {
+                        id: RequestId::new(),
+                        principal_id: principal.to_owned(),
+                        capability,
+                        resource_scope: None,
+                        expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
+                        max_uses: None,
+                        uses: 0,
+                        issued_by: "test".into(),
+                        issued_at: OffsetDateTime::now_utc(),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            async fn save_grant(&self, _grant: &ApprovalGrant) -> Result<(), PolicyError> {
+                Ok(())
+            }
+        }
+
+        let sanitizer = Arc::new(Sanitizer::new(b"test-key").expect("sanitizer"));
+        let grants = Arc::new(GrantAll);
+
+        let mut server = McpServer::with_grants(Arc::clone(&grants))
+            .with_sanitizer(Arc::clone(&sanitizer))
+            .with_fetcher(Arc::new(DisabledFetcher));
+
+        // initialize with a session id so tool calls are accepted.
+        let init = make_request(
+            "initialize",
+            serde_json::json!({ "session_id": SessionId::new().to_string() }),
+        );
+        server.handle_request(&init).await;
+
+        let call = make_request(
+            "tools/call",
+            serde_json::json!({
+                "name": "fetch_url",
+                "arguments": {
+                    "url": "https://example.com/page",
+                    "content_type": "html",
+                }
+            }),
+        );
+        let resp = server.handle_request(&call).await;
+        let text = resp.result.expect("result")["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_owned();
+        let tool_result: ToolResult = serde_json::from_str(&text).expect("tool result");
+
+        // DisabledFetcher returns NotConfigured, so the tool result
+        // is an Error — but the error message must name the
+        // *fetcher* (not the sanitizer), proving the sanitizer
+        // *was* installed and the call flowed past its guard.
+        assert_eq!(tool_result.status, ToolStatus::Error);
+        let msg = tool_result.message;
+        assert!(
+            msg.contains("fetch") && !msg.contains("no sanitizer"),
+            "sanitizer must be plumbed; got {msg}"
+        );
     }
 
     /// Invalid `content_type` in arguments surfaces as

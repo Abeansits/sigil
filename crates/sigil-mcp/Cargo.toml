@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["io-util", "io-std", "sync", "macros"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 assert_matches.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true

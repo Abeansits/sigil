@@ -6,13 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-container = ["dep:sigil-audit", "dep:sigil-mcp"]
+container = ["dep:sigil-audit", "dep:sigil-mcp", "dep:sigil-content"]
 
 [dependencies]
 sigil-core = { path = "../sigil-core" }
 sigil-policy = { path = "../sigil-policy" }
 sigil-audit = { path = "../sigil-audit", optional = true }
 sigil-mcp = { path = "../sigil-mcp", optional = true }
+sigil-content = { path = "../sigil-content", optional = true }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
