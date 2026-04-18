@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use sigil_content::{RawFetchedContent, Sanitizer};
@@ -80,23 +80,15 @@ pub async fn sanitize(
         ContentKind::Html => sanitizer
             .sanitize_html(raw, source)
             .context("HTML sanitization failed")?,
+        ContentKind::Md => sanitizer
+            .sanitize_markdown(raw, source)
+            .context("Markdown sanitization failed")?,
+        ContentKind::Json => sanitizer
+            .sanitize_json(raw, source)
+            .context("JSON sanitization failed")?,
         ContentKind::Text | ContentKind::Log => sanitizer
             .sanitize_plain(raw, source, content_type)
             .context("plain-text sanitization failed")?,
-        kind @ (ContentKind::Md | ContentKind::Json) => {
-            // sanitize_markdown / sanitize_json land with PR5. Until
-            // then, we fail cleanly with an actionable message rather
-            // than pretending to handle the content and silently
-            // dropping caller data.
-            let label = match kind {
-                ContentKind::Md => "Markdown",
-                ContentKind::Json => "JSON",
-                ContentKind::Html | ContentKind::Text | ContentKind::Log => unreachable!(),
-            };
-            return Err(anyhow!(
-                "{label} sanitizer not yet wired in this build (PR5 of the sanitize series)",
-            ));
-        }
     };
 
     if json_out {

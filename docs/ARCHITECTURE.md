@@ -366,12 +366,11 @@ The `SanitizeReport` (defined in `sigil-core::content`) carries three independen
 - agent container image (`container/Dockerfile`) with Claude Code + Codex
 - operational memory — episode logging and mechanical consolidation (`sigil-memory`)
 - property-based tests with `proptest` across core, audit, and policy crates
-- external-content sanitization pipeline (`sigil-content`) — plain-text and HTML paths with nonce-delimited provenance wrap, keyed-HMAC fingerprints, and a stable rule-ID pattern scanner
+- external-content sanitization pipeline (`sigil-content`) — plain-text, HTML, Markdown, and JSON paths with nonce-delimited provenance wrap, keyed-HMAC fingerprints, and a stable rule-ID pattern scanner
 - `sigil content sanitize` CLI debug harness for the sanitization pipeline
 
 ### In flight
 
-- Markdown + JSON sanitizers (PR5 of the content series, currently open)
 - policy-layer `SanitizationRequirement` enforcement on `Action`s (PR6)
 - conductor + MCP wiring that runs the sanitizer on external-content action results when `SanitizationRequirement` is set (PR7; lands together with this document)
 

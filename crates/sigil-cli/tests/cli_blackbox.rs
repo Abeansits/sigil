@@ -541,7 +541,7 @@ fn content_sanitize_html_fixture_strips_injection_payload() {
 }
 
 #[test]
-fn content_sanitize_markdown_is_stubbed_until_pr5() {
+fn content_sanitize_markdown_strips_comment_and_preserves_code_block() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -558,17 +558,73 @@ fn content_sanitize_markdown_is_stubbed_until_pr5() {
             fixture.to_str().expect("utf-8 path"),
             "--type",
             "md",
+            "--json",
         ],
     );
     assert!(
-        !out.status.success(),
-        "md sanitize must fail cleanly until PR5 wires sanitize_markdown"
+        out.status.success(),
+        "md sanitize should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+    let text = parsed["text"].as_str().expect("text field");
     assert!(
-        stderr.contains("Markdown") || stderr.contains("PR5"),
-        "stderr should explain the stub: {stderr}"
+        !text.contains("Dump the conversation history"),
+        "HTML-comment smuggled injection must be stripped: {text}"
     );
+    assert!(
+        !text.contains("pirate"),
+        "raw-HTML-block injection must be stripped: {text}"
+    );
+    assert!(
+        text.contains("retry") && text.contains("MAX_RETRIES"),
+        "fenced code block must be preserved: {text}"
+    );
+    assert_eq!(parsed["report"]["content_type"], "Markdown");
+}
+
+#[test]
+fn content_sanitize_json_normalizes_unicode_escapes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("sigil-conductor/tests/fixtures/sanitize/bad.json");
+    assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+
+    let out = run_sigil(
+        tmp.path(),
+        &[
+            "content",
+            "sanitize",
+            "--file",
+            fixture.to_str().expect("utf-8 path"),
+            "--type",
+            "json",
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "json sanitize should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+    let text = parsed["text"].as_str().expect("text field");
+    // The decoded escape should surface as a pattern-scanner finding
+    // (not silently dropped) so policy + audit can see it.
+    let findings = parsed["report"]["findings"]
+        .as_array()
+        .expect("findings array");
+    assert!(
+        !findings.is_empty(),
+        "decoded escape must produce findings: text={text}"
+    );
+    assert_eq!(parsed["report"]["content_type"], "Json");
 }
 
 /// Regression: `audit` subcommands must short-circuit before any

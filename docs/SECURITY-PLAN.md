@@ -34,7 +34,7 @@ Implemented today:
 - bridge text normalization for zero-width, tag, directional-override, variation-selector, and control characters
 - mixed-script detection
 - ANSI stripping for tmux output before higher-level parsing
-- `sigil-content` sanitization pipeline for external content — plain-text and HTML paths with format-specific structural strip, text-layer normalize (composed from `sigil-policy::normalize`), injection-pattern scan with stable rule IDs, nonce-delimited provenance wrap, and keyed-HMAC fingerprints. Markdown + JSON land with PR5; policy-layer `SanitizationRequirement` enforcement lands with PR6; conductor + MCP wiring lands with PR7 (pending PR6 merge).
+- `sigil-content` sanitization pipeline for external content — plain-text, HTML, Markdown, and JSON paths with format-specific structural strip, text-layer normalize (composed from `sigil-policy::normalize`), injection-pattern scan with stable rule IDs, nonce-delimited provenance wrap, and keyed-HMAC fingerprints. Policy-layer `SanitizationRequirement` enforcement lands with PR6; conductor + MCP wiring lands with PR7 (pending PR6 merge).
 
 Current limitation:
 
@@ -83,7 +83,7 @@ Implemented:
 | Audit logging | Implemented and wired into CLI/conductor |
 | Grant persistence | Implemented |
 | Grant enforcement | Implemented |
-| Web content sanitization | Implemented (Phase 1 — plain-text + HTML in `sigil-content`; Markdown + JSON in PR5; conductor + MCP wiring in PR7 pending PR6) |
+| Web content sanitization | Implemented (Phase 1 — plain-text, HTML, Markdown, JSON in `sigil-content`; conductor + MCP wiring in PR7 pending PR6) |
 | Content provenance tagging | Implemented (nonce-delimited in-band wrap + keyed-HMAC fingerprints in audit log) |
 | Key management | Keychain-backed on macOS (audit + sanitizer fingerprint HMAC key) |
 
@@ -102,7 +102,7 @@ Implemented:
 
 ### Priority 3
 
-- _(completed Phase 1)_ fetched-content sanitization for web inputs (`sigil-content`: plain-text + HTML; Markdown + JSON with PR5; conductor + MCP wiring with PR7)
+- _(completed Phase 1)_ fetched-content sanitization for web inputs (`sigil-content`: plain-text, HTML, Markdown, JSON; conductor + MCP wiring with PR7)
 - _(completed Phase 1)_ content provenance tagging for external inputs (nonce-delimited in-band wrap + keyed-HMAC fingerprints in the audit log)
 
 ## What This Plan No Longer Assumes
