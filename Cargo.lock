@@ -1895,6 +1895,7 @@ dependencies = [
  "sigil-audit",
  "sigil-bridge",
  "sigil-conductor",
+ "sigil-content",
  "sigil-core",
  "sigil-memory",
  "sigil-policy",
