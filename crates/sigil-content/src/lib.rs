@@ -39,7 +39,10 @@ use sigil_core::{ContentSource, ContentType, SanitizedContent};
 
 pub mod config;
 pub mod error;
+pub mod patterns;
 pub mod plain;
+pub mod risk;
+pub mod wrap;
 
 pub use config::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_REPETITION_RATIO, RULE_SET_VERSION, SCORING_VERSION,
@@ -268,9 +271,14 @@ mod tests {
             .sanitize_plain(raw, file_source(), ContentType::PlainText)
             .expect("plain text must succeed");
 
-        assert_eq!(out.text, "Hello, world!");
+        // PR3: `out.text` is the wrapped form; the bare cleaned body is
+        // recoverable via `wrap::extract_body`.
+        let body = wrap::extract_body(&out.text).expect("must round-trip");
+        assert!(body.starts_with("Hello, world!"));
         assert_eq!(out.report.bytes_in, 13);
-        assert_eq!(out.report.bytes_out, 13);
+        assert_eq!(out.report.bytes_out, out.text.len());
+        assert!(out.text.contains("source: file:///tmp/fixture"));
+        assert!(out.text.contains("content_type: text/plain"));
         assert!(out.report.findings.is_empty());
         assert!(out.report.stripped_elements.is_empty());
         assert_eq!(out.report.risk_score, 0);
@@ -332,7 +340,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(out.text, "helloworld");
+        let body = wrap::extract_body(&out.text).unwrap();
+        assert!(body.starts_with("helloworld"));
         assert_eq!(out.report.text_normalize.stripped_count, 2);
         assert!(
             out.report
@@ -347,7 +356,7 @@ mod tests {
                 .contains(&"directional-override".into())
         );
         assert_eq!(out.report.bytes_in, input.len());
-        assert_eq!(out.report.bytes_out, "helloworld".len());
+        assert_eq!(out.report.bytes_out, out.text.len());
     }
 
     #[test]
@@ -362,7 +371,8 @@ mod tests {
                 ContentType::Log,
             )
             .unwrap();
-        assert_eq!(out.text, "red text");
+        let body = wrap::extract_body(&out.text).unwrap();
+        assert!(body.starts_with("red text"));
         assert_eq!(out.report.content_type, ContentType::Log);
         assert_eq!(
             out.report.stripped_elements,
@@ -386,6 +396,9 @@ mod tests {
 
     #[test]
     fn idempotent_on_already_clean_input() {
+        // Idempotence is checked over the *cleaned body*, not the wrapped
+        // output: each call generates a fresh nonce, so the wrapped form
+        // is intentionally non-deterministic.
         let s = sanitizer();
         let raw = "Hello, normalize me!\u{200B}";
         let first = s
@@ -395,15 +408,23 @@ mod tests {
                 ContentType::PlainText,
             )
             .unwrap();
+        let first_body = wrap::extract_body(&first.text)
+            .unwrap()
+            .trim_end_matches('\n')
+            .to_owned();
         let second = s
             .sanitize_plain(
-                RawFetchedContent::from_string(first.text.clone()),
+                RawFetchedContent::from_string(first_body.clone()),
                 file_source(),
                 ContentType::PlainText,
             )
             .unwrap();
+        let second_body = wrap::extract_body(&second.text)
+            .unwrap()
+            .trim_end_matches('\n')
+            .to_owned();
 
-        assert_eq!(first.text, second.text);
+        assert_eq!(first_body, second_body);
         assert_eq!(
             first.report.sanitized_fingerprint, second.report.raw_fingerprint,
             "second pass must see the same bytes as the first pass emitted",

@@ -1,15 +1,22 @@
 //! Configuration for the sanitization pipeline.
 
 /// Current rule-set catalog version. Bumped whenever the set of rule IDs
-/// emitted by the sanitizer changes. PR2 ships with zero rules, so the
-/// version starts at 1; PR3 adds the injection-pattern rules.
-pub const RULE_SET_VERSION: u32 = 1;
+/// emitted by the sanitizer changes.
+///
+/// - `1` (PR2) — placeholder, zero rules.
+/// - `2` (PR3) — initial injection-pattern catalog: `INJ-001..007`,
+///   `ENC-001..003`, `REP-001..002`, `MIX-001`, `FMT-001`, `WRP-001`.
+pub const RULE_SET_VERSION: u32 = 2;
 
 /// Current risk-score weighting version. Tracks the scoring formula so a
 /// report from an older scoring pass is recognizably different. Bumped
 /// independently of [`RULE_SET_VERSION`] so rule additions and scoring
 /// recalibrations do not force one another.
-pub const SCORING_VERSION: u32 = 1;
+///
+/// - `1` (PR2) — placeholder, no scoring (always 0).
+/// - `2` (PR3) — distinct-rule weighted scorer with normalize-strip and
+///   repetition-ratio bonuses; see [`crate::risk`].
+pub const SCORING_VERSION: u32 = 2;
 
 /// Default maximum input size (2 MiB).
 ///

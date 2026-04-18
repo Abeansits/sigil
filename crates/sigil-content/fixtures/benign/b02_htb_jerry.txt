@@ -1,0 +1,3 @@
+# FETCH_FAILED: source URL returned 404 or was not archived at fetch time.
+# Re-fetch in a follow-up once a stable URL is confirmed. Until then this
+# fixture is skipped by the FP gate (leading '# FETCH_FAILED' sentinel).

@@ -11,6 +11,7 @@ sigil-policy = { path = "../sigil-policy" }
 serde.workspace = true
 thiserror.workspace = true
 getrandom = "0.2"
+regex.workspace = true
 
 [dev-dependencies]
 assert_matches.workspace = true

