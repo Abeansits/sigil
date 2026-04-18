@@ -39,6 +39,8 @@ use sigil_core::{ContentSource, ContentType, SanitizedContent};
 
 pub mod config;
 pub mod error;
+#[cfg(feature = "html")]
+pub mod html;
 pub mod patterns;
 pub mod plain;
 pub mod risk;
@@ -181,6 +183,28 @@ impl Sanitizer {
     ) -> Result<SanitizedContent, ContentError> {
         plain::sanitize(raw, source, content_type, &self.config, &self.key)
     }
+
+    /// Run the HTML path.
+    ///
+    /// Parses `raw` with a tolerant html5ever tree builder, walks the
+    /// DOM dropping `<script>`/`<style>`/`<template>`/`<noscript>`,
+    /// comments, metadata containers, and hidden elements (see
+    /// [`crate::html`] for the full strip rules), then feeds the
+    /// extracted visible text through stages 4-7 of the shared
+    /// pipeline. The returned [`SanitizeReport::content_type`] is
+    /// [`ContentType::Html`].
+    ///
+    /// # Errors
+    ///
+    /// See [`html::sanitize`] for the full error matrix.
+    #[cfg(feature = "html")]
+    pub fn sanitize_html(
+        &self,
+        raw: RawFetchedContent,
+        source: ContentSource,
+    ) -> Result<SanitizedContent, ContentError> {
+        html::sanitize(raw, source, &self.config, &self.key)
+    }
 }
 
 impl fmt::Debug for Sanitizer {
@@ -215,6 +239,28 @@ pub fn sanitize_plain(
         return Err(ContentError::FingerprintKeyUnavailable);
     }
     plain::sanitize(raw, source, content_type, config, key)
+}
+
+/// Free-function entry point for the HTML path.
+///
+/// Equivalent to constructing a short-lived [`Sanitizer`] and calling
+/// [`Sanitizer::sanitize_html`].
+///
+/// # Errors
+///
+/// Same as [`Sanitizer::sanitize_html`], plus
+/// [`ContentError::FingerprintKeyUnavailable`] if `key` is empty.
+#[cfg(feature = "html")]
+pub fn sanitize_html(
+    raw: RawFetchedContent,
+    source: ContentSource,
+    config: &SanitizerConfig,
+    key: &[u8],
+) -> Result<SanitizedContent, ContentError> {
+    if key.is_empty() {
+        return Err(ContentError::FingerprintKeyUnavailable);
+    }
+    html::sanitize(raw, source, config, key)
 }
 
 #[cfg(test)]
