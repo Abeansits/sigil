@@ -58,6 +58,48 @@ pub use config::{
 pub use error::ContentError;
 pub use fetcher::{DisabledFetcher, ExternalContentFetcher, FetchError, FetchFuture};
 
+/// Dispatch raw bytes to the sanitizer entry point matching the
+/// caller's declared [`ContentType`]. Single source of truth for the
+/// format-dispatch switch — both `sigil-conductor` (action dispatch)
+/// and `sigil-mcp` (tool-call dispatch) route through this helper so
+/// adding a new content type is a one-place change.
+///
+/// # Errors
+///
+/// - [`ContentError::UnsupportedContentType`] if the declared type
+///   has no dispatch arm (e.g. a future `ContentType` variant the
+///   router hasn't learned about yet).
+/// - Any sanitizer error from the selected entry point (size,
+///   encoding, wrap-header injection, etc.).
+pub fn dispatch_sanitize(
+    sanitizer: &Sanitizer,
+    raw: RawFetchedContent,
+    source: ContentSource,
+    content_type: ContentType,
+) -> Result<SanitizedContent, ContentError> {
+    // `ContentType` is #[non_exhaustive]; unknown future variants fail
+    // closed with a typed error rather than silently routing through
+    // the plain-text path.
+    match content_type {
+        #[cfg(feature = "html")]
+        ContentType::Html => sanitizer.sanitize_html(raw, source),
+        #[cfg(not(feature = "html"))]
+        ContentType::Html => Err(ContentError::UnsupportedContentType(ContentType::Html)),
+        #[cfg(feature = "markdown")]
+        ContentType::Markdown => sanitizer.sanitize_markdown(raw, source),
+        #[cfg(not(feature = "markdown"))]
+        ContentType::Markdown => Err(ContentError::UnsupportedContentType(ContentType::Markdown)),
+        #[cfg(feature = "json")]
+        ContentType::Json => sanitizer.sanitize_json(raw, source),
+        #[cfg(not(feature = "json"))]
+        ContentType::Json => Err(ContentError::UnsupportedContentType(ContentType::Json)),
+        ContentType::PlainText | ContentType::Log => {
+            sanitizer.sanitize_plain(raw, source, content_type)
+        }
+        other => Err(ContentError::UnsupportedContentType(other)),
+    }
+}
+
 // Re-export core types consumers of this crate need so they do not have
 // to pull `sigil-core` into their Cargo.toml for basic usage.
 pub use sigil_core::{SanitizeReport, SanitizedContent as CoreSanitizedContent};

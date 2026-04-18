@@ -218,28 +218,35 @@ where
         request: &ActionRequest,
         dispatch: DispatchResult,
     ) -> Result<ActionOutcome, ConductorError> {
-        // Pull the report out of the dispatch result when it carries
-        // one; otherwise build an empty `ActionResult` so the evaluator
-        // can still deny for "missing report" per PR6 semantics.
-        let report = match &dispatch {
-            DispatchResult::ExternalContent { report, .. } => Some(report.clone()),
-            // A well-behaved sanitize action produces ExternalContent.
-            // Anything else — e.g. a variant added without a matching
-            // dispatch arm — surfaces as "missing report" through the
-            // evaluator's gate below. We deliberately do not short-
-            // circuit here: the evaluator owns the deny shape.
-            DispatchResult::Session(_)
+        // A `SanitizationRequirement::Required` action **must**
+        // produce `DispatchResult::ExternalContent`. Anything else is
+        // a wiring bug (e.g. a future Action variant growing a
+        // Required requirement but forgetting to emit
+        // ExternalContent). Surface it as a typed internal error
+        // rather than handing an empty `ActionResult` to
+        // `evaluate_result` and getting a misleading `Deny` — the two
+        // failure classes are semantically different and should not
+        // be conflated in the audit log. (PR7 Codex review.)
+        let (text, report) = match dispatch {
+            DispatchResult::ExternalContent { text, report } => (text, report),
+            other @ (DispatchResult::Session(_)
             | DispatchResult::SessionList(_)
             | DispatchResult::Text(_)
             | DispatchResult::Done
-            | DispatchResult::AuthorizedNotDispatched => None,
+            | DispatchResult::AuthorizedNotDispatched) => {
+                return Err(ConductorError::Internal {
+                    message: format!(
+                        "finalize_sanitize_outcome: action {:?} declared \
+                         SanitizationRequirement::Required but dispatch \
+                         produced {other:?}; the dispatch arm must emit \
+                         DispatchResult::ExternalContent",
+                        request.action,
+                    ),
+                });
+            }
         };
 
-        let action_result = match report.clone() {
-            Some(r) => ActionResult::new().with_sanitize_report(r),
-            None => ActionResult::new(),
-        };
-
+        let action_result = ActionResult::new().with_sanitize_report(report.clone());
         let post = self
             .policy
             .evaluate_result(request, &action_result)
@@ -248,14 +255,17 @@ where
                 message: format!("post-dispatch policy evaluation failed: {e}"),
             })?;
 
-        // Second audit entry: the decision carries either the original
-        // `Allow` (now with the report attached) or the evaluator's
-        // post-dispatch `Deny`. Either way the audit log gets the
-        // report and the final verdict together.
-        self.audit_decision(request, &post, report).await;
+        // Second audit entry: decision + report together.
+        self.audit_decision(request, &post, Some(report.clone()))
+            .await;
 
         match post {
-            PolicyDecision::Allow => Ok(ActionOutcome::Completed(dispatch)),
+            PolicyDecision::Allow => {
+                Ok(ActionOutcome::Completed(DispatchResult::ExternalContent {
+                    text,
+                    report,
+                }))
+            }
             PolicyDecision::Deny { reason } => Ok(ActionOutcome::Denied { reason }),
             // Post-dispatch should never produce NeedsApproval (that is
             // a pre-dispatch concept), but map defensively so future

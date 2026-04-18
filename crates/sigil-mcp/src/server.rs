@@ -344,31 +344,22 @@ fn package_tool_result(id: Option<serde_json::Value>, tool_result: &ToolResult) 
     JsonRpcResponse::success(id, content)
 }
 
-/// Dispatch raw bytes into the sanitizer entry point that matches the
-/// declared content type. Factored out so the `fetch_url` handler
-/// reads linearly; this also keeps the `ContentType` match exhaustive
-/// — future variants land as compile errors instead of silently
-/// routing through the plain-text path.
+/// Dispatch raw bytes into the sanitizer entry point that matches
+/// the declared content type. Thin wrapper around
+/// [`sigil_content::dispatch_sanitize`] that stringifies the error so
+/// it slots into [`ToolResult::message`].
+///
+/// Shared with `sigil-conductor` via `sigil_content::dispatch_sanitize`
+/// — one format-dispatch switch for both call sites, so adding a new
+/// `ContentType` variant is a one-place change.
 fn run_sanitize(
     sanitizer: &Sanitizer,
     raw: RawFetchedContent,
     source: ContentSource,
     content_type: ContentType,
 ) -> Result<sigil_core::content::SanitizedContent, String> {
-    let result = match content_type {
-        ContentType::Html => sanitizer.sanitize_html(raw, source),
-        ContentType::Markdown => sanitizer.sanitize_markdown(raw, source),
-        ContentType::Json => sanitizer.sanitize_json(raw, source),
-        ContentType::PlainText | ContentType::Log => {
-            sanitizer.sanitize_plain(raw, source, content_type)
-        }
-        other => {
-            return Err(format!(
-                "no sanitizer dispatch arm for content type {other:?}"
-            ));
-        }
-    };
-    result.map_err(|e| format!("sanitize({content_type:?}): {e}"))
+    sigil_content::dispatch_sanitize(sanitizer, raw, source, content_type)
+        .map_err(|e| format!("sanitize({content_type:?}): {e}"))
 }
 
 /// Convert a `PolicyDecision` to a `ToolResult`.

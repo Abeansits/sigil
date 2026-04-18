@@ -83,46 +83,31 @@ where
 }
 
 /// Dispatch a raw buffer into the sanitizer entry point that matches
-/// the declared content type. Factored out of
-/// [`fetch_and_sanitize`] so tests (and a future bridge-attachment
-/// caller) can skip the fetch step.
+/// the declared content type. Thin wrapper around
+/// [`sigil_content::dispatch_sanitize`] that re-types the error as
+/// [`ConductorError::Internal`] for the `ActionService` dispatch flow.
+///
+/// The format-dispatch switch itself lives in `sigil-content` so
+/// `sigil-conductor` and `sigil-mcp` cannot drift apart when a new
+/// `ContentType` variant lands.
 ///
 /// # Errors
 ///
-/// Returns [`ConductorError::Internal`] when:
-///
-/// - The declared `content_type` has no dispatch arm (a future
-///   `ContentType` variant that forgot to update the router).
-/// - The sanitizer rejects the payload (oversize, invalid UTF-8, etc.).
+/// Returns [`ConductorError::Internal`] whenever
+/// [`sigil_content::dispatch_sanitize`] returns a [`ContentError`] —
+/// this includes unsupported content types, size / encoding
+/// rejections, and wrap-header injection guards.
 pub fn run_sanitize(
     sanitizer: &Sanitizer,
     raw: RawFetchedContent,
     source: ContentSource,
     content_type: ContentType,
 ) -> Result<SanitizedContent, ConductorError> {
-    // `ContentType` is #[non_exhaustive]; unknown future variants fail
-    // closed with a typed error rather than silently routing through
-    // the plain-text path.
-    let cleaned = match content_type {
-        ContentType::Html => sanitizer.sanitize_html(raw, source),
-        ContentType::Markdown => sanitizer.sanitize_markdown(raw, source),
-        ContentType::Json => sanitizer.sanitize_json(raw, source),
-        ContentType::PlainText | ContentType::Log => {
-            sanitizer.sanitize_plain(raw, source, content_type)
+    sigil_content::dispatch_sanitize(sanitizer, raw, source, content_type).map_err(|e| {
+        ConductorError::Internal {
+            message: format!("sanitize({content_type:?}) failed: {e}"),
         }
-        other => {
-            return Err(ConductorError::Internal {
-                message: format!(
-                    "sanitize: content type {other:?} has no dispatch arm; \
-                     add one in sigil-conductor::sanitize::run_sanitize"
-                ),
-            });
-        }
-    }
-    .map_err(|e| ConductorError::Internal {
-        message: format!("sanitize({content_type:?}) failed: {e}"),
-    })?;
-    Ok(cleaned)
+    })
 }
 
 /// Convenience type alias for the shared pointer `ActionService` holds.
