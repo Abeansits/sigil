@@ -110,8 +110,10 @@ where
                 })?;
 
         // 2. Audit — log the real decision before dispatch so the
-        //    decision is recorded even if dispatch fails.
-        self.audit_decision(&request, &decision).await;
+        //    decision is recorded even if dispatch fails. PR6 passes
+        //    no sanitize report; PR7 wires the conductor-side fetch /
+        //    sanitize path and populates this.
+        self.audit_decision(&request, &decision, None).await;
 
         // 3. Dispatch if allowed, building the outcome.
         let outcome = match &decision {
@@ -536,7 +538,18 @@ where
     // -----------------------------------------------------------------------
 
     /// Log an audit event with the real policy decision and execution context.
-    async fn audit_decision(&self, request: &ActionRequest, decision: &PolicyDecision) {
+    ///
+    /// The `sanitize_report` argument is `None` today: no dispatched
+    /// variant currently produces external content. PR7 wires the
+    /// conductor / MCP fetch path and starts passing a populated
+    /// report here so the audit chain records the sanitizer's output
+    /// alongside the decision.
+    async fn audit_decision(
+        &self,
+        request: &ActionRequest,
+        decision: &PolicyDecision,
+        sanitize_report: Option<sigil_core::content::SanitizeReport>,
+    ) {
         let session_id = extract_session_id(&request.action);
         let event = AuditEvent {
             request_id: request.id,
@@ -545,6 +558,7 @@ where
             origin_summary: format!("{:?}", request.origin),
             decision: decision.clone(),
             session_id,
+            sanitize_report,
         };
 
         if let Err(e) = self.audit.append(&event).await {

@@ -1,6 +1,7 @@
 use std::future::Future;
 
 use crate::action::{ActionRequest, PolicyDecision};
+use crate::content::SanitizeReport;
 use crate::error::CoreError;
 use crate::protocol::{AgentSignal, BridgeMessage, ConductorMessage, HookFormat, StatusPattern};
 use crate::session::{IdentitySpec, SessionConfig, SessionHandle, SessionState};
@@ -128,4 +129,12 @@ pub struct AuditEvent {
     pub origin_summary: String,
     pub decision: PolicyDecision,
     pub session_id: Option<crate::id::SessionId>,
+    /// Sanitizer report produced alongside the action's result, when the
+    /// dispatched action fetched external content. `None` for actions
+    /// that produced no external content (the common case today).
+    ///
+    /// `#[serde(default)]` lets older audit records — written before
+    /// PR6 of the content-sanitization series — deserialize cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitize_report: Option<SanitizeReport>,
 }

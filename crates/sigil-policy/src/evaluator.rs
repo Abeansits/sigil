@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use sigil_core::action::{Action, ActionRequest, PolicyDecision};
+use sigil_core::action::{Action, ActionRequest, ActionResult, PolicyDecision};
+use sigil_core::content::SanitizationRequirement;
 use sigil_core::origin::ActionOrigin;
 use sigil_core::principal::{PlatformIdentity, resolve_principal};
 use sigil_core::trust::{Capability, Tier, TrustZone};
@@ -34,6 +35,13 @@ pub struct EvaluatorConfig {
     /// (e.g., `AllowedUser.tier_ceiling`) feed directly into
     /// policy evaluation.
     pub user_tier_ceilings: HashMap<PlatformIdentity, Tier>,
+
+    /// Thresholds for the post-dispatch sanitization gate (see
+    /// [`Evaluator::evaluate_result`]). PR6 ships the struct empty —
+    /// the check is presence-and-content-type only. PR7 populates
+    /// risk-score / rule-id / size-/encoding-rejection thresholds
+    /// here, and the evaluator's gate reads from this field.
+    pub sanitization: crate::sanitization::SanitizationConfig,
 }
 
 /// The core policy evaluator. Delegates to a [`GrantStore`] for
@@ -164,8 +172,90 @@ impl<G: GrantStore> Evaluator<G> {
                 .await);
         }
 
+        // 7b. T0/T1 capabilities that still require an explicit grant
+        //     (e.g., FetchExternalContent). Tier-ceiling-passing is not
+        //     sufficient — without a grant, the capability is gated
+        //     through the same infrastructure-approval path as T2.
+        if capability.requires_grant() {
+            return Ok(self
+                .check_infrastructure_approval(request, capability, &principal.identity)
+                .await);
+        }
+
         // 8. T0-T1: allowed.
         Ok(PolicyDecision::Allow)
+    }
+
+    /// Post-dispatch check: enforce the action's
+    /// [`SanitizationRequirement`] against its [`ActionResult`].
+    ///
+    /// Call this after [`Self::evaluate`] returned `Allow` and the
+    /// runtime produced a result. The check is separate because a
+    /// sanitize report only exists *after* the runtime has fetched
+    /// external content and run it through `sigil-content`.
+    ///
+    /// Failure modes:
+    ///
+    /// - Action declares [`SanitizationRequirement::Required`] and
+    ///   the result carries no report → `Deny`.
+    /// - Report is present but its `content_type` does not match the
+    ///   declared type → `Deny`.
+    ///
+    /// Actions with [`SanitizationRequirement::None`] (every variant
+    /// in the workspace today) pass through unchanged — the hot path
+    /// is a single pattern match against `None`, no result inspection.
+    ///
+    /// # Errors
+    ///
+    /// Infallible in PR6 — all denial paths return `Ok(PolicyDecision::Deny)`.
+    /// The signature returns `Result` so downstream checks (e.g.
+    /// risk-score thresholds in PR7) can surface evaluator errors
+    /// without another API break.
+    #[allow(clippy::unused_async)] // Ok(...) today; PR7 may await grant-store reads
+    pub async fn evaluate_result(
+        &self,
+        request: &ActionRequest,
+        result: &ActionResult,
+    ) -> Result<PolicyDecision, PolicyError> {
+        // `SanitizationRequirement` is #[non_exhaustive]; fall through
+        // to a fail-closed deny for any future variant so the addition
+        // of a new requirement kind can't silently pass through here.
+        match request.action.sanitization_requirement() {
+            SanitizationRequirement::None => Ok(PolicyDecision::Allow),
+            SanitizationRequirement::Required(expected_type) => {
+                let Some(report) = result.sanitize_report.as_ref() else {
+                    return Ok(PolicyDecision::Deny {
+                        reason: format!(
+                            "sanitization requirement not satisfied: \
+                             missing sanitize report (expected {expected_type:?})"
+                        ),
+                    });
+                };
+                if report.content_type != expected_type {
+                    return Ok(PolicyDecision::Deny {
+                        reason: format!(
+                            "sanitization requirement not satisfied: \
+                             content-type mismatch (expected {expected_type:?}, \
+                             got {:?})",
+                            report.content_type,
+                        ),
+                    });
+                }
+                // PR6 is deliberately permissive past the presence /
+                // content-type checks — risk-score and rule-id
+                // thresholds land in PR7 alongside the conductor
+                // wiring, so "has a report of the right type" is
+                // good enough today.
+                Ok(PolicyDecision::Allow)
+            }
+            other => Ok(PolicyDecision::Deny {
+                reason: format!(
+                    "sanitization requirement not satisfied: \
+                     unknown SanitizationRequirement variant ({other:?}); \
+                     evaluator needs an explicit arm"
+                ),
+            }),
+        }
     }
 
     /// T3+ actions require human approval unless origin is `HumanApproved`
@@ -329,7 +419,7 @@ fn is_human_approved(origin: &ActionOrigin) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::panic)]
 
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -940,6 +1030,181 @@ mod tests {
                     reason: e.to_string(),
                 });
         assert_matches!(decision, PolicyDecision::Deny { reason } if reason.contains("fatigue"));
+    }
+
+    // ------------------------------------------------------------------
+    // Post-dispatch SanitizationRequirement check (PR6 of 7)
+    // ------------------------------------------------------------------
+
+    mod sanitization {
+        use sigil_core::action::ActionResult;
+        use sigil_core::content::{
+            ContentSource, ContentType, Fingerprint, REPORT_SCHEMA_VERSION, SanitizeReport,
+        };
+        use sigil_core::normalize::NormalizeResult;
+
+        use super::*;
+
+        fn sample_report(content_type: ContentType) -> SanitizeReport {
+            let key = b"policy-test-key";
+            SanitizeReport {
+                schema_version: REPORT_SCHEMA_VERSION,
+                rule_set_version: 1,
+                scoring_version: 1,
+                source: ContentSource::from_url("https://example.com/page").expect("url"),
+                content_type,
+                bytes_in: 42,
+                bytes_out: 40,
+                stripped_elements: vec![],
+                text_normalize: NormalizeResult::default(),
+                findings: vec![],
+                risk_score: 10,
+                repetition_ratio: 0.0,
+                size_rejected: false,
+                encoding_rejected: false,
+                nonce: "abc12345".into(),
+                duration_ms: 2,
+                raw_fingerprint: Fingerprint::compute(key, b"raw").expect("fp"),
+                sanitized_fingerprint: Fingerprint::compute(key, b"clean").expect("fp"),
+            }
+        }
+
+        #[tokio::test]
+        async fn action_without_requirement_allows_empty_result() {
+            // Every current Action variant has SanitizationRequirement::None,
+            // so an empty ActionResult must be accepted unchanged — this is
+            // the "no regression for pre-sanitize actions" guarantee.
+            let evaluator = eval();
+            let request = make_request(ActionOrigin::LocalCli, Action::ListSessions);
+            let result = ActionResult::new();
+
+            let decision = evaluator
+                .evaluate_result(&request, &result)
+                .await
+                .expect("no infallible error today");
+            assert_matches!(decision, PolicyDecision::Allow);
+        }
+
+        #[tokio::test]
+        async fn action_without_requirement_allows_result_with_report() {
+            // Defensive: even if a caller attaches a report to an action
+            // that does not declare a requirement, that's fine — the
+            // evaluator's job is to enforce "required implies present",
+            // not "not-required implies absent".
+            let evaluator = eval();
+            let request = make_request(ActionOrigin::LocalCli, Action::ListSessions);
+            let result = ActionResult::new().with_sanitize_report(sample_report(ContentType::Html));
+
+            let decision = evaluator
+                .evaluate_result(&request, &result)
+                .await
+                .expect("no infallible error today");
+            assert_matches!(decision, PolicyDecision::Allow);
+        }
+
+        // The two "required" paths exercise the check logic directly,
+        // without waiting for an Action variant that actually declares
+        // a SanitizationRequirement::Required. We reproduce what the
+        // check does when the requirement is Required — the hot path
+        // behavior — by driving evaluate_result's logic through a
+        // small helper that mirrors the decision branches.
+        //
+        // When the first external-content Action variant lands (PR7+),
+        // these helpers become unnecessary and the tests should switch
+        // to real requests.
+
+        fn check(requirement: SanitizationRequirement, result: &ActionResult) -> PolicyDecision {
+            match requirement {
+                SanitizationRequirement::None => PolicyDecision::Allow,
+                SanitizationRequirement::Required(expected_type) => {
+                    let Some(report) = result.sanitize_report.as_ref() else {
+                        return PolicyDecision::Deny {
+                            reason: format!(
+                                "sanitization requirement not satisfied: \
+                                 missing sanitize report (expected {expected_type:?})"
+                            ),
+                        };
+                    };
+                    if report.content_type != expected_type {
+                        return PolicyDecision::Deny {
+                            reason: format!(
+                                "sanitization requirement not satisfied: \
+                                 content-type mismatch (expected {expected_type:?}, \
+                                 got {:?})",
+                                report.content_type,
+                            ),
+                        };
+                    }
+                    PolicyDecision::Allow
+                }
+                other => PolicyDecision::Deny {
+                    reason: format!("unknown variant {other:?}"),
+                },
+            }
+        }
+
+        #[test]
+        fn required_but_missing_report_denies() {
+            let result = ActionResult::new();
+            let decision = check(
+                SanitizationRequirement::Required(ContentType::Html),
+                &result,
+            );
+            assert_matches!(
+                decision,
+                PolicyDecision::Deny { reason }
+                if reason.contains("missing sanitize report")
+            );
+        }
+
+        #[test]
+        fn required_with_matching_content_type_allows() {
+            let result = ActionResult::new().with_sanitize_report(sample_report(ContentType::Html));
+            let decision = check(
+                SanitizationRequirement::Required(ContentType::Html),
+                &result,
+            );
+            assert_matches!(decision, PolicyDecision::Allow);
+        }
+
+        #[test]
+        fn required_with_wrong_content_type_denies() {
+            let result = ActionResult::new().with_sanitize_report(sample_report(ContentType::Json));
+            let decision = check(
+                SanitizationRequirement::Required(ContentType::Html),
+                &result,
+            );
+            assert_matches!(
+                decision,
+                PolicyDecision::Deny { reason }
+                if reason.contains("content-type mismatch")
+            );
+        }
+
+        #[test]
+        fn denied_reason_is_audit_legible() {
+            // The denial reason is what the HMAC-chained audit log
+            // records; it must be specific enough that a later
+            // investigator can distinguish "missing report" from
+            // "wrong content type" without diffing structs.
+            let missing = check(
+                SanitizationRequirement::Required(ContentType::Html),
+                &ActionResult::new(),
+            );
+            let mismatched = check(
+                SanitizationRequirement::Required(ContentType::Html),
+                &ActionResult::new().with_sanitize_report(sample_report(ContentType::Json)),
+            );
+
+            match (missing, mismatched) {
+                (PolicyDecision::Deny { reason: a }, PolicyDecision::Deny { reason: b }) => {
+                    assert!(a.contains("missing"), "missing-report reason: {a}");
+                    assert!(b.contains("mismatch"), "mismatch reason: {b}");
+                    assert_ne!(a, b);
+                }
+                other => panic!("expected two Deny decisions, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

@@ -24,7 +24,9 @@ pub mod traits;
 pub mod trust;
 
 // Re-export the most commonly used types at crate root for ergonomics.
-pub use action::{Action, ActionRequest, CommandTemplate, GitOperation, PolicyDecision};
+pub use action::{
+    Action, ActionRequest, ActionResult, CommandTemplate, GitOperation, PolicyDecision,
+};
 pub use config::{
     BridgeConfigSection, BridgePlatformConfig, BridgeUserEntry, MemoryConfig, MemoryConfigSection,
     parse_tier,

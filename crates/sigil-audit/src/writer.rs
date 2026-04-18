@@ -149,6 +149,7 @@ mod tests {
             origin_summary: "cli".to_owned(),
             decision: PolicyDecision::Allow,
             session_id: None,
+            sanitize_report: None,
         }
     }
 

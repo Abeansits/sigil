@@ -4,3 +4,4 @@ target/
 *.db-wal
 *.db-shm
 .DS_Store
+.claude/scheduled_tasks.lock

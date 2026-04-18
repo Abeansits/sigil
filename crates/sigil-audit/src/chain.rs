@@ -207,6 +207,7 @@ mod tests {
             origin_summary: "test origin".to_owned(),
             decision: sigil_core::PolicyDecision::Allow,
             session_id: None,
+            sanitize_report: None,
         };
 
         // Compute content hash from the actual serialized event.
@@ -263,6 +264,7 @@ mod proptest_tests {
                 origin_summary,
                 decision,
                 session_id: None,
+                sanitize_report: None,
             },
         )
     }
