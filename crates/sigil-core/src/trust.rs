@@ -50,6 +50,12 @@ pub enum Capability {
     // T1
     ManageSession,
     SendMessage,
+    /// Fetch and consume external content (URLs, remote resources).
+    /// Requires a grant; not automatically authorized. The resulting
+    /// `ActionResult` must carry a [`crate::content::SanitizeReport`]
+    /// when the originating action declares a
+    /// [`crate::content::SanitizationRequirement::Required`].
+    FetchExternalContent,
 
     // T2
     ModifyInfrastructure,
@@ -73,7 +79,7 @@ impl Capability {
     pub fn minimum_tier(&self) -> Tier {
         match self {
             Self::ReadSessionInfo | Self::ReadSystemStatus => Tier::T0,
-            Self::ManageSession | Self::SendMessage => Tier::T1,
+            Self::ManageSession | Self::SendMessage | Self::FetchExternalContent => Tier::T1,
             Self::ModifyInfrastructure | Self::ConfigureConductor => Tier::T2,
             Self::ReadHostFile
             | Self::WriteHostFile
@@ -117,6 +123,7 @@ mod tests {
     fn capabilities_have_correct_tier_mapping() {
         assert_eq!(Capability::ReadSessionInfo.minimum_tier(), Tier::T0);
         assert_eq!(Capability::ManageSession.minimum_tier(), Tier::T1);
+        assert_eq!(Capability::FetchExternalContent.minimum_tier(), Tier::T1);
         assert_eq!(Capability::ModifyInfrastructure.minimum_tier(), Tier::T2);
         assert_eq!(Capability::ReadHostFile.minimum_tier(), Tier::T3);
         assert_eq!(Capability::BreakGlass.minimum_tier(), Tier::T3Plus);
