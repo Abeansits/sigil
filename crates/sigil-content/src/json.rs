@@ -124,6 +124,7 @@ pub(crate) fn sanitize(
         raw_fingerprint,
         started,
         prenormalized: Some(prenormalized),
+        routed_from: None,
         config,
         key,
     })

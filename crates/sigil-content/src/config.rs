@@ -6,7 +6,12 @@
 /// - `1` (PR2) — placeholder, zero rules.
 /// - `2` (PR3) — initial injection-pattern catalog: `INJ-001..007`,
 ///   `ENC-001..003`, `REP-001..002`, `MIX-001`, `FMT-001`, `WRP-001`.
-pub const RULE_SET_VERSION: u32 = 2;
+/// - `3` (PR3.6) — `FMT-001` demoted `High → Info` and reframed as
+///   audit-only metadata; the declared-vs-observed HTML mismatch that
+///   originally drove the rule is now handled by the pre-dispatch
+///   reroute in [`crate::dispatch_sanitize`]. Rule set otherwise
+///   unchanged.
+pub const RULE_SET_VERSION: u32 = 3;
 
 /// Current risk-score weighting version. Tracks the scoring formula so a
 /// report from an older scoring pass is recognizably different. Bumped

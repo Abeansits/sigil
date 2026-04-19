@@ -1053,6 +1053,7 @@ mod tests {
                 scoring_version: 1,
                 source: ContentSource::from_url("https://example.com/page").expect("url"),
                 content_type,
+                routed_from: None,
                 bytes_in: 42,
                 bytes_out: 40,
                 stripped_elements: vec![],

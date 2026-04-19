@@ -19,10 +19,17 @@
 //! not to keep the baseline at zero. See `CALIBRATION.md`.
 //!
 //! - `INJ-001..007` — `High`. The canonical attack phrasings.
-//! - `FMT-001` — `High`. Hard-gated to zero hits on the benign corpus
-//!   (a lying server is never benign signal). The two-signal heuristic
-//!   in [`has_strong_html_markers`] keeps that property while the
-//!   close-tag threshold sits at the permissive-to-start floor.
+//! - `FMT-001` — `Info` **(PR3.6 demotion; was `High`)**. Declared-vs-
+//!   observed content-type mismatch is now surfaced earlier: the
+//!   pre-dispatch ASCII sniff in [`crate::dispatch_sanitize`] reroutes
+//!   plain-text payloads whose leading bytes are an HTML document root
+//!   into the HTML sanitizer for a safer strip, and records
+//!   `routed_from` in the report. FMT-001 on the plain-text pattern
+//!   scan is now audit-only metadata: it fires when [`has_strong_html_markers`]
+//!   sees the fragment-shape two-signal combo, which the router
+//!   deliberately does **not** treat as routable (Path B false-positive
+//!   rate is too high for a blunt reroute). See
+//!   `docs/design/fmt-001-scoping.md` for the full rationale.
 //! - `MIX-001`, `ENC-003` — `Medium`. Suspicious but not always attack
 //!   shape (Unicode TR #39 prose has mixed-script examples; data URIs
 //!   appear in legit Markdown).
@@ -123,7 +130,7 @@ pub const RULE_MIX_001: PatternRule = PatternRule {
 
 pub const RULE_FMT_001: PatternRule = PatternRule {
     id: "FMT-001",
-    severity: Severity::High,
+    severity: Severity::Info,
     description: "declared plain text / log but body contains HTML markers",
 };
 
@@ -153,19 +160,14 @@ const LONG_TOKEN_MIN_LEN: usize = 200;
 /// Close-tag count that contributes a structural-HTML signal to
 /// [`RULE_FMT_001`].
 ///
-/// **Held at 100 for PR3.** Sebastian's round-3 calibration request was
-/// to drop this to 20 ("start permissive, dial up"; see
-/// `CALIBRATION.md`). Empirically that conflicts with the hard
-/// "FMT-001 zero on benign" constraint: the `PortSwigger` XSS cheat
-/// sheet (`a06_portswigger_xss_cheatsheet.txt`) contains 5 distinct
-/// execution-bearing openers (svg, template, form, style, script) and
-/// 62 close-tags as legitimate attack-surface enumeration; any
-/// close-tag floor < 62 trips path-B on it. Opener-set tightening
-/// does not help — every opener in the regex appears in the cheat
-/// sheet's prose. Flagged for Sebastian on PR #52: either accept
-/// FMT-001 hits on benign (relax the hard gate), exclude HTML-prose
-/// fixtures from the FP corpus, or bring path-B opener semantics into
-/// alignment with the threat model in a follow-up.
+/// Held at 100. Originally tuned against a hard "FMT-001 zero on
+/// benign" constraint; PR3.6 demoted FMT-001 to Info severity (the
+/// pre-dispatch reroute in [`crate::dispatch_sanitize`] now handles
+/// the real attacker case — a plain-text server serving a lying HTML
+/// body) so the gate is no longer hard, but the threshold stays at
+/// 100 because Path B is explicitly non-routing and its only job is
+/// audit metadata: a higher floor reduces audit noise without
+/// changing security posture.
 const FMT_HTML_CLOSE_TAG_THRESHOLD: usize = 100;
 
 /// Number of distinct opener-only structural tags above which `FMT-001`
@@ -509,11 +511,16 @@ fn is_base64_byte(b: u8) -> bool {
     matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=')
 }
 
-/// FMT-001 detector — two-signal heuristic.
+/// FMT-001 detector — two-signal heuristic. **Audit-only** as of PR3.6.
 ///
 /// Path A (single-signal, document-root): a `<!DOCTYPE html>` or `<html…>`
 /// opener is a definitive document-root marker that does not appear in
-/// ordinary prose discussion of HTML.
+/// ordinary prose discussion of HTML. Also emitted as a pre-dispatch
+/// routing signal by [`crate::detect::looks_like_html_document_root`]
+/// — that sniff runs on raw bytes before a sanitizer is selected;
+/// this post-decode check catches the tail case where Path A fires
+/// on already-decoded text (e.g. Log content, which the router
+/// excludes from the reroute).
 ///
 /// Path B (two-signal, fragment): a body-only HTML fragment will not
 /// have the document-root markers, so we look for the *combination* of
@@ -521,13 +528,10 @@ fn is_base64_byte(b: u8) -> bool {
 /// (e.g. `<script>` AND `<iframe>`) AND a close-tag count crossing
 /// [`FMT_HTML_CLOSE_TAG_THRESHOLD`]. A blog post quoting one tag in
 /// prose trips neither signal alone; an actual HTML fragment served as
-/// `text/plain` trips both.
-///
-/// This restores fragment recall that the post-`#first-cut` calibration
-/// gave up while keeping FP-rate gate hits at zero on the benign
-/// corpus. Codex flagged the original "single tag" heuristic as too
-/// noisy and the post-tightening "doctype/html only" heuristic as too
-/// weak; the two-signal split addresses both.
+/// `text/plain` trips both. Path B is **explicitly not a routing
+/// signal** — its FP rate on legitimate security-prose fixtures (e.g.
+/// the `PortSwigger` XSS cheat sheet) is too high for that. See
+/// `docs/design/fmt-001-scoping.md` for the rationale.
 fn has_strong_html_markers(text: &str) -> bool {
     if RE_FMT_DOCTYPE_OR_HTML.is_match(text) {
         return true;

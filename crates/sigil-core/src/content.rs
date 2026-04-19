@@ -450,6 +450,20 @@ pub struct SanitizeReport {
     pub scoring_version: u32,
     pub source: ContentSource,
     pub content_type: ContentType,
+    /// Declared content type the dispatcher received before any
+    /// pre-dispatch reroute (`Some(declared)` when the sanitizer picked
+    /// a different path than the caller asked for — today the only
+    /// reroute is declared [`ContentType::PlainText`] bytes that look
+    /// like an HTML document being sent through the HTML sanitizer for
+    /// a safer strip; [`ContentType::Log`] is intentionally excluded
+    /// because terminal captures legitimately carry DOCTYPE text).
+    /// `None` when no reroute happened and `content_type` already
+    /// reflects what the caller declared. Policy treats the effective
+    /// `content_type` as authoritative; `routed_from` is for
+    /// audit-trail debugging so a reviewer can see that a `text/plain`
+    /// response arrived carrying a `<!DOCTYPE html>` body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_from: Option<ContentType>,
     pub bytes_in: usize,
     pub bytes_out: usize,
     #[serde(default)]
@@ -507,6 +521,7 @@ mod tests {
             scoring_version: 1,
             source: ContentSource::from_url("https://example.com/article").unwrap(),
             content_type: ContentType::Html,
+            routed_from: None,
             bytes_in: 1024,
             bytes_out: 900,
             stripped_elements: vec![("script".into(), 2), ("comment".into(), 5)],

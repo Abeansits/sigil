@@ -119,6 +119,7 @@ pub(crate) fn sanitize(
         raw_fingerprint,
         started,
         prenormalized: None,
+        routed_from: None,
         config,
         key,
     })
@@ -157,6 +158,14 @@ pub(crate) struct PostStripInput<'a> {
     /// `cleaned` on the supplied result is ignored — `stage3` is the
     /// canonical post-Stage-3 body and is used as-is.
     pub(crate) prenormalized: Option<NormalizeResult>,
+    /// The declared [`ContentType`] prior to any pre-dispatch reroute.
+    /// `Some(declared)` when the dispatcher rerouted (today: only
+    /// `PlainText` → `Html` when the raw bytes sniff as an HTML
+    /// document root; [`ContentType::Log`] is deliberately excluded
+    /// from the reroute); `None` when `content_type` already matches
+    /// the caller's declared type. Passed through verbatim into
+    /// [`SanitizeReport::routed_from`].
+    pub(crate) routed_from: Option<ContentType>,
     pub(crate) config: &'a SanitizerConfig,
     pub(crate) key: &'a [u8],
 }
@@ -180,6 +189,7 @@ pub(crate) fn run_post_strip_pipeline(
         raw_fingerprint,
         started,
         prenormalized,
+        routed_from,
         config,
         key,
     } = input;
@@ -270,6 +280,7 @@ pub(crate) fn run_post_strip_pipeline(
         scoring_version: config.scoring_version,
         source,
         content_type,
+        routed_from,
         bytes_in,
         bytes_out,
         stripped_elements,

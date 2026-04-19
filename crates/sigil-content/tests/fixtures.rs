@@ -14,13 +14,13 @@
 //!       RISK_GATE_THRESHOLD` (absolute delta, not percentage — see
 //!       `content-sanitization.md` §Stage 5 for the rationale at
 //!       `n=20`).
-//!     * Zero `Severity::High` hits. Anti-gaming: keeps the High tier
-//!       semantically meaningful and prevents "lower the threshold to
-//!       49" score games.
-//!     * Zero `FMT-001` hits specifically. The one `High`-severity
-//!       rule in the PR3 catalog is also the rule the design doc
-//!       flags as a hard "must not fire on benign content" case —
-//!       asserting it explicitly makes the failure mode obvious.
+//!
+//!   PR3.6 note: the previous "zero `FMT-001` hits specifically" hard
+//!   gate was retired together with the FMT-001 severity demotion —
+//!   the rule is now audit-only metadata, and the real attacker case
+//!   (plain-text server serving an HTML body) is handled by the
+//!   pre-dispatch reroute in `dispatch_sanitize`. The measured-hits
+//!   delta check is the remaining regression detector.
 //!
 //! The baseline lives in `tests/fp_baseline.json`. CI reads it and
 //! rejects any PR that raises the count by more than one fixture.
@@ -69,8 +69,12 @@ const MALICIOUS_EXPECTATIONS: &[(&str, &str, Severity)] = &[
     ("rep_001.txt", "REP-001", Severity::Low),
     ("rep_002.txt", "REP-002", Severity::Low),
     ("mix_001.txt", "MIX-001", Severity::Medium),
-    ("fmt_001.txt", "FMT-001", Severity::High),
-    ("fmt_001_fragment.txt", "FMT-001", Severity::High),
+    // PR3.6: FMT-001 demoted from High to Info. The real attacker case
+    // (plain-text server serving an HTML body) is handled earlier by the
+    // pre-dispatch reroute in `dispatch_sanitize`; the pattern-scan
+    // emission is now audit-only metadata.
+    ("fmt_001.txt", "FMT-001", Severity::Info),
+    ("fmt_001_fragment.txt", "FMT-001", Severity::Info),
     ("wrp_001.txt", "WRP-001", Severity::Info),
     ("delimiter_breakout.txt", "WRP-001", Severity::Info),
 ];
@@ -197,7 +201,6 @@ fn benign_corpus_fp_gate() {
     let s = sanitizer();
     let dir = fixtures_dir("benign");
     let mut scores: BTreeMap<String, u8> = BTreeMap::new();
-    let mut fmt_001_hits: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
     let entries = fs::read_dir(&dir).expect("benign fixtures dir must exist");
@@ -229,12 +232,6 @@ fn benign_corpus_fp_gate() {
             .unwrap_or_else(|e| panic!("sanitize {name} failed: {e}"));
 
         scores.insert(name.to_owned(), out.report.risk_score);
-
-        for f in &out.report.findings {
-            if f.rule_id == "FMT-001" {
-                fmt_001_hits.push(name.to_owned());
-            }
-        }
     }
 
     let measured_hits = scores
@@ -242,20 +239,12 @@ fn benign_corpus_fp_gate() {
         .filter(|s| **s >= RISK_GATE_THRESHOLD)
         .count();
 
-    // Hard gate: zero `FMT-001` hits on the benign corpus. A server lying
-    // about `Content-Type` is never benign signal — see `CALIBRATION.md`.
+    // PR3.6 retired the "zero FMT-001 hits on benign" hard gate — the
+    // rule is now Info-level audit metadata and the pre-dispatch
+    // reroute in `dispatch_sanitize` handles the real attacker case.
+    // The absolute-delta baseline check (`measured_hits <= baseline_hits + 1`)
+    // is the remaining regression detector.
     //
-    // The previous "zero High-severity hits" anti-gaming gate was retired
-    // when `INJ-*` rules were promoted to High (round-3 calibration,
-    // Sebastian 2026-04-17). Real attack phrasings deserve High severity
-    // even though benign security writing quotes them; the absolute-delta
-    // baseline check (`measured_hits <= baseline_hits + 1`) is the
-    // remaining regression detector.
-    assert!(
-        fmt_001_hits.is_empty(),
-        "benign fixtures tripped FMT-001 (must be zero): {fmt_001_hits:?}",
-    );
-
     // Compare measured hits to the locked baseline. First run bootstraps
     // the baseline file; subsequent runs enforce `measured <= baseline + 1`.
     let baseline_path = tests_dir().join("fp_baseline.json");
