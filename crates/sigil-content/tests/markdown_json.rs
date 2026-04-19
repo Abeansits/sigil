@@ -14,7 +14,13 @@
 //! - Oversize MD / JSON produce typed [`ContentError::SizeExceeded`].
 //! - A known-bad MD + JSON "attack" input surfaces expected flags in the
 //!   `SanitizeReport`.
+//!
+//! Gated on **both** the `markdown` and `json` features — the suite
+//! drives `Sanitizer::sanitize_markdown` / `sanitize_json`, which only
+//! exist in the default build. A `--no-default-features` run would
+//! otherwise fail to link.
 
+#![cfg(all(feature = "markdown", feature = "json"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

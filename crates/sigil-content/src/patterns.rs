@@ -19,17 +19,25 @@
 //! not to keep the baseline at zero. See `CALIBRATION.md`.
 //!
 //! - `INJ-001..007` — `High`. The canonical attack phrasings.
-//! - `FMT-001` — `Info` **(PR3.6 demotion; was `High`)**. Declared-vs-
-//!   observed content-type mismatch is now surfaced earlier: the
-//!   pre-dispatch ASCII sniff in [`crate::dispatch_sanitize`] reroutes
-//!   plain-text payloads whose leading bytes are an HTML document root
-//!   into the HTML sanitizer for a safer strip, and records
-//!   `routed_from` in the report. FMT-001 on the plain-text pattern
-//!   scan is now audit-only metadata: it fires when [`has_strong_html_markers`]
-//!   sees the fragment-shape two-signal combo, which the router
-//!   deliberately does **not** treat as routable (Path B false-positive
-//!   rate is too high for a blunt reroute). See
-//!   `docs/design/fmt-001-scoping.md` for the full rationale.
+//! - `FMT-001` — `Info` **(PR3.6 demotion; was `High`)** in the default
+//!   build. Declared-vs-observed content-type mismatch is now surfaced
+//!   earlier: the pre-dispatch ASCII sniff in
+//!   [`crate::dispatch_sanitize`] reroutes plain-text payloads whose
+//!   leading bytes are an HTML document root into the HTML sanitizer
+//!   for a safer strip, and records `routed_from` in the report.
+//!   FMT-001 on the plain-text pattern scan is audit-only metadata: it
+//!   fires when [`has_strong_html_markers`] sees the fragment-shape
+//!   two-signal combo, which the router deliberately does **not** treat
+//!   as routable (Path B false-positive rate is too high for a blunt
+//!   reroute). See `docs/design/fmt-001-scoping.md` for the full
+//!   rationale.
+//!
+//!   In a `--no-default-features` build (html feature off) the reroute
+//!   is compiled out, so `FMT-001` stays at `High` severity — the
+//!   finding is the only remaining defense against a lying server in
+//!   that configuration. The severity is feature-gated on
+//!   [`RULE_FMT_001`] with a `#[cfg(feature = "html")]` / `#[cfg(not(…))]`
+//!   pair.
 //! - `MIX-001`, `ENC-003` — `Medium`. Suspicious but not always attack
 //!   shape (Unicode TR #39 prose has mixed-script examples; data URIs
 //!   appear in legit Markdown).
@@ -128,10 +136,31 @@ pub const RULE_MIX_001: PatternRule = PatternRule {
     description: "mixed-script word (e.g. Latin + Cyrillic homoglyphs)",
 };
 
+// `RULE_FMT_001` severity is feature-gated on `html`. In a default
+// build (with the HTML sanitizer available), the pre-dispatch reroute
+// in [`crate::dispatch_sanitize`] handles the lying-server case by
+// routing declared-PlainText payloads with HTML document roots into
+// the HTML sanitizer — at that point FMT-001's pattern-scan emission
+// is redundant audit metadata, and `Info` severity is the right
+// weight. In a `--no-default-features` build the reroute is
+// compiled out (`html5ever` isn't linked), so there is no structural
+// strip available, and the only remaining defense against a
+// `text/plain`-wrapping-HTML server is the finding itself — we keep
+// `High` severity there so the risk score still crosses the policy
+// gate. Codex flagged this conditional regression on PR #58.
+#[cfg(feature = "html")]
 pub const RULE_FMT_001: PatternRule = PatternRule {
     id: "FMT-001",
     severity: Severity::Info,
     description: "declared plain text / log but body contains HTML markers",
+};
+
+#[cfg(not(feature = "html"))]
+pub const RULE_FMT_001: PatternRule = PatternRule {
+    id: "FMT-001",
+    severity: Severity::High,
+    description: "declared plain text / log but body contains HTML markers \
+        (no HTML sanitizer available in this build)",
 };
 
 pub const RULE_WRP_001: PatternRule = PatternRule {

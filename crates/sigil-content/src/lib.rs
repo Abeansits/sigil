@@ -38,6 +38,7 @@ use std::fmt;
 use sigil_core::{ContentSource, ContentType, SanitizedContent};
 
 pub mod config;
+#[cfg(feature = "html")]
 pub mod detect;
 pub mod error;
 pub mod fetcher;
@@ -197,6 +198,9 @@ impl RawFetchedContent {
     /// pre-dispatch sniff in [`dispatch_sanitize`] before ownership
     /// transfers to the selected sanitizer. Kept `pub(crate)` so the
     /// sanitizer-bound discipline (no public accessor) still holds.
+    /// Only compiled with the `html` feature — the pre-dispatch sniff
+    /// is the only caller, and it lives behind the same cfg gate.
+    #[cfg(feature = "html")]
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -955,5 +959,91 @@ mod tests {
         )
         .expect("dispatch must succeed");
         assert_eq!(out.report.routed_from, Some(ContentType::PlainText));
+    }
+
+    // ---- FMT-001 severity feature-gate ---------------------------------
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn fmt_001_severity_is_info_with_html_feature() {
+        // Default build: the pre-dispatch reroute handles the
+        // lying-server case, so the pattern-scan emission is audit
+        // metadata at `Info` severity. Pinned so a future accidental
+        // promotion surfaces in review.
+        use sigil_core::Severity;
+        assert_eq!(patterns::RULE_FMT_001.severity, Severity::Info);
+    }
+
+    #[cfg(not(feature = "html"))]
+    #[test]
+    fn fmt_001_severity_stays_high_without_html_feature() {
+        // With `--no-default-features` the reroute is compiled out.
+        // The pattern-scan emission is the only remaining defense
+        // against a `text/plain`-wrapping-HTML server, so FMT-001
+        // stays at `Severity::High` and the finding alone is strong
+        // enough to push the risk score across the policy gate.
+        // This locks the feature-gated severity Codex flagged on PR #58.
+        use sigil_core::Severity;
+        assert_eq!(patterns::RULE_FMT_001.severity, Severity::High);
+
+        // End-to-end check: a declared-PlainText body that contains
+        // an `<html>` marker must still emit FMT-001 at High.
+        let s = sanitizer();
+        let body = "<html><head><title>x</title></head><body>Hello<script>alert(1)</script>world</body></html>";
+        let out = s
+            .sanitize_plain(
+                RawFetchedContent::from_string(body.into()),
+                file_source(),
+                ContentType::PlainText,
+            )
+            .expect("sanitize_plain must succeed");
+
+        let hit = out
+            .report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "FMT-001")
+            .expect("FMT-001 must fire on declared-plain HTML content in !html build");
+        assert_eq!(hit.severity, Severity::High);
+        // Pin the exact score rather than `>=` — the single High FMT-001
+        // is worth exactly `RISK_GATE_THRESHOLD`, so a weight drift (or
+        // a stealth double-count) surfaces here instead of only tripping
+        // the fp-rate gate later. Codex PR #58 review suggestion.
+        assert_eq!(
+            out.report.risk_score,
+            risk::RISK_GATE_THRESHOLD,
+            "one High-severity FMT-001 alone should equal RISK_GATE_THRESHOLD",
+        );
+    }
+
+    #[cfg(not(feature = "html"))]
+    #[test]
+    fn dispatch_plain_with_html_root_stays_on_plain_path_without_html_feature() {
+        // Router-level pin in a no-HTML build: `dispatch_sanitize` must
+        // route declared-PlainText bytes through `sanitize_plain` (no
+        // reroute available) and return with `content_type: PlainText`
+        // plus a High-severity FMT-001 finding. Prevents a future
+        // change that adds a second reroute path (or a cross-feature
+        // fallback) from silently weakening the `!html` contract.
+        use sigil_core::Severity;
+        let s = sanitizer();
+        let body = "<html><body>hi<script>alert(1)</script></body></html>";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("dispatch must succeed in !html build");
+
+        assert_eq!(out.report.content_type, ContentType::PlainText);
+        assert!(out.report.routed_from.is_none());
+        let hit = out
+            .report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "FMT-001")
+            .expect("FMT-001 must fire on dispatch path in !html build");
+        assert_eq!(hit.severity, Severity::High);
     }
 }
