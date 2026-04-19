@@ -32,50 +32,44 @@ the rule severities are at their real values; the baseline shifting up
 during a tuning pass is also expected (commit the new snapshot in the
 same change).
 
-Two **hard gates** sit on top of the absolute-delta check:
+The round-3 "Zero High hits on benign" and "Zero FMT-001 hits on
+benign" hard gates have been **retired in PR3.6**. The real attacker
+shape that drove FMT-001 (a server claiming `text/plain` while serving
+`<!DOCTYPE html>`) is now caught earlier by the pre-dispatch reroute
+in `dispatch_sanitize` — the ASCII sniff routes those bodies to the
+HTML sanitizer for a safer strip and records `routed_from` in the
+report. The pattern-scan emission is now `Info`-level audit metadata,
+so the benign corpus can legitimately trip `FMT-001` Path B on prose
+discussion of HTML without crossing the risk gate. The absolute-delta
+baseline check (`measured_hits ≤ baseline_hits + 1`) remains the
+regression detector.
 
-1. Zero `Severity::High` hits on the benign corpus — anti-gaming, keeps
-   the High tier semantically meaningful. *Note: the round-3 `INJ-*`
-   bump to High intentionally raises the per-fixture score, but the
-   distinct-rule scoring still relies on combined signal to push
-   benign content past the threshold.*
-2. Zero `FMT-001` hits on the benign corpus — a server lying about
-   `Content-Type` is never benign signal; the rule must fire only on
-   structural HTML, not on prose discussion of HTML.
+The `INJ-*` High promotion still stands: the High tier is earned by
+direct attack phrasings, and distinct-rule scoring still keeps benign
+content from stacking combined signal past the threshold.
 
-If a tuning change causes either hard gate to break, **flag it** in a
-PR comment instead of silently retuning the rule to keep the gate
-green. The hard gates encode invariants; if the rule is structurally
-incompatible with the invariant, the rule needs more thought, not the
-test.
+### PR3.6 — FMT-001 reframe as routing signal
 
-### Open calibration question (PR #52, round 3)
+The round-3 conflict around `FMT_HTML_CLOSE_TAG_THRESHOLD` (the
+PortSwigger XSS cheat sheet tripping Path B on 62 close-tags of
+legitimate attack-surface enumeration) was resolved by moving the
+actual routing decision out of the pattern scanner entirely. Path A
+(document-root `<!DOCTYPE html>` / `<html>`) is now a pre-dispatch
+sniff in `detect::looks_like_html_document_root`; Path B stays where
+it was but emits at `Info` severity so its false-positive rate on
+security prose is no longer a structural problem. See
+`docs/design/fmt-001-scoping.md` and
+`docs/design/content-sanitization.md §Pre-dispatch content-type reroute`
+for the full rationale.
 
-Sebastian's request to drop `FMT_HTML_CLOSE_TAG_THRESHOLD` from 100 to
-20 was held back. Empirically the PortSwigger XSS cheat-sheet fixture
-contains 5 distinct execution-bearing opener tags (svg, template,
-form, style, script) plus 62 close-tags as legitimate attack-surface
-enumeration; any close-tag floor below 62 trips path-B, which violates
-the "FMT-001 zero on benign" hard gate. The structural conflict needs
-one of:
-
-1. Accept FMT-001 hits on benign (relax the hard gate).
-2. Exclude HTML-prose fixtures from the FP corpus (carve out a06 and
-   similar XSS cheat sheets as out-of-scope for the plain-text gate).
-3. Bring path-B opener semantics into stricter alignment with the
-   threat model — e.g. require an opener whose *content* is also
-   execution-bearing, not just discussion-of-HTML prose.
-
-Pending Sebastian's call.
-
-## Severity tiering (current state — round 3)
+## Severity tiering (current state — PR3.6)
 
 | Tier | Rules | Rationale |
 |------|-------|-----------|
-| `High` | `INJ-001..007`, `FMT-001` | Canonical attack phrasings + content-type lying. Real attackers' first move; deserves the strongest score signal even at the cost of benign-corpus noise. |
+| `High` | `INJ-001..007` | Canonical attack phrasings. Real attackers' first move; deserves the strongest score signal even at the cost of benign-corpus noise. |
 | `Medium` | `MIX-001`, `ENC-003` | Suspicious shape but not always attack (Unicode TR #39 prose, Markdown image data: URIs). |
 | `Low` | `ENC-001/002`, `REP-001/002` | Weak signals that combine into the score but don't push the gate alone. |
-| `Info` | `WRP-001` | Observability only, score-neutral. |
+| `Info` | `WRP-001`, `FMT-001` | Observability only, score-neutral. `FMT-001` reframed in PR3.6 — the routing-relevant case is handled by the pre-dispatch reroute, so the pattern-scan emission is audit metadata. |
 
 ## Score weights (current state — round 3)
 

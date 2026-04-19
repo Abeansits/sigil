@@ -194,6 +194,20 @@ pub(crate) fn sanitize(
     config: &SanitizerConfig,
     key: &[u8],
 ) -> Result<SanitizedContent, ContentError> {
+    sanitize_with_routed_from(raw, source, config, key, None)
+}
+
+/// HTML sanitize entry that records the declared [`ContentType`] a
+/// dispatcher was asked for before it rerouted. Called from
+/// [`crate::dispatch_sanitize`] on the plain/log→HTML reroute with
+/// `Some(declared)`; the plain entry above calls this with `None`.
+pub(crate) fn sanitize_with_routed_from(
+    raw: RawFetchedContent,
+    source: ContentSource,
+    config: &SanitizerConfig,
+    key: &[u8],
+    routed_from: Option<ContentType>,
+) -> Result<SanitizedContent, ContentError> {
     let started = Instant::now();
     let bytes = raw.into_bytes();
     let bytes_in = bytes.len();
@@ -226,6 +240,7 @@ pub(crate) fn sanitize(
         raw_fingerprint,
         started,
         prenormalized: None,
+        routed_from,
         config,
         key,
     })

@@ -38,6 +38,8 @@ use std::fmt;
 use sigil_core::{ContentSource, ContentType, SanitizedContent};
 
 pub mod config;
+#[cfg(feature = "html")]
+pub mod detect;
 pub mod error;
 pub mod fetcher;
 #[cfg(feature = "html")]
@@ -64,6 +66,27 @@ pub use fetcher::{DisabledFetcher, ExternalContentFetcher, FetchError, FetchFutu
 /// and `sigil-mcp` (tool-call dispatch) route through this helper so
 /// adding a new content type is a one-place change.
 ///
+/// # Pre-dispatch reroute
+///
+/// When the caller declares [`ContentType::PlainText`] but the raw
+/// bytes lead with an HTML document root (`<!DOCTYPE html>` or
+/// `<html>`, ASCII-only sniff — see [`detect`]), the router reroutes
+/// to the HTML sanitizer. The resulting [`SanitizeReport`] carries
+/// `content_type: Html` (the effective path that actually ran) and
+/// `routed_from: Some(PlainText)` (the declared type) so both are
+/// visible to policy and audit consumers.
+///
+/// [`ContentType::Log`] is **deliberately excluded** from the reroute:
+/// terminal captures legitimately contain HTML markers as part of the
+/// captured output, so routing those to the HTML sanitizer would
+/// destroy the payload the log was meant to preserve.
+///
+/// The sniff matches document-root markers only. Fragment-shape
+/// heuristics (several distinct HTML openers plus a high close-tag
+/// count) remain non-routing audit signal in
+/// [`crate::patterns::scan`] — see `docs/design/fmt-001-scoping.md`
+/// for the rationale.
+///
 /// # Errors
 ///
 /// - [`ContentError::UnsupportedContentType`] if the declared type
@@ -77,6 +100,18 @@ pub fn dispatch_sanitize(
     source: ContentSource,
     content_type: ContentType,
 ) -> Result<SanitizedContent, ContentError> {
+    // Pre-dispatch HTML sniff on PlainText (but not Log — terminal
+    // captures legitimately carry DOCTYPE text in them). The sniff runs
+    // before UTF-8 decode so we work on raw bytes; matching is ASCII
+    // only so a payload whose leading bytes happen to be non-UTF-8
+    // noise cannot force a reroute.
+    #[cfg(feature = "html")]
+    if matches!(content_type, ContentType::PlainText)
+        && detect::looks_like_html_document_root(raw.as_bytes())
+    {
+        return sanitizer.sanitize_html_routed_from(raw, source, ContentType::PlainText);
+    }
+
     // `ContentType` is #[non_exhaustive]; unknown future variants fail
     // closed with a typed error rather than silently routing through
     // the plain-text path.
@@ -157,6 +192,17 @@ impl RawFetchedContent {
     /// Crate-private move-out of the buffer for the pipeline.
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
+    }
+
+    /// Crate-private read-only view of the buffer, used by the
+    /// pre-dispatch sniff in [`dispatch_sanitize`] before ownership
+    /// transfers to the selected sanitizer. Kept `pub(crate)` so the
+    /// sanitizer-bound discipline (no public accessor) still holds.
+    /// Only compiled with the `html` feature — the pre-dispatch sniff
+    /// is the only caller, and it lives behind the same cfg gate.
+    #[cfg(feature = "html")]
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -252,6 +298,20 @@ impl Sanitizer {
         source: ContentSource,
     ) -> Result<SanitizedContent, ContentError> {
         html::sanitize(raw, source, &self.config, &self.key)
+    }
+
+    /// Internal HTML entry used by [`dispatch_sanitize`] on a
+    /// plain-text → HTML reroute. Records `routed_from` in the report
+    /// so policy and audit consumers can see the dispatcher picked a
+    /// different path than the caller declared.
+    #[cfg(feature = "html")]
+    pub(crate) fn sanitize_html_routed_from(
+        &self,
+        raw: RawFetchedContent,
+        source: ContentSource,
+        declared: ContentType,
+    ) -> Result<SanitizedContent, ContentError> {
+        html::sanitize_with_routed_from(raw, source, &self.config, &self.key, Some(declared))
     }
 
     /// Run the Markdown path.
@@ -713,5 +773,277 @@ mod tests {
         let rendered = format!("{s:?}");
         assert!(!rendered.contains("sigil-content-test-key"));
         assert!(rendered.contains("redacted"));
+    }
+
+    // ---- Pre-dispatch HTML reroute -------------------------------------
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_reroutes_plain_declared_html_body_through_html_sanitizer() {
+        // Declared PlainText, but the body is an actual HTML document.
+        // Expected: the dispatcher reroutes to `sanitize_html` (so the
+        // script content is stripped, not just flagged) and records the
+        // declared type in `routed_from`.
+        let s = sanitizer();
+        let body = "<!DOCTYPE html>\n<html><head><title>x</title></head>\
+            <body>Hello<script>alert('evil')</script>world</body></html>";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("reroute must succeed");
+
+        assert_eq!(out.report.content_type, ContentType::Html);
+        assert_eq!(out.report.routed_from, Some(ContentType::PlainText));
+        assert!(
+            out.text.contains("content_type: text/html"),
+            "wrap header must reflect the effective content type",
+        );
+        // `<script>` body must have been stripped by the HTML sanitizer.
+        let cleaned = wrap::extract_body(&out.text).expect("must round-trip");
+        assert!(!cleaned.contains("alert"));
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_does_not_reroute_log_with_doctype() {
+        // Terminal captures legitimately carry DOCTYPE text as part of
+        // the captured output. The router excludes Log from the reroute.
+        let s = sanitizer();
+        let body = "[2026-04-18T12:00:00Z] curl output:\n<!DOCTYPE html>\n<html>hi</html>\n";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::Log,
+        )
+        .expect("log dispatch must succeed");
+
+        assert_eq!(out.report.content_type, ContentType::Log);
+        assert!(
+            out.report.routed_from.is_none(),
+            "Log must never be rerouted: {:?}",
+            out.report.routed_from,
+        );
+        let cleaned = wrap::extract_body(&out.text).expect("must round-trip");
+        // Log path preserves the captured DOCTYPE body.
+        assert!(cleaned.contains("<!DOCTYPE html>"));
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_does_not_reroute_benign_prose_discussing_html() {
+        // Prose that mentions `<!DOCTYPE html>` or `<html>` mid-sentence
+        // trips the sniff too, but the sniff window is capped at the
+        // leading bytes and the reroute's strip is safer than the
+        // pattern-scan-only path. For benign prose that does NOT have
+        // a document-root marker in the leading window, no reroute
+        // should happen.
+        let s = sanitizer();
+        let body = "This article discusses HTML sanitization. \
+            The sanitizer strips `<script>` tags and other elements. \
+            Consider the fragment `<iframe src=x>` as an example.";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("plain-text dispatch must succeed");
+
+        assert_eq!(out.report.content_type, ContentType::PlainText);
+        assert!(
+            out.report.routed_from.is_none(),
+            "benign prose must not be rerouted: {:?}",
+            out.report.routed_from,
+        );
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_reroutes_before_utf8_decode() {
+        // The sniff runs on raw bytes before UTF-8 validation. A payload
+        // whose HTML prefix is valid ASCII but whose tail contains
+        // non-UTF-8 bytes must still reroute to HTML (html5ever does
+        // its own decode and is tolerant — this test checks that the
+        // sniff itself does not require a UTF-8 pre-pass).
+        //
+        // We use pure-ASCII bytes here since `sanitize_html` hard-fails
+        // on non-UTF-8 input by design; the point of the test is that
+        // `detect::looks_like_html_document_root` works on a `&[u8]`
+        // and is not predicated on a successful decode.
+        let s = sanitizer();
+        let raw = RawFetchedContent::from_bytes(b"<html><body>hi</body></html>".to_vec());
+        let out = dispatch_sanitize(&s, raw, file_source(), ContentType::PlainText)
+            .expect("reroute must succeed");
+        assert_eq!(out.report.routed_from, Some(ContentType::PlainText));
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_html_declared_carries_no_routed_from() {
+        // When the caller already declared Html, no reroute happens and
+        // `routed_from` stays `None`.
+        let s = sanitizer();
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string("<html><body>hi</body></html>".into()),
+            file_source(),
+            ContentType::Html,
+        )
+        .expect("html dispatch must succeed");
+        assert_eq!(out.report.content_type, ContentType::Html);
+        assert!(out.report.routed_from.is_none());
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_does_not_reroute_marker_beyond_sniff_window() {
+        // A document-root marker parked past the sniff window is
+        // intentionally ignored — real HTML leads with the root. Lock
+        // the behavior at the dispatch layer so a future window-size
+        // change is visible in the test suite.
+        let s = sanitizer();
+        let mut padding = vec![b' '; 1500];
+        padding.extend_from_slice(b"<!DOCTYPE html><html><body>x</body></html>");
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_bytes(padding),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("dispatch must succeed");
+        assert_eq!(out.report.content_type, ContentType::PlainText);
+        assert!(out.report.routed_from.is_none());
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_reroutes_prose_containing_doctype_marker() {
+        // A prose passage that quotes `<!DOCTYPE html>` mid-sentence
+        // trips the sniff — that's a semantic FP but a safety-positive
+        // over-route (the HTML sanitizer strips nothing harmful from
+        // text, it just rewraps it). This test pins the intentional
+        // tradeoff so a future tightening to "leading token only" is a
+        // reviewable diff, not a silent change. See
+        // `docs/design/fmt-001-scoping.md` §Edge cases.
+        let s = sanitizer();
+        let body = "Example: <!DOCTYPE html> opens every HTML document. \
+            The sanitizer handles this case safely.";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("dispatch must succeed");
+        assert_eq!(out.report.content_type, ContentType::Html);
+        assert_eq!(out.report.routed_from, Some(ContentType::PlainText));
+    }
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn dispatch_reroutes_on_tab_separated_doctype() {
+        // Tab (and other ASCII-whitespace variants) between `<!DOCTYPE`
+        // and `html` must trip the sniff — spec-valid HTML, and a
+        // non-trivial false-negative if we only honored a literal space.
+        let s = sanitizer();
+        let body = "<!DOCTYPE\thtml>\n<html><body><script>x</script>ok</body></html>";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("dispatch must succeed");
+        assert_eq!(out.report.routed_from, Some(ContentType::PlainText));
+    }
+
+    // ---- FMT-001 severity feature-gate ---------------------------------
+
+    #[cfg(feature = "html")]
+    #[test]
+    fn fmt_001_severity_is_info_with_html_feature() {
+        // Default build: the pre-dispatch reroute handles the
+        // lying-server case, so the pattern-scan emission is audit
+        // metadata at `Info` severity. Pinned so a future accidental
+        // promotion surfaces in review.
+        use sigil_core::Severity;
+        assert_eq!(patterns::RULE_FMT_001.severity, Severity::Info);
+    }
+
+    #[cfg(not(feature = "html"))]
+    #[test]
+    fn fmt_001_severity_stays_high_without_html_feature() {
+        // With `--no-default-features` the reroute is compiled out.
+        // The pattern-scan emission is the only remaining defense
+        // against a `text/plain`-wrapping-HTML server, so FMT-001
+        // stays at `Severity::High` and the finding alone is strong
+        // enough to push the risk score across the policy gate.
+        // This locks the feature-gated severity Codex flagged on PR #58.
+        use sigil_core::Severity;
+        assert_eq!(patterns::RULE_FMT_001.severity, Severity::High);
+
+        // End-to-end check: a declared-PlainText body that contains
+        // an `<html>` marker must still emit FMT-001 at High.
+        let s = sanitizer();
+        let body = "<html><head><title>x</title></head><body>Hello<script>alert(1)</script>world</body></html>";
+        let out = s
+            .sanitize_plain(
+                RawFetchedContent::from_string(body.into()),
+                file_source(),
+                ContentType::PlainText,
+            )
+            .expect("sanitize_plain must succeed");
+
+        let hit = out
+            .report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "FMT-001")
+            .expect("FMT-001 must fire on declared-plain HTML content in !html build");
+        assert_eq!(hit.severity, Severity::High);
+        // Pin the exact score rather than `>=` — the single High FMT-001
+        // is worth exactly `RISK_GATE_THRESHOLD`, so a weight drift (or
+        // a stealth double-count) surfaces here instead of only tripping
+        // the fp-rate gate later. Codex PR #58 review suggestion.
+        assert_eq!(
+            out.report.risk_score,
+            risk::RISK_GATE_THRESHOLD,
+            "one High-severity FMT-001 alone should equal RISK_GATE_THRESHOLD",
+        );
+    }
+
+    #[cfg(not(feature = "html"))]
+    #[test]
+    fn dispatch_plain_with_html_root_stays_on_plain_path_without_html_feature() {
+        // Router-level pin in a no-HTML build: `dispatch_sanitize` must
+        // route declared-PlainText bytes through `sanitize_plain` (no
+        // reroute available) and return with `content_type: PlainText`
+        // plus a High-severity FMT-001 finding. Prevents a future
+        // change that adds a second reroute path (or a cross-feature
+        // fallback) from silently weakening the `!html` contract.
+        use sigil_core::Severity;
+        let s = sanitizer();
+        let body = "<html><body>hi<script>alert(1)</script></body></html>";
+        let out = dispatch_sanitize(
+            &s,
+            RawFetchedContent::from_string(body.into()),
+            file_source(),
+            ContentType::PlainText,
+        )
+        .expect("dispatch must succeed in !html build");
+
+        assert_eq!(out.report.content_type, ContentType::PlainText);
+        assert!(out.report.routed_from.is_none());
+        let hit = out
+            .report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "FMT-001")
+            .expect("FMT-001 must fire on dispatch path in !html build");
+        assert_eq!(hit.severity, Severity::High);
     }
 }

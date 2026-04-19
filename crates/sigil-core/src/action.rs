@@ -492,6 +492,7 @@ mod tests {
             scoring_version: 1,
             source: ContentSource::from_url("https://example.com/doc").expect("url"),
             content_type: ContentType::Html,
+            routed_from: None,
             bytes_in: 10,
             bytes_out: 8,
             stripped_elements: vec![],

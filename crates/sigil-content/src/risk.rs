@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn one_high_alone_crosses_threshold() {
-        let f = vec![finding("FMT-001", Severity::High)];
+        let f = vec![finding("INJ-001", Severity::High)];
         let s = compute(&f, &empty_normalize(), 0.0);
         assert!(s >= RISK_GATE_THRESHOLD);
     }
