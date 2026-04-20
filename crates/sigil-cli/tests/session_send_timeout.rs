@@ -154,13 +154,11 @@ async fn build_service(
     (service, dir)
 }
 
-// All four tests pause Tokio time *after* setup (the in-memory sqlx
-// pool's connect-timeout is wall-clock based and fires instantly under
-// paused time if we start paused). Every `sleep` inside the poll loop
-// then resolves virtually, so the "success before timeout" / "hit
-// timeout" / "no polling on --no-wait" signals are observable purely
-// from call counts and the returned Result — no wall-clock assertions,
-// no flakiness from loaded CI.
+// These tests run in real Tokio time (no `tokio::time::pause()`) —
+// pausing after setup still makes sqlx's pool acquire-timer fire on
+// the next DB call under paused time, which manifested as flaky CI
+// "pool timed out" failures. Small `--timeout` values keep the two
+// `--wait` tests bounded to ~2s wall-clock each.
 
 #[tokio::test]
 async fn send_wait_succeeds_when_reply_arrives_before_timeout() {
@@ -173,7 +171,6 @@ async fn send_wait_succeeds_when_reply_arrives_before_timeout() {
         "mock output captured after reply",
     ));
     let (service, _dir) = build_service(Arc::clone(&runtime), "timeout-success").await;
-    tokio::time::pause();
 
     sigil_cli::commands::session::run(
         &service,
@@ -207,7 +204,6 @@ async fn send_wait_times_out_with_actionable_error() {
         "never read",
     ));
     let (service, _dir) = build_service(Arc::clone(&runtime), "timeout-fail").await;
-    tokio::time::pause();
 
     let err = sigil_cli::commands::session::run(
         &service,
