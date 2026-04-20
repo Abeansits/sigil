@@ -201,6 +201,144 @@ impl Store {
         Ok(())
     }
 
+    /// Update the group a session belongs to.
+    ///
+    /// Pass `None` to clear the group assignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] if the session does not exist,
+    /// or [`StoreError::Database`] on query failure.
+    pub async fn update_session_group(
+        &self,
+        id: &SessionId,
+        group: Option<&GroupId>,
+    ) -> Result<(), StoreError> {
+        let id_str = id.to_string();
+        let group_str = group.map(ToString::to_string);
+
+        let result = sqlx::query(
+            "UPDATE sessions SET group_id = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&group_str)
+        .bind(&id_str)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SessionNotFound { id: id_str });
+        }
+
+        Ok(())
+    }
+
+    /// Set or clear a session's parent atomically.
+    ///
+    /// Unlike [`Store::update_session_parent`], this method performs the
+    /// child-exists check, the proposed-parent-exists check, and the
+    /// cycle walk inside a single `sqlx` transaction, so concurrent
+    /// `set-parent A B` / `set-parent B A` calls cannot both validate
+    /// against stale state and then both commit a cycle.
+    ///
+    /// Pass `None` to detach the session from any parent; in that case
+    /// only the child-exists check runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] if `child_id` or the
+    /// proposed parent does not exist, [`StoreError::ParentCycle`] if
+    /// the assignment would introduce a cycle (including self-parent),
+    /// or [`StoreError::Database`] on query failure.
+    pub async fn set_session_parent_checked(
+        &self,
+        child_id: &SessionId,
+        parent_id: Option<&SessionId>,
+    ) -> Result<(), StoreError> {
+        let child_str = child_id.to_string();
+
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Child must exist.
+        let child_exists: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM sessions WHERE id = ?")
+                .bind(&child_str)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if child_exists.is_none() {
+            return Err(StoreError::SessionNotFound { id: child_str });
+        }
+
+        // 2. When setting a non-null parent, validate existence + cycle.
+        if let Some(parent_id) = parent_id {
+            if parent_id == child_id {
+                return Err(StoreError::ParentCycle {
+                    reason: format!("session '{child_str}' cannot be its own parent"),
+                });
+            }
+
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(*parent_id);
+            let mut cursor: Option<SessionId> = Some(*parent_id);
+
+            while let Some(current) = cursor {
+                let current_str = current.to_string();
+                let row: Option<(Option<String>,)> =
+                    sqlx::query_as("SELECT parent_id FROM sessions WHERE id = ?")
+                        .bind(&current_str)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+
+                let Some((next_parent_opt,)) = row else {
+                    return Err(StoreError::SessionNotFound { id: current_str });
+                };
+
+                cursor = match next_parent_opt {
+                    None => None,
+                    Some(next_str) => {
+                        let next_id = SessionId::from_str(&next_str).map_err(|e| {
+                            StoreError::SessionNotFound {
+                                id: format!("invalid parent ID '{next_str}': {e}"),
+                            }
+                        })?;
+                        if next_id == *child_id {
+                            return Err(StoreError::ParentCycle {
+                                reason: format!(
+                                    "'{child_str}' is already an ancestor of '{parent_id}'"
+                                ),
+                            });
+                        }
+                        if !visited.insert(next_id) {
+                            return Err(StoreError::ParentCycle {
+                                reason: format!(
+                                    "existing parent chain for '{parent_id}' contains a cycle"
+                                ),
+                            });
+                        }
+                        Some(next_id)
+                    }
+                };
+            }
+        }
+
+        // 3. Commit the write inside the same transaction so the
+        //    validation and update are atomic under concurrent writers.
+        let parent_str = parent_id.map(ToString::to_string);
+        let result = sqlx::query(
+            "UPDATE sessions SET parent_id = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&parent_str)
+        .bind(&child_str)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SessionNotFound { id: child_str });
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Update the identity spec of a session.
     ///
     /// # Errors

@@ -256,6 +256,28 @@ pub enum SessionCommands {
         /// Session ID or title.
         name: String,
     },
+
+    /// Move a session into a group (or clear the group with `--clear`).
+    SetGroup {
+        /// Session ID or title.
+        name: String,
+        /// New group name. Omit and pass `--clear` to detach the session.
+        group: Option<String>,
+        /// Clear the session's group assignment.
+        #[arg(long, conflicts_with = "group")]
+        clear: bool,
+    },
+
+    /// Set the parent session (or clear it with `--clear`).
+    SetParent {
+        /// Session ID or title.
+        name: String,
+        /// Parent session ID or title. Omit and pass `--clear` to detach.
+        parent: Option<String>,
+        /// Clear the parent-session pointer.
+        #[arg(long, conflicts_with = "parent")]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -869,6 +891,76 @@ mod tests {
                 assert!(quiet);
             }
             other => panic!("expected Session Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_session_set_group() {
+        let cli = Cli::try_parse_from(["sigil", "session", "set-group", "child", "ops"]);
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Session(SessionCommands::SetGroup { name, group, clear }) => {
+                assert_eq!(name, "child");
+                assert_eq!(group.as_deref(), Some("ops"));
+                assert!(!clear);
+            }
+            other => panic!("expected Session SetGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_session_set_group_clear() {
+        let cli = Cli::try_parse_from(["sigil", "session", "set-group", "child", "--clear"]);
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Session(SessionCommands::SetGroup { name, group, clear }) => {
+                assert_eq!(name, "child");
+                assert!(group.is_none());
+                assert!(clear);
+            }
+            other => panic!("expected Session SetGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_set_group_with_group_and_clear() {
+        let cli = Cli::try_parse_from(["sigil", "session", "set-group", "c", "ops", "--clear"]);
+        assert!(cli.is_err(), "group + --clear should conflict");
+    }
+
+    #[test]
+    fn cli_parses_session_set_parent() {
+        let cli = Cli::try_parse_from(["sigil", "session", "set-parent", "child", "parent"]);
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Session(SessionCommands::SetParent {
+                name,
+                parent,
+                clear,
+            }) => {
+                assert_eq!(name, "child");
+                assert_eq!(parent.as_deref(), Some("parent"));
+                assert!(!clear);
+            }
+            other => panic!("expected Session SetParent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_session_set_parent_clear() {
+        let cli = Cli::try_parse_from(["sigil", "session", "set-parent", "child", "--clear"]);
+        let cli = cli.expect("parse should succeed");
+        match &cli.command {
+            Commands::Session(SessionCommands::SetParent {
+                name,
+                parent,
+                clear,
+            }) => {
+                assert_eq!(name, "child");
+                assert!(parent.is_none());
+                assert!(clear);
+            }
+            other => panic!("expected Session SetParent, got {other:?}"),
         }
     }
 

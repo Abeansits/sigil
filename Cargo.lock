@@ -1890,6 +1890,7 @@ dependencies = [
  "assert_matches",
  "clap",
  "secrecy",
+ "serde",
  "serde_json",
  "sha2",
  "sigil-audit",
