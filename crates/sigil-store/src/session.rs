@@ -168,6 +168,39 @@ impl Store {
         Ok(())
     }
 
+    /// Update the working-directory path of a session.
+    ///
+    /// Used by the session-launch-with-worktree flow, which creates the
+    /// session record with the original repo path and then rewrites it
+    /// to the worktree path after the worktree is in place. The path is
+    /// stored as a lossy UTF-8 string, matching `create_session`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] if the session does not
+    /// exist, or [`StoreError::Database`] on query failure.
+    pub async fn update_session_path(
+        &self,
+        id: &SessionId,
+        path: &std::path::Path,
+    ) -> Result<(), StoreError> {
+        let id_str = id.to_string();
+        let path_str = path.to_string_lossy().to_string();
+
+        let result =
+            sqlx::query("UPDATE sessions SET path = ?, updated_at = datetime('now') WHERE id = ?")
+                .bind(&path_str)
+                .bind(&id_str)
+                .execute(&self.pool)
+                .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SessionNotFound { id: id_str });
+        }
+
+        Ok(())
+    }
+
     /// Update the identity spec of a session.
     ///
     /// # Errors

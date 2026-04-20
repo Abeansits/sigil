@@ -196,6 +196,18 @@ pub enum SessionCommands {
         /// Overrides .sigil/config.toml [identity] section.
         #[arg(long)]
         identity: Option<String>,
+        /// Launch inside a git worktree on this branch.
+        ///
+        /// Creates the worktree at `{path}/.worktrees/{sanitised}` and
+        /// runs the tool there. Pair with `-b` to create the branch,
+        /// or omit `-b` to attach to an existing branch.
+        #[arg(short = 'w', long, value_name = "BRANCH")]
+        worktree: Option<String>,
+        /// Create the worktree branch (only valid with `--worktree`).
+        ///
+        /// Without this flag, the branch must already exist.
+        #[arg(short = 'b', long = "create-branch", requires = "worktree")]
+        create_branch: bool,
     },
 
     /// Start a stopped session.

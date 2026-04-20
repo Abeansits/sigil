@@ -301,6 +301,8 @@ async fn session_launch_combines_create_start_send() {
             group: Some("test-group".into()),
             message: Some("echo launched".into()),
             identity: None,
+            worktree: None,
+            create_branch: false,
         },
     )
     .await
