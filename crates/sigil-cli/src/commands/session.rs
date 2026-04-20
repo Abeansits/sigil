@@ -90,8 +90,16 @@ where
             timeout,
         } => {
             let _ = no_wait;
+            if timeout.is_some() && !wait {
+                bail!(
+                    "`--timeout` requires `--wait`. Add `--wait` to block on the reply, \
+                     or drop `--timeout` for fire-and-forget."
+                );
+            }
             let mode = if wait {
-                WaitMode::Wait { timeout }
+                WaitMode::Wait {
+                    timeout: timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT),
+                }
             } else {
                 WaitMode::NoWait
             };
@@ -781,6 +789,11 @@ where
 }
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Applied when `--wait` is set but `--timeout` is omitted. Matches
+/// agent-deck's `session send` default so compound calls that don't
+/// bother specifying a timeout behave the same across the two tools.
+const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WaitMode {
