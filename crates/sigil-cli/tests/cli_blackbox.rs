@@ -897,8 +897,8 @@ fn session_set_parent_refuses_cycle() {
     assert!(!out.status.success(), "cycle-inducing set-parent must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("cycle"),
-        "stderr should mention 'cycle': {stderr}"
+        stderr.contains("ancestor") || stderr.contains("cycle"),
+        "stderr should flag the cycle: {stderr}"
     );
 
     // And bb-cyc-b's parent must still be unset.

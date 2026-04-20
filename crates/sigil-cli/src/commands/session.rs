@@ -986,18 +986,15 @@ where
 {
     let session = resolve_session(service.store(), name).await?;
 
+    // Parent name resolution happens outside the transaction so fuzzy
+    // title / ID-prefix matching stays a CLI concern. The cycle check
+    // and the actual write are re-done atomically inside the Store
+    // below so a concurrent writer cannot race us into a cycle.
     let new_parent = match (parent, clear) {
         (Some(p), false) => {
             let resolved = resolve_session(service.store(), p)
                 .await
                 .with_context(|| format!("failed to resolve parent '{p}'"))?;
-            if resolved.id == session.id {
-                bail!(
-                    "refusing to set session '{}' as its own parent",
-                    session.title
-                );
-            }
-            ensure_no_parent_cycle(service.store(), &session, &resolved).await?;
             Some(resolved)
         }
         (None, true) => None,
@@ -1020,11 +1017,17 @@ where
         .context("set session parent")?;
     require_authorized_not_dispatched(outcome, "set session parent")?;
 
-    service
+    match service
         .store()
-        .update_session_parent(&session.id, new_parent.as_ref().map(|p| &p.id))
+        .set_session_parent_checked(&session.id, new_parent.as_ref().map(|p| &p.id))
         .await
-        .context("failed to update session parent")?;
+    {
+        Ok(()) => {}
+        Err(sigil_store::StoreError::ParentCycle { reason }) => {
+            bail!("refusing to set parent: {reason}")
+        }
+        Err(e) => return Err(e).context("failed to update session parent"),
+    }
 
     match new_parent {
         Some(p) => println!(
@@ -1032,47 +1035,6 @@ where
             session.title, p.title, p.id
         ),
         None => println!("Cleared parent on session '{}'.", session.title),
-    }
-
-    Ok(())
-}
-
-/// Walk the proposed parent's ancestor chain and reject the assignment
-/// if it would introduce a cycle (i.e. the child's id appears somewhere
-/// up the chain, meaning "make X a descendant of X"). Also guards
-/// against pre-existing cycles in stored data by tracking visited IDs.
-async fn ensure_no_parent_cycle(
-    store: &Store,
-    child: &SessionRecord,
-    proposed_parent: &SessionRecord,
-) -> Result<()> {
-    let mut visited = std::collections::HashSet::new();
-    visited.insert(proposed_parent.id);
-
-    let mut cursor = proposed_parent.parent;
-    while let Some(ancestor_id) = cursor {
-        if ancestor_id == child.id {
-            bail!(
-                "refusing to create parent cycle: '{}' is already an ancestor of '{}'",
-                child.title,
-                proposed_parent.title,
-            );
-        }
-        if !visited.insert(ancestor_id) {
-            // Pre-existing cycle in stored data — refuse to touch it
-            // rather than loop forever.
-            bail!(
-                "refusing to set parent: existing parent chain for '{}' contains a cycle",
-                proposed_parent.title,
-            );
-        }
-
-        let ancestor = match store.get_session(&ancestor_id).await {
-            Ok(record) => record,
-            Err(sigil_store::StoreError::SessionNotFound { .. }) => break,
-            Err(e) => return Err(e).context("failed to walk parent chain"),
-        };
-        cursor = ancestor.parent;
     }
 
     Ok(())
