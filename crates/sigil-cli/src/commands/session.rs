@@ -411,8 +411,6 @@ where
 /// concurrently-created one.
 #[derive(Clone, Copy, Debug, Default)]
 struct LaunchProgress {
-    /// The git worktree directory was successfully created.
-    worktree_created: bool,
     /// This flow created the branch and can safely force-delete it on
     /// rollback.
     new_branch_owned: bool,
@@ -435,13 +433,14 @@ struct LaunchProgress {
 /// tmux / container cwd).
 ///
 /// Rollback is compensating: on failure we unwind each committed step
-/// in reverse. If the worktree directory was created we call
-/// `WorktreeManager::rollback_new_worktree` (and drop the branch only
-/// when we created it via `-b`; attached branches are left alone). We
-/// always best-effort `delete_session` last so retries on the same
-/// title aren't blocked by `DuplicateTitle`. Cleanup errors are
-/// logged, never propagated — the user already has one real error and
-/// shouldn't be spammed with rollback noise.
+/// in reverse. `WorktreeManager::rollback_new_worktree` is existence-
+/// aware and always invoked — it drops the worktree dir only if one
+/// is on disk and the branch only when we created it via `-b`;
+/// attached branches are left alone. We best-effort `delete_session`
+/// last so retries on the same title aren't blocked by
+/// `DuplicateTitle`. Cleanup errors are logged, never propagated —
+/// the user already has one real error and shouldn't be spammed with
+/// rollback noise.
 #[allow(clippy::too_many_arguments, clippy::print_stdout)]
 async fn launch_with_worktree<R, P>(
     service: &ActionService<R, P>,
@@ -629,7 +628,6 @@ where
     )
     .await
     .context("failed to create git worktree")?;
-    progress.worktree_created = true;
     if create_branch {
         progress.new_branch_owned = true;
     }
