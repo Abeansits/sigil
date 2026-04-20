@@ -149,7 +149,9 @@ async fn full_session_lifecycle() {
             name: title.clone(),
             message: "echo hello-from-sigil-uc1".into(),
             wait: false,
+            no_wait: false,
             quiet: true,
+            timeout: Duration::from_secs(600),
         },
     )
     .await

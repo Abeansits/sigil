@@ -120,7 +120,9 @@ async fn meta_session_echo_roundtrip() {
             name: title.clone(),
             message: format!("echo {marker}"),
             wait: false,
+            no_wait: false,
             quiet: true,
+            timeout: Duration::from_secs(600),
         },
     )
     .await
