@@ -173,8 +173,13 @@ async fn identity_reload_round_trip() {
     .await
     .expect("start should succeed");
 
-    // Brief pause for tmux to set up.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Starting a session now auto-launches the declared tool in the
+    // pane (fixes F-011 in docs/migration-friction.md). If the `claude`
+    // binary is actually on PATH, it may take a couple of seconds for
+    // the TUI to reach a ready state; if it isn't, the pane stays at
+    // the shell and the reload text lands there. Either way we just
+    // need to let the pane settle before sending the reload message.
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // ── RELOAD identity ────────────────────────────────────────────
     sigil_cli::commands::identity::run(
@@ -186,33 +191,17 @@ async fn identity_reload_round_trip() {
     .await
     .expect("identity reload should succeed");
 
-    // Brief pause for tmux to receive the message.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // ── Verify the reload message was sent to the session ──────────
-    let handle = sigil_core::session::SessionHandle {
-        id: rec.id,
-        title: rec.title.clone(),
-        tool: rec.tool,
-        state: sigil_core::session::SessionState::Running,
-        path: rec.path.clone(),
-        tmux_window: Some(rec.title.clone()),
-        container_id: None,
-        execution_class: rec.execution_class,
-        sandboxed: rec.sandboxed,
-        identity: rec.identity.clone(),
-    };
-    let output = sigil_core::traits::SessionRuntime::read_output(runtime.as_ref(), &handle)
-        .await
-        .expect("read_output should succeed");
-    assert!(
-        output.contains("[SIGIL]"),
-        "session output should contain the [SIGIL] marker from reload message"
-    );
-    assert!(
-        output.contains("SOUL.md"),
-        "session output should mention identity file SOUL.md"
-    );
+    // The identity-reload call succeeded above — that proves the
+    // full pipeline (resolve session → build message → dispatch
+    // SendMessage → runtime.send) executed without error. We used to
+    // additionally assert the `[SIGIL]` bytes showed up in
+    // `capture-pane` output, but that check relied on a bare zsh
+    // prompt echoing the typed command. With the F-011 fix the pane
+    // now hosts the actual tool TUI (Claude Code if installed), which
+    // absorbs pasted bytes into its input model instead of echoing
+    // them to the scrollback. Runtime-level submit behaviour is
+    // covered by `send_delivers_message_literally_and_submits` in
+    // `sigil-runtime` against a deterministic `/bin/sh`.
 
     // ── SNAPSHOT identity ──────────────────────────────────────────
     sigil_cli::commands::identity::run(

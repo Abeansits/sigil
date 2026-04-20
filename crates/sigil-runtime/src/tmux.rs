@@ -1,16 +1,74 @@
 use std::time::Duration;
 
 use sigil_core::error::CoreError;
-use sigil_core::protocol::ConductorMessage;
+use sigil_core::protocol::{AgentSignal, ConductorMessage};
 use sigil_core::session::{
     IdentitySpec, LifecycleEvent, SessionConfig, SessionHandle, SessionState, ToolKind,
 };
 use sigil_core::traits::{LifecycleHooks, SessionRuntime, ToolAdapter};
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::adapter;
 use crate::error::RuntimeError;
+
+/// How long to wait for the declared tool to reach a ready-for-input
+/// state after launching the tmux pane. Matches agent-deck's 60s
+/// readiness window.
+const TOOL_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Poll interval while waiting for the tool to signal readiness.
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Settle window between delivering message content and sending the
+/// submit keystroke. The Claude Code TUI treats a rapid burst of
+/// keystrokes as a paste and buffers a trailing Enter instead of
+/// submitting. Splitting the paste and Enter into two tmux calls
+/// with this delay in between lets the TUI flush paste mode so Enter
+/// is recognised as a submit.
+const SEND_SUBMIT_SETTLE: Duration = Duration::from_millis(100);
+
+/// Binary name to invoke inside a tmux pane for a given tool kind.
+///
+/// `ToolKind` is `#[non_exhaustive]`, so the wildcard arm is required;
+/// we default to `claude` for future variants the runtime doesn't yet
+/// know about explicitly.
+#[allow(clippy::match_same_arms, clippy::wildcard_enum_match_arm)]
+fn tool_launch_command(tool: ToolKind) -> &'static str {
+    match tool {
+        ToolKind::ClaudeCode => "claude",
+        ToolKind::Codex => "codex",
+        _ => "claude",
+    }
+}
+
+/// Detect whether the pane shows a shell-level "command not found"
+/// failure after we tried to launch the tool binary. Scoped to the
+/// tail of captured output so historical scrollback doesn't produce
+/// false positives. When this fires there is no point waiting the
+/// full readiness timeout — the tool will never come up.
+fn shell_reported_tool_not_found(pane_output: &str) -> bool {
+    let tail: Vec<&str> = pane_output.lines().rev().take(10).collect();
+    tail.iter().any(|line| {
+        line.contains("command not found")
+            || line.contains(": not found")
+            || line.contains("No such file or directory")
+    })
+}
+
+/// Whether this tool kind has readiness markers the adapter can
+/// observe on the pane.
+///
+/// Only `ClaudeCodeAdapter` currently produces a meaningful `Waiting`
+/// signal; `ToolKind::Codex` still routes through that adapter (see
+/// `adapter::adapter_for`), so its Claude-specific regex would never
+/// match a real Codex prompt and `wait_until_ready` would stall the
+/// full 60s timeout on every launch. Gate the readiness poll on this
+/// helper until each tool grows its own adapter patterns.
+#[allow(clippy::wildcard_enum_match_arm)]
+fn tool_has_readiness_markers(tool: ToolKind) -> bool {
+    matches!(tool, ToolKind::ClaudeCode)
+}
 
 /// Manages agent sessions via tmux.
 ///
@@ -101,6 +159,76 @@ impl TmuxRuntime {
     fn get_adapter(tool: ToolKind) -> Box<dyn ToolAdapter> {
         adapter::adapter_for(tool)
     }
+
+    /// Deliver `text` into a session's pane and then submit it.
+    ///
+    /// The content is sent with `send-keys -l` so tmux treats it as
+    /// literal bytes rather than looking up words as key names, and the
+    /// submit keystroke is dispatched in a second `send-keys` call after
+    /// a short settle (`SEND_SUBMIT_SETTLE`). Splitting the two is what
+    /// makes the Claude Code TUI flush its paste buffer and treat the
+    /// final Enter as a submit instead of swallowing it. The previous
+    /// single-call form left messages stuck in the input box.
+    async fn send_text_and_submit(&self, title: &str, text: &str) -> Result<(), RuntimeError> {
+        let target = exact_target(title);
+        self.run_tmux(&["send-keys", "-t", &target, "-l", text])
+            .await?;
+        tokio::time::sleep(SEND_SUBMIT_SETTLE).await;
+        self.run_tmux(&["send-keys", "-t", &target, "Enter"])
+            .await?;
+        Ok(())
+    }
+
+    /// Poll the pane until the adapter reports a `Waiting` (ready for
+    /// input) state or `timeout` elapses.
+    ///
+    /// Returns `Ok(true)` when readiness is observed, `Ok(false)` on
+    /// timeout so callers can decide whether to proceed with a
+    /// best-effort send or bail. Agent-deck's equivalent is also a
+    /// best-effort wait — a missed readiness marker doesn't mean the
+    /// tool is broken, just that we couldn't confirm it.
+    async fn wait_until_ready(
+        &self,
+        title: &str,
+        tool: ToolKind,
+        timeout: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let target = exact_target(title);
+        let adapter = Self::get_adapter(tool);
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let raw = self
+                .run_tmux(&["capture-pane", "-t", &target, "-p", "-S", "-100"])
+                .await?;
+            let output = sigil_policy::normalize::strip_ansi(&raw);
+            let ready = adapter.parse_output(&output).into_iter().any(|sig| {
+                matches!(
+                    sig,
+                    AgentSignal::StatusUpdate {
+                        state: SessionState::Waiting,
+                    },
+                )
+            });
+            if ready {
+                return Ok(true);
+            }
+            // Short-circuit: if the shell reports the tool binary as
+            // missing/not-executable, further polling is just a hang.
+            // Bail out so the caller's best-effort send path runs
+            // promptly instead of blocking the full timeout.
+            if shell_reported_tool_not_found(&output) {
+                warn!(
+                    title = %title,
+                    "shell reported tool binary as not found; abandoning readiness wait",
+                );
+                return Ok(false);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(READY_POLL_INTERVAL).await;
+        }
+    }
 }
 
 /// Build an exact-match tmux target spec for the named session's
@@ -140,15 +268,51 @@ impl SessionRuntime for TmuxRuntime {
 
         debug!(title = %config.title, path = %config.path.display(), "launched tmux session");
 
-        // If there is an initial message, send it.
+        // Auto-launch the declared tool in the fresh pane. Without this
+        // the pane sits at a bare shell prompt, the `-c` tool selection
+        // is inert, and any `initial_message` gets pasted into zsh
+        // instead of the agent (migration-friction F-011 / F-009).
+        let tool_cmd = tool_launch_command(config.tool);
+        let target = exact_target(&config.title);
+        self.run_tmux(&["send-keys", "-t", &target, tool_cmd, "Enter"])
+            .await?;
+
+        debug!(
+            title = %config.title,
+            tool = ?config.tool,
+            "started tool binary in tmux pane",
+        );
+
+        // Deliver the opening prompt only after the tool has had a
+        // chance to come up. `wait_until_ready` polls for the adapter's
+        // "waiting for input" marker; we log and proceed on timeout
+        // rather than refusing to send, matching agent-deck's
+        // best-effort readiness window.
         if let Some(ref msg) = config.initial_message {
             let adapter = Self::get_adapter(config.tool);
             let translated = adapter.translate_send(&ConductorMessage::TaskAssignment {
                 instructions: msg.clone(),
             });
             if !translated.is_empty() {
-                let target = exact_target(&config.title);
-                self.run_tmux(&["send-keys", "-t", &target, &translated, "Enter"])
+                if tool_has_readiness_markers(config.tool) {
+                    let ready = self
+                        .wait_until_ready(&config.title, config.tool, TOOL_READY_TIMEOUT)
+                        .await?;
+                    if !ready {
+                        warn!(
+                            title = %config.title,
+                            timeout_secs = TOOL_READY_TIMEOUT.as_secs(),
+                            "tool did not signal readiness before timeout; sending initial message anyway",
+                        );
+                    }
+                } else {
+                    debug!(
+                        title = %config.title,
+                        tool = ?config.tool,
+                        "no readiness markers for this tool; proceeding with send without wait",
+                    );
+                }
+                self.send_text_and_submit(&config.title, &translated)
                     .await?;
             }
         }
@@ -176,8 +340,7 @@ impl SessionRuntime for TmuxRuntime {
             return Ok(());
         }
 
-        let target = exact_target(&handle.title);
-        self.run_tmux(&["send-keys", "-t", &target, &translated, "Enter"])
+        self.send_text_and_submit(&handle.title, &translated)
             .await?;
 
         debug!(title = %handle.title, "sent message to tmux session");
@@ -668,6 +831,203 @@ mod tests {
         let rt = TmuxRuntime::new("sigil-runtime-test-invalid");
         let result = rt.run_tmux(&["not-a-real-command"]).await;
         assert!(result.is_err(), "expected error for invalid tmux command");
+    }
+
+    #[test]
+    fn tool_launch_command_maps_known_tools() {
+        assert_eq!(tool_launch_command(ToolKind::ClaudeCode), "claude");
+        assert_eq!(tool_launch_command(ToolKind::Codex), "codex");
+    }
+
+    /// Readiness polling must be gated by tool — otherwise `Codex`
+    /// sessions stall the full `TOOL_READY_TIMEOUT` on every launch
+    /// because their prompt doesn't match the Claude-specific regex
+    /// in `ClaudeCodeAdapter`.
+    #[test]
+    fn tool_has_readiness_markers_only_for_claude() {
+        assert!(tool_has_readiness_markers(ToolKind::ClaudeCode));
+        assert!(!tool_has_readiness_markers(ToolKind::Codex));
+    }
+
+    /// Short-circuiting the readiness wait when the shell reports the
+    /// tool binary as missing turns a 60s hang into an instant
+    /// warn-and-proceed. Guards against the UX regression codex
+    /// flagged in PR review.
+    #[test]
+    fn shell_reported_tool_not_found_matches_common_shell_errors() {
+        assert!(shell_reported_tool_not_found(
+            "~/work % claude\nzsh: command not found: claude\n~/work %"
+        ));
+        assert!(shell_reported_tool_not_found(
+            "$ codex\nsh: codex: not found\n$"
+        ));
+        assert!(shell_reported_tool_not_found(
+            "$ /usr/bin/claude\nbash: /usr/bin/claude: No such file or directory\n$"
+        ));
+    }
+
+    #[test]
+    fn shell_reported_tool_not_found_ignores_live_tool_output() {
+        // A running Claude TUI prints plenty of text; none of these
+        // lines should false-trigger the short-circuit.
+        let pane = "\
+            ╭─────────────╮\n\
+            │  Claude Code │\n\
+            │  > ready     │\n\
+            ╰─────────────╯\n";
+        assert!(!shell_reported_tool_not_found(pane));
+    }
+
+    #[test]
+    fn shell_reported_tool_not_found_only_looks_at_the_tail() {
+        // Historical scrollback containing the phrase must not trigger
+        // after the tool has since started successfully. Padding with
+        // enough fresh lines pushes the old error off the 10-line tail.
+        use std::fmt::Write as _;
+
+        let mut pane = String::from("zsh: command not found: claude\n");
+        for i in 0..20 {
+            writeln!(pane, "live tui line {i}").expect("write to String");
+        }
+        assert!(!shell_reported_tool_not_found(&pane));
+    }
+
+    /// `launch` must drive the declared tool binary into the pane, not
+    /// leave it sitting at a bare shell. Fixes F-011 (tool never ran)
+    /// and by extension F-009 (prompt was pasted into zsh).
+    ///
+    /// Runs against a real tmux server when available. The test shell
+    /// either executes `claude` (if installed) or reports "command not
+    /// found: claude" — either way the bytes `claude` end up on the
+    /// pane, which is what we assert on.
+    #[tokio::test]
+    async fn launch_auto_runs_declared_tool_in_pane() {
+        if TmuxRuntime::check_tmux().await.is_err() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+
+        let server = "sigil-runtime-test-autorun";
+        let _ = Command::new("tmux")
+            .args(["-L", server, "kill-server"])
+            .output()
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rt = TmuxRuntime::new(server);
+        let config = SessionConfig {
+            path: dir.path().to_path_buf(),
+            title: "autorun".to_owned(),
+            tool: ToolKind::ClaudeCode,
+            group: None,
+            parent: None,
+            execution_class: sigil_core::trust::ExecutionClass::OfflineWorker,
+            sandboxed: false,
+            initial_message: None,
+            worktree_branch: None,
+            identity: None,
+            memory: None,
+        };
+        let handle = rt.launch(&config).await.expect("launch");
+
+        // Let the shell consume the keystrokes and echo / error back.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let pane = rt
+            .run_tmux(&["capture-pane", "-t", "=autorun:", "-p", "-S", "-100"])
+            .await
+            .expect("capture-pane");
+        assert!(
+            pane.contains("claude"),
+            "expected pane to show the claude command (running or command-not-found); got: {pane}",
+        );
+
+        rt.stop(&handle).await.expect("stop");
+
+        let _ = Command::new("tmux")
+            .args(["-L", server, "kill-server"])
+            .output()
+            .await;
+    }
+
+    /// `send` must deliver the text and then submit. The single-call
+    /// form swallowed Enter inside Claude's paste buffer (F-012); the
+    /// fix pastes literally and fires Enter as a separate event.
+    ///
+    /// We can't verify Claude received a submit without Claude running,
+    /// so we point the session at a plain shell and look for the
+    /// `echo` command being executed — which only happens if Enter
+    /// arrived as a submit keystroke.
+    #[tokio::test]
+    async fn send_delivers_message_literally_and_submits() {
+        if TmuxRuntime::check_tmux().await.is_err() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+
+        let server = "sigil-runtime-test-send-submit";
+        let _ = Command::new("tmux")
+            .args(["-L", server, "kill-server"])
+            .output()
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rt = TmuxRuntime::new(server);
+        // Skip the tool-auto-launch side effect by calling new-session
+        // directly — we only want to observe what send delivers. Force
+        // a minimal /bin/sh so no user rc files slow down startup and
+        // the test isn't at the mercy of an interactive shell's init.
+        rt.run_tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "sendonly",
+            "-c",
+            dir.path().to_str().expect("utf-8 tempdir"),
+            "/bin/sh",
+        ])
+        .await
+        .expect("new-session");
+
+        // `Enter` is a tmux key-name. If send-keys misinterprets it as
+        // a keystroke rather than literal text, the word won't appear
+        // in the pane output.
+        let payload = "echo sigil-send-Enter-literal";
+        rt.send_text_and_submit("sendonly", payload)
+            .await
+            .expect("send_text_and_submit");
+
+        // Poll for the echoed output (>=2 occurrences: typed + shell
+        // output) so a slow-starting shell doesn't flake the test.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut pane = String::new();
+        let mut occurrences = 0;
+        while tokio::time::Instant::now() < deadline {
+            pane = rt
+                .run_tmux(&["capture-pane", "-t", "=sendonly:", "-p", "-S", "-100"])
+                .await
+                .expect("capture-pane");
+            occurrences = pane.matches("sigil-send-Enter-literal").count();
+            if occurrences >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        assert!(
+            pane.contains("sigil-send-Enter-literal"),
+            "expected literal payload (including the word Enter) in pane; got: {pane}",
+        );
+        assert!(
+            occurrences >= 2,
+            "expected payload typed + echoed by shell (>=2 occurrences); got {occurrences}: {pane}",
+        );
+
+        let _ = rt.run_tmux(&["kill-session", "-t", "=sendonly:"]).await;
+        let _ = Command::new("tmux")
+            .args(["-L", server, "kill-server"])
+            .output()
+            .await;
     }
 
     #[test]
