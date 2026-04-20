@@ -903,22 +903,6 @@ struct ShowSessionResponse<'a> {
     parent_title: Option<&'a str>,
 }
 
-/// Assert an `AuthorizedNotDispatched` outcome from a T2 action whose
-/// side effect the CLI performs itself (group/parent update, worktree).
-fn require_authorized_not_dispatched(outcome: ActionOutcome, what: &str) -> Result<()> {
-    match outcome {
-        ActionOutcome::Completed(DispatchResult::AuthorizedNotDispatched) => Ok(()),
-        ActionOutcome::Completed(other) => bail!(
-            "{what}: unexpected dispatch result {other:?}; \
-             expected AuthorizedNotDispatched"
-        ),
-        ActionOutcome::Denied { reason } => bail!("policy denied: {reason}"),
-        ActionOutcome::NeedsApproval { description } => {
-            bail!("approval required: {description}")
-        }
-    }
-}
-
 #[allow(clippy::print_stdout)]
 async fn set_group<R, P>(
     service: &ActionService<R, P>,
@@ -957,7 +941,7 @@ where
         .execute(ActionRequest::new(action, ActionOrigin::LocalCli))
         .await
         .context("set session group")?;
-    require_authorized_not_dispatched(outcome, "set session group")?;
+    crate::commands::worktree::require_authorized_not_dispatched(outcome, "set session group")?;
 
     service
         .store()
@@ -1015,7 +999,7 @@ where
         .execute(ActionRequest::new(action, ActionOrigin::LocalCli))
         .await
         .context("set session parent")?;
-    require_authorized_not_dispatched(outcome, "set session parent")?;
+    crate::commands::worktree::require_authorized_not_dispatched(outcome, "set session parent")?;
 
     match service
         .store()

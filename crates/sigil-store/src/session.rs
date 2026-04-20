@@ -232,43 +232,6 @@ impl Store {
         Ok(())
     }
 
-    /// Update the parent session pointer.
-    ///
-    /// Pass `None` to detach the session from any parent.
-    ///
-    /// This is the low-level update — it does not validate that the new
-    /// parent exists or that the assignment would be cycle-free. Callers
-    /// that take a parent id from user input should use
-    /// [`Store::set_session_parent_checked`] instead so the existence
-    /// check, cycle walk, and write commit under a single transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError::SessionNotFound`] if the session does not exist,
-    /// or [`StoreError::Database`] on query failure.
-    pub async fn update_session_parent(
-        &self,
-        id: &SessionId,
-        parent: Option<&SessionId>,
-    ) -> Result<(), StoreError> {
-        let id_str = id.to_string();
-        let parent_str = parent.map(ToString::to_string);
-
-        let result = sqlx::query(
-            "UPDATE sessions SET parent_id = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(&parent_str)
-        .bind(&id_str)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(StoreError::SessionNotFound { id: id_str });
-        }
-
-        Ok(())
-    }
-
     /// Set or clear a session's parent atomically.
     ///
     /// Unlike [`Store::update_session_parent`], this method performs the

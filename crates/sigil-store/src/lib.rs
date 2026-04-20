@@ -589,50 +589,6 @@ mod tests {
         assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
     }
 
-    #[tokio::test]
-    async fn update_session_parent_sets_new_parent() {
-        let store = Store::new_in_memory().await.expect("init");
-        let parent = make_session("parent");
-        let child = make_session("child");
-        store.create_session(&parent).await.expect("create parent");
-        store.create_session(&child).await.expect("create child");
-
-        store
-            .update_session_parent(&child.id, Some(&parent.id))
-            .await
-            .expect("set parent");
-
-        let fetched = store.get_session(&child.id).await.expect("get child");
-        assert_eq!(fetched.parent, Some(parent.id));
-    }
-
-    #[tokio::test]
-    async fn update_session_parent_clears_parent() {
-        let store = Store::new_in_memory().await.expect("init");
-        let parent = make_session("p");
-        let mut child = make_session("c");
-        child.parent = Some(parent.id);
-        store.create_session(&parent).await.expect("create parent");
-        store.create_session(&child).await.expect("create child");
-
-        store
-            .update_session_parent(&child.id, None)
-            .await
-            .expect("clear parent");
-
-        let fetched = store.get_session(&child.id).await.expect("get child");
-        assert!(fetched.parent.is_none());
-    }
-
-    #[tokio::test]
-    async fn update_session_parent_nonexistent_returns_not_found() {
-        let store = Store::new_in_memory().await.expect("init");
-        let id = SessionId::new();
-        let parent_id = SessionId::new();
-        let result = store.update_session_parent(&id, Some(&parent_id)).await;
-        assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
-    }
-
     // -- Atomic set_session_parent_checked tests --
 
     #[tokio::test]

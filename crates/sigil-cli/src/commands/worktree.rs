@@ -90,7 +90,11 @@ fn require_authorized(outcome: ActionOutcome) -> Result<DispatchResult> {
 /// Any other `DispatchResult` variant means `ActionService` dispatch
 /// semantics have drifted; refuse to run the git side effect rather than
 /// proceed on ambiguous signal.
-fn require_authorized_not_dispatched(outcome: ActionOutcome, what: &str) -> Result<()> {
+///
+/// Also used by `commands::session` for the group/parent re-linking
+/// subcommands, which follow the same "policy-evaluated, CLI runs the
+/// write" pattern.
+pub(crate) fn require_authorized_not_dispatched(outcome: ActionOutcome, what: &str) -> Result<()> {
     let result = require_authorized(outcome)?;
     if matches!(result, DispatchResult::AuthorizedNotDispatched) {
         Ok(())
