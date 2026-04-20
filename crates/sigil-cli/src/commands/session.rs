@@ -60,6 +60,8 @@ where
             group,
             message,
             identity,
+            worktree,
+            create_branch,
         } => {
             launch(
                 service,
@@ -69,6 +71,8 @@ where
                 group.as_deref(),
                 message.as_deref(),
                 identity.as_deref(),
+                worktree.as_deref(),
+                create_branch,
             )
             .await
         }
@@ -324,6 +328,40 @@ async fn launch<R, P>(
     group: Option<&str>,
     message: Option<&str>,
     identity_flag: Option<&str>,
+    worktree_branch: Option<&str>,
+    create_branch: bool,
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    if let Some(branch) = worktree_branch {
+        launch_with_worktree(
+            service,
+            path,
+            title,
+            tool,
+            group,
+            message,
+            identity_flag,
+            branch,
+            create_branch,
+        )
+        .await
+    } else {
+        launch_plain(service, path, title, tool, group, message, identity_flag).await
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::print_stdout)]
+async fn launch_plain<R, P>(
+    service: &ActionService<R, P>,
+    path: &str,
+    title: &str,
+    tool: &str,
+    group: Option<&str>,
+    message: Option<&str>,
+    identity_flag: Option<&str>,
 ) -> Result<()>
 where
     R: SessionRuntime + LifecycleHooks,
@@ -352,6 +390,288 @@ where
         bail!("unexpected dispatch result")
     };
     println!("Launched session '{}' ({})", record.title, record.id);
+
+    Ok(())
+}
+
+/// How far the compound launch flow progressed before failing. Routes
+/// the compensating rollback so each committed side effect is unwound
+/// in reverse and we don't clobber state we don't own.
+///
+/// The branch-owned flag is deliberately separate from the user's `-b`
+/// intent: there is a TOCTOU window between pre-flight `branch_exists`
+/// and `git worktree add -b` where another actor could create the
+/// branch, causing `git worktree add` to fail with "already exists".
+/// Deleting that branch in rollback would destroy unrelated work. We
+/// only set `new_branch_owned` after `create_with_options` *succeeds*
+/// with `create_branch = true`, which is the only case where we
+/// unambiguously own the branch. The narrow path-occupied edge case
+/// (git creates the branch, then fails on the path) therefore leaves
+/// a harmless dangling branch rather than risking deletion of a
+/// concurrently-created one.
+#[derive(Clone, Copy, Debug, Default)]
+struct LaunchProgress {
+    /// This flow created the branch and can safely force-delete it on
+    /// rollback.
+    new_branch_owned: bool,
+    /// The runtime was started (tmux session / container alive). Used
+    /// to stop it before removing the session record so we don't
+    /// orphan a live process.
+    runtime_started: bool,
+}
+
+/// Compound flow: `sigil session launch ... --worktree BRANCH [-b]`.
+///
+/// Replaces the two-step `session create ... && worktree create -b BRANCH
+/// && session start && session send`. Each privileged step still flows
+/// through `ActionService` so policy + audit remain authoritative.
+///
+/// Ordering: create the session record with the original repo path →
+/// authorize + execute the git worktree op → rewrite session.path to
+/// the worktree → start → send. The path rewrite is what makes the
+/// launched tool land inside the worktree (SessionHandle.path is the
+/// tmux / container cwd).
+///
+/// Rollback is compensating: on failure we unwind each committed step
+/// in reverse. `WorktreeManager::rollback_new_worktree` is existence-
+/// aware and always invoked — it drops the worktree dir only if one
+/// is on disk and the branch only when we created it via `-b`;
+/// attached branches are left alone. We best-effort `delete_session`
+/// last so retries on the same title aren't blocked by
+/// `DuplicateTitle`. Cleanup errors are logged, never propagated —
+/// the user already has one real error and shouldn't be spammed with
+/// rollback noise.
+#[allow(clippy::too_many_arguments, clippy::print_stdout)]
+async fn launch_with_worktree<R, P>(
+    service: &ActionService<R, P>,
+    path: &str,
+    title: &str,
+    tool: &str,
+    group: Option<&str>,
+    message: Option<&str>,
+    identity_flag: Option<&str>,
+    branch: &str,
+    create_branch: bool,
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let tool_kind = parse_tool(tool)?;
+    let repo_path = PathBuf::from(path);
+    let worktree_path = sigil_runtime::WorktreeManager::worktree_path(&repo_path, branch);
+
+    // --worktree + any identity source (CLI flag *or* project config)
+    // would race: identity hook registration writes into the session's
+    // cwd, which we rewrite mid-flow. Resolve the spec before any side
+    // effect so a `.sigil/config.toml` identity doesn't silently vanish
+    // — fail explicitly instead of stripping it.
+    if resolve_identity_spec(identity_flag, &repo_path)?.is_some() {
+        bail!(
+            "--worktree combined with an identity spec is not supported yet \
+             (identity set via --identity or .sigil/config.toml); launch \
+             without an identity and reload it after the session is up"
+        );
+    }
+
+    // Pre-flight: branch existence must match the -b flag. Doing this
+    // before any side effect keeps a surprised user from ending up
+    // with a stranded session record. A TOCTOU race is possible (the
+    // branch could appear between here and `create_with_options`) but
+    // git's own error message surfaces in the Err path below, so the
+    // worst case is a less-tailored message — not a stranded record.
+    let branch_exists = sigil_runtime::WorktreeManager::branch_exists(&repo_path, branch)
+        .await
+        .context("failed to check whether branch exists")?;
+    match (branch_exists, create_branch) {
+        (true, true) => {
+            bail!("branch '{branch}' already exists; drop -b/--create-branch to attach to it")
+        }
+        (false, false) => {
+            bail!("branch '{branch}' does not exist; pass -b/--create-branch to create it")
+        }
+        _ => {}
+    }
+
+    // Step 1: create the session record with the repo path. Using the
+    // repo path here (not the worktree path) means identity-less
+    // CreateSession has no filesystem preconditions — the worktree
+    // directory doesn't exist yet.
+    let create_request = ActionRequest::new(
+        Action::CreateSession {
+            path: repo_path.clone(),
+            title: title.to_owned(),
+            group: group.map(GroupId::new),
+            tool: tool_kind,
+            identity: None,
+        },
+        ActionOrigin::LocalCli,
+    );
+    let outcome = service
+        .execute(create_request)
+        .await
+        .context("create session")?;
+    let DispatchResult::Session(session) = require_completed(outcome)? else {
+        bail!("unexpected dispatch result for CreateSession")
+    };
+
+    let mut progress = LaunchProgress::default();
+    let result = do_launch_with_worktree(
+        service,
+        &session,
+        &repo_path,
+        branch,
+        create_branch,
+        &worktree_path,
+        message,
+        &mut progress,
+    )
+    .await;
+
+    match result {
+        Ok(()) => {
+            println!(
+                "Launched session '{}' ({}) in worktree {}",
+                session.title,
+                session.id,
+                worktree_path.display(),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // Unwind in reverse:
+            //   1. stop the runtime if it was started, so we don't orphan
+            //      a live tmux / container after deleting the record,
+            //   2. roll back the worktree (existence-aware; invoked even
+            //      if `create_with_options` returned Err because a
+            //      partial `git worktree add` can leave the worktree
+            //      directory behind),
+            //   3. delete the branch only if *we* created it — see
+            //      `LaunchProgress::new_branch_owned` for the TOCTOU
+            //      reasoning,
+            //   4. delete the session record last.
+            // Every step is best-effort and logs its own warnings so
+            // the user's primary error surfaces cleanly.
+            if progress.runtime_started {
+                let handle = sigil_conductor::action_service::record_to_handle(&session);
+                if let Err(stop_err) = service.runtime().stop(&handle).await {
+                    tracing::warn!(
+                        session = %session.title,
+                        error = %stop_err,
+                        "failed to stop runtime during launch-with-worktree rollback",
+                    );
+                }
+            }
+            sigil_runtime::WorktreeManager::rollback_new_worktree(
+                &repo_path,
+                branch,
+                &worktree_path,
+                progress.new_branch_owned,
+            )
+            .await;
+            if let Err(cleanup_err) = service.store().delete_session(&session.id).await {
+                tracing::warn!(
+                    session = %session.title,
+                    error = %cleanup_err,
+                    "failed to roll back session record after launch-with-worktree error",
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn do_launch_with_worktree<R, P>(
+    service: &ActionService<R, P>,
+    session: &SessionRecord,
+    repo_path: &Path,
+    branch: &str,
+    create_branch: bool,
+    worktree_path: &Path,
+    message: Option<&str>,
+    progress: &mut LaunchProgress,
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    // Step 2: authorize the worktree op through policy / audit. The
+    // action returns AuthorizedNotDispatched — the git side effect
+    // below runs only after auth succeeds.
+    let wt_request = ActionRequest::new(
+        Action::CreateWorktree {
+            session_id: session.id,
+            branch: branch.to_owned(),
+        },
+        ActionOrigin::LocalCli,
+    );
+    let outcome = service
+        .execute(wt_request)
+        .await
+        .context("authorize create worktree")?;
+    let dispatch = require_completed(outcome)?;
+    if !matches!(dispatch, DispatchResult::AuthorizedNotDispatched) {
+        bail!("unexpected dispatch result for CreateWorktree: {dispatch:?}");
+    }
+
+    // Step 3: git op. Once this returns Ok we own the on-disk worktree
+    // dir and, when `-b` was set, the branch as well. We flip the
+    // `new_branch_owned` flag only on Ok so a TOCTOU "branch appeared
+    // before our git ran" failure cannot drive a rollback that
+    // force-deletes an unrelated branch.
+    sigil_runtime::WorktreeManager::create_with_options(
+        repo_path,
+        branch,
+        worktree_path,
+        create_branch,
+    )
+    .await
+    .context("failed to create git worktree")?;
+    if create_branch {
+        progress.new_branch_owned = true;
+    }
+
+    // Step 4: rewrite the session path so StartSession launches the
+    // runtime inside the worktree.
+    service
+        .store()
+        .update_session_path(&session.id, worktree_path)
+        .await
+        .context("failed to update session path to worktree")?;
+
+    // Step 5: start the runtime (now running at the worktree path).
+    // Flip `runtime_started` only after policy authorises AND dispatch
+    // completes, so rollback's stop call fires exactly when there is
+    // a live runtime to tear down.
+    let start_request = ActionRequest::new(
+        Action::StartSession {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
+    let outcome = service
+        .execute(start_request)
+        .await
+        .context("start session")?;
+    require_completed(outcome)?;
+    progress.runtime_started = true;
+
+    // Step 6: optional initial message.
+    if let Some(msg) = message {
+        let send_request = ActionRequest::new(
+            Action::SendMessage {
+                session_id: session.id,
+                message: msg.to_owned(),
+            },
+            ActionOrigin::LocalCli,
+        );
+        let outcome = service
+            .execute(send_request)
+            .await
+            .context("send message")?;
+        require_completed(outcome)?;
+    }
 
     Ok(())
 }

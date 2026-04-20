@@ -49,6 +49,13 @@ sigil session launch ~/Projects/test-project \
   --title launch-test \
   --tool codex \
   --message "Summarize the repo layout"
+
+# Compound flow: launch on a fresh worktree branch.
+sigil session launch ~/Projects/test-project \
+  --title launch-wt \
+  --tool claude \
+  --worktree feature/new-thing -b \
+  --message "Start here"
 ```
 
 **Verify:**
@@ -56,6 +63,10 @@ sigil session launch ~/Projects/test-project \
 - one command creates, starts, and sends the initial message
 - tool selection is persisted as `Codex`
 - the session shows up in `session list`
+- with `--worktree BRANCH` the session's cwd is the worktree path
+  (`.worktrees/<sanitised>/`), not the original repo path
+- `-b`/`--create-branch` errors cleanly when the branch already exists;
+  omitting `-b` errors cleanly when the branch is missing
 
 ## UC3 — Status Overview
 

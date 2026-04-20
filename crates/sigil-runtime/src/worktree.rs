@@ -23,7 +23,7 @@ pub struct WorktreeInfo {
 pub struct WorktreeManager;
 
 impl WorktreeManager {
-    /// Create a git worktree for a session.
+    /// Create a git worktree for a session on a freshly created branch.
     ///
     /// Runs `git worktree add -b {branch} {worktree_path}` inside `repo`.
     /// The worktree directory is placed at `{repo}/.worktrees/{sanitised}`.
@@ -36,6 +36,26 @@ impl WorktreeManager {
         branch: &str,
         worktree_path: &Path,
     ) -> Result<(), RuntimeError> {
+        Self::create_with_options(repo, branch, worktree_path, true).await
+    }
+
+    /// Create a git worktree, optionally creating the branch.
+    ///
+    /// When `create_branch` is `true`, runs
+    /// `git worktree add -b {branch} {worktree_path}` and fails if the
+    /// branch already exists. When `false`, runs
+    /// `git worktree add {worktree_path} {branch}` to attach an
+    /// existing branch and fails if the branch does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError` if the git command fails.
+    pub async fn create_with_options(
+        repo: &Path,
+        branch: &str,
+        worktree_path: &Path,
+        create_branch: bool,
+    ) -> Result<(), RuntimeError> {
         let wt_str = worktree_path
             .to_str()
             .ok_or_else(|| RuntimeError::GitCommand {
@@ -43,8 +63,20 @@ impl WorktreeManager {
                 stderr: "worktree path is not valid UTF-8".to_owned(),
             })?;
 
+        let (args, command_desc): (Vec<&str>, String) = if create_branch {
+            (
+                vec!["worktree", "add", "-b", branch, wt_str],
+                format!("git worktree add -b {branch} {wt_str}"),
+            )
+        } else {
+            (
+                vec!["worktree", "add", wt_str, branch],
+                format!("git worktree add {wt_str} {branch}"),
+            )
+        };
+
         let output = Command::new("git")
-            .args(["worktree", "add", "-b", branch, wt_str])
+            .args(&args)
             .current_dir(repo)
             .output()
             .await?;
@@ -52,13 +84,39 @@ impl WorktreeManager {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(RuntimeError::GitCommand {
-                command: format!("git worktree add -b {branch} {wt_str}"),
+                command: command_desc,
                 stderr,
             });
         }
 
-        debug!(repo = %repo.display(), branch, worktree = %worktree_path.display(), "created worktree");
+        debug!(
+            repo = %repo.display(),
+            branch,
+            worktree = %worktree_path.display(),
+            create_branch,
+            "created worktree",
+        );
         Ok(())
+    }
+
+    /// Check whether a local branch exists in a repository.
+    ///
+    /// Runs `git rev-parse --verify --quiet refs/heads/{branch}` inside
+    /// `repo`. Treats a non-zero exit as "branch does not exist" and any
+    /// I/O failure as a propagated error.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RuntimeError` if the git command could not be spawned.
+    pub async fn branch_exists(repo: &Path, branch: &str) -> Result<bool, RuntimeError> {
+        let ref_spec = format!("refs/heads/{branch}");
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &ref_spec])
+            .current_dir(repo)
+            .output()
+            .await?;
+
+        Ok(output.status.success())
     }
 
     /// Finish a worktree: optionally merge, then remove, then delete branch.
@@ -128,6 +186,115 @@ impl WorktreeManager {
         delete_branch_safe(repo, branch).await;
 
         Ok(())
+    }
+
+    /// Best-effort rollback for a worktree that was created as part of
+    /// a compound flow (e.g. `session launch --worktree`) but could not
+    /// be fully wired up.
+    ///
+    /// Existence-aware and idempotent: only runs
+    /// `git worktree remove --force` when the directory is actually
+    /// present, and only runs `git branch -D` when `delete_branch`
+    /// is true AND the branch currently exists. That matters because
+    /// `git worktree add -b <branch> <path>` creates the branch before
+    /// binding the path, so a failed `add` can leave behind the branch
+    /// without ever materialising the worktree directory. Callers
+    /// therefore pass `delete_branch = create_branch` (the original
+    /// `-b` flag), not some observed-success flag.
+    ///
+    /// `--force` (worktree) and `-D` (branch) are used instead of the
+    /// safer `-d` variant because any content on disk came from *this*
+    /// half-failed launch — there is nothing to preserve. Attached
+    /// branches (`delete_branch = false`) are always left alone so a
+    /// partially-failed launch never clobbers pre-existing branch
+    /// state.
+    ///
+    /// All failures are logged at `warn` but never propagated, so
+    /// callers can layer this rollback behind other cleanup without
+    /// juggling nested errors.
+    pub async fn rollback_new_worktree(
+        repo: &Path,
+        branch: &str,
+        worktree_path: &Path,
+        delete_branch: bool,
+    ) {
+        if worktree_path.exists() {
+            if let Some(wt_str) = worktree_path.to_str() {
+                let res = Command::new("git")
+                    .args(["worktree", "remove", "--force", wt_str])
+                    .current_dir(repo)
+                    .output()
+                    .await;
+
+                match res {
+                    Ok(out) if out.status.success() => {
+                        debug!(
+                            repo = %repo.display(),
+                            worktree = %worktree_path.display(),
+                            "rolled back worktree",
+                        );
+                    }
+                    Ok(out) => {
+                        warn!(
+                            repo = %repo.display(),
+                            worktree = %worktree_path.display(),
+                            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                            "git worktree remove --force failed during rollback",
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            repo = %repo.display(),
+                            worktree = %worktree_path.display(),
+                            error = %e,
+                            "failed to spawn git for worktree rollback",
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    repo = %repo.display(),
+                    "worktree path is not valid UTF-8; cannot roll back",
+                );
+            }
+        }
+
+        if delete_branch {
+            // Only delete the branch if it actually exists — git worktree
+            // add can leave behind a fresh branch even when the add fails,
+            // but might also never reach that point. branch_exists errors
+            // propagate as "no cleanup" rather than crashing the rollback.
+            let exists = Self::branch_exists(repo, branch).await.unwrap_or(false);
+            if exists {
+                let res = Command::new("git")
+                    .args(["branch", "-D", branch])
+                    .current_dir(repo)
+                    .output()
+                    .await;
+
+                match res {
+                    Ok(out) if out.status.success() => {
+                        debug!(repo = %repo.display(), branch, "rolled back branch");
+                    }
+                    Ok(out) => {
+                        warn!(
+                            repo = %repo.display(),
+                            branch,
+                            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                            "git branch -D failed during rollback",
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            repo = %repo.display(),
+                            branch,
+                            error = %e,
+                            "failed to spawn git for branch rollback",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// List active worktrees for a repository.
@@ -538,6 +705,107 @@ HEAD abc1234
         );
     }
 
+    #[tokio::test]
+    async fn integration_branch_exists_and_attach_and_rollback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .await;
+        let Ok(init_out) = init else {
+            eprintln!("git not available — skipping integration test");
+            return;
+        };
+        if !init_out.status.success() {
+            eprintln!("git init failed — skipping");
+            return;
+        }
+
+        for args in [
+            &["config", "user.email", "test@test.com"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            let _ = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .await;
+        }
+
+        tokio::fs::write(repo.join("README.md"), "# test\n")
+            .await
+            .expect("readme");
+
+        for args in [&["add", "."][..], &["commit", "-m", "initial"][..]] {
+            let _ = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .await;
+        }
+
+        // ---- branch_exists ----
+        assert!(
+            !WorktreeManager::branch_exists(repo, "not-a-branch")
+                .await
+                .expect("branch_exists runs"),
+            "missing branch reports false",
+        );
+
+        // Create a detached branch (without checking it out) for the attach case.
+        let attach_branch = "feature/attach-me";
+        let _ = Command::new("git")
+            .args(["branch", attach_branch])
+            .current_dir(repo)
+            .output()
+            .await;
+
+        assert!(
+            WorktreeManager::branch_exists(repo, attach_branch)
+                .await
+                .expect("branch_exists runs"),
+            "existing branch reports true",
+        );
+
+        // ---- create_with_options attach path (create_branch=false) ----
+        let wt_path = WorktreeManager::worktree_path(repo, attach_branch);
+        WorktreeManager::create_with_options(repo, attach_branch, &wt_path, false)
+            .await
+            .expect("attach should succeed for existing branch");
+        assert!(wt_path.exists());
+
+        // Rolling back an attached worktree must NOT delete the branch.
+        WorktreeManager::rollback_new_worktree(repo, attach_branch, &wt_path, false).await;
+        assert!(
+            !wt_path.exists(),
+            "worktree dir should be gone after rollback"
+        );
+        assert!(
+            branch_exists(repo, attach_branch).await,
+            "attached branch must survive rollback",
+        );
+
+        // ---- create_with_options create-branch path then rollback (delete_branch=true) ----
+        let fresh_branch = "feature/fresh-for-rollback";
+        let fresh_wt = WorktreeManager::worktree_path(repo, fresh_branch);
+        WorktreeManager::create_with_options(repo, fresh_branch, &fresh_wt, true)
+            .await
+            .expect("create with -b should succeed");
+
+        assert!(fresh_wt.exists());
+        assert!(branch_exists(repo, fresh_branch).await);
+
+        WorktreeManager::rollback_new_worktree(repo, fresh_branch, &fresh_wt, true).await;
+        assert!(!fresh_wt.exists());
+        assert!(
+            !branch_exists(repo, fresh_branch).await,
+            "freshly-created branch should be deleted on rollback",
+        );
+    }
+
     /// Check if a local branch exists in a repository.
     async fn branch_exists(repo: &Path, branch: &str) -> bool {
         let output = Command::new("git")
@@ -548,10 +816,15 @@ HEAD abc1234
             .expect("git branch --list should succeed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // `git branch --list` outputs the branch name prefixed with
-        // spaces or `*` if it's checked out.
-        stdout
-            .lines()
-            .any(|line| line.trim().trim_start_matches("* ") == branch)
+        // `git branch --list` prefixes lines with ` ` (inactive),
+        // `* ` (checked out in this worktree), or `+ ` (checked out
+        // in another worktree).
+        stdout.lines().any(|line| {
+            let trimmed = line
+                .trim()
+                .trim_start_matches("* ")
+                .trim_start_matches("+ ");
+            trimmed == branch
+        })
     }
 }
