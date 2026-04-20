@@ -234,12 +234,26 @@ pub enum SessionCommands {
         name: String,
         /// Message text.
         message: String,
-        /// Wait for response.
-        #[arg(long)]
+        /// Block until the session finishes processing, then print output.
+        #[arg(long, conflicts_with = "no_wait")]
         wait: bool,
+        /// Return immediately after delivery — explicit fire-and-forget
+        /// for heartbeats and other calls where blocking is harmful.
+        #[arg(long, conflicts_with = "wait")]
+        no_wait: bool,
         /// Output raw text (no formatting).
         #[arg(short, long)]
         quiet: bool,
+        /// Max time to wait for completion (only with `--wait`). Accepts
+        /// plain seconds (`300`) or Go-style durations (`300s`, `10m`,
+        /// `1h30m`). Default: 10m.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            default_value = "10m",
+            value_parser = commands::session::parse_timeout,
+        )]
+        timeout: std::time::Duration,
     },
 
     /// Read session output.
@@ -843,33 +857,99 @@ mod tests {
         }
     }
 
+    fn parse_send_cmd(extra: &[&str]) -> SessionCommands {
+        let mut args: Vec<&str> = vec!["sigil", "session", "send", "my-session", "ping"];
+        args.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(args).expect("parse should succeed");
+        match cli.command {
+            Commands::Session(cmd @ SessionCommands::Send { .. }) => cmd,
+            other => panic!("expected Session Send, got {other:?}"),
+        }
+    }
+
+    fn send_timeout(cmd: &SessionCommands) -> std::time::Duration {
+        match cmd {
+            SessionCommands::Send { timeout, .. } => *timeout,
+            other => panic!("expected Session Send, got {other:?}"),
+        }
+    }
+
     #[test]
     fn cli_parses_session_send() {
+        let cmd = parse_send_cmd(&["--wait", "-q"]);
+        match &cmd {
+            SessionCommands::Send {
+                name,
+                message,
+                wait,
+                no_wait,
+                quiet,
+                timeout,
+            } => {
+                assert_eq!(name, "my-session");
+                assert_eq!(message, "ping");
+                assert!(wait);
+                assert!(!no_wait);
+                assert!(quiet);
+                assert_eq!(*timeout, std::time::Duration::from_secs(600));
+            }
+            other => panic!("expected Session Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_session_send_timeout_variants() {
+        assert_eq!(
+            send_timeout(&parse_send_cmd(&["--wait", "--timeout", "300s"])),
+            std::time::Duration::from_secs(300),
+        );
+        assert_eq!(
+            send_timeout(&parse_send_cmd(&["--wait", "--timeout", "1h30m"])),
+            std::time::Duration::from_secs(5400),
+        );
+        assert_eq!(
+            send_timeout(&parse_send_cmd(&["--wait", "--timeout", "45"])),
+            std::time::Duration::from_secs(45),
+        );
+    }
+
+    #[test]
+    fn cli_parses_session_send_no_wait() {
+        match parse_send_cmd(&["--no-wait"]) {
+            SessionCommands::Send { wait, no_wait, .. } => {
+                assert!(!wait);
+                assert!(no_wait);
+            }
+            other => panic!("expected Session Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_session_send_with_both_wait_and_no_wait() {
         let cli = Cli::try_parse_from([
             "sigil",
             "session",
             "send",
             "my-session",
-            "hello world",
+            "ping",
             "--wait",
-            "-q",
+            "--no-wait",
         ]);
-        assert!(cli.is_ok());
-        let cli = cli.expect("parse should succeed");
-        match &cli.command {
-            Commands::Session(SessionCommands::Send {
-                name,
-                message,
-                wait,
-                quiet,
-            }) => {
-                assert_eq!(name, "my-session");
-                assert_eq!(message, "hello world");
-                assert!(wait);
-                assert!(quiet);
-            }
-            other => panic!("expected Session Send, got {other:?}"),
-        }
+        assert!(cli.is_err(), "--wait and --no-wait must conflict");
+    }
+
+    #[test]
+    fn cli_rejects_session_send_with_invalid_timeout_unit() {
+        let cli = Cli::try_parse_from([
+            "sigil",
+            "session",
+            "send",
+            "my-session",
+            "ping",
+            "--timeout",
+            "300ms",
+        ]);
+        assert!(cli.is_err(), "sub-second units should be rejected");
     }
 
     #[test]

@@ -150,7 +150,9 @@ async fn container_session_lifecycle() {
             name: title.to_owned(),
             message: "echo hello-from-sigil-uc8".into(),
             wait: false,
+            no_wait: false,
             quiet: true,
+            timeout: Duration::from_secs(600),
         },
     )
     .await

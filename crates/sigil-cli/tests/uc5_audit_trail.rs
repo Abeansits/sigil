@@ -112,7 +112,9 @@ async fn audit_trail_valid_after_session_lifecycle() {
             name: title.clone(),
             message: "echo audit test".into(),
             wait: false,
+            no_wait: false,
             quiet: true,
+            timeout: std::time::Duration::from_secs(600),
         },
     )
     .await

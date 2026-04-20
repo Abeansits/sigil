@@ -83,8 +83,18 @@ where
             name,
             message,
             wait,
+            no_wait,
             quiet,
-        } => send(service, &name, &message, wait, quiet).await,
+            timeout,
+        } => {
+            let _ = no_wait;
+            let mode = if wait {
+                WaitMode::Wait { timeout }
+            } else {
+                WaitMode::NoWait
+            };
+            send(service, &name, &message, mode, quiet).await
+        }
         SessionCommands::Output { name, quiet } => output(service, &name, quiet).await,
         SessionCommands::Remove { name } => remove(service, &name).await,
     }
@@ -742,12 +752,20 @@ where
     Ok(())
 }
 
+const WAIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaitMode {
+    NoWait,
+    Wait { timeout: Duration },
+}
+
 #[allow(clippy::print_stdout)]
 async fn send<R, P>(
     service: &ActionService<R, P>,
     name: &str,
     message: &str,
-    wait: bool,
+    mode: WaitMode,
     quiet: bool,
 ) -> Result<()>
 where
@@ -771,57 +789,134 @@ where
         println!("Sent to '{}'.", session.title);
     }
 
-    if wait {
-        // Poll for output until the session transitions away from Running.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-        let handle = sigil_conductor::action_service::record_to_handle(&session);
+    let WaitMode::Wait { timeout } = mode else {
+        return Ok(());
+    };
 
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+    // Sleep *before* the first status check: agents need a moment to
+    // pick up the message, and checking immediately would routinely see
+    // `Waiting` from the previous turn and declare success prematurely.
+    // Sleep is capped to remaining budget so `--timeout 1` with a 2s
+    // poll interval still honours its deadline.
+    let deadline = tokio::time::Instant::now() + timeout;
+    let handle = sigil_conductor::action_service::record_to_handle(&session);
 
-            let state = service
-                .runtime()
-                .status(&handle)
-                .await
-                .context("failed to check session status")?;
-
-            if state != SessionState::Running {
-                break;
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                if !quiet {
-                    println!("Timed out waiting for response.");
-                }
-                break;
-            }
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            bail!(
+                "timed out after {}s waiting for '{}' to finish; \
+                 retry with a longer --timeout or use --no-wait. \
+                 Run `sigil session output '{}'` to inspect partial output.",
+                timeout.as_secs(),
+                session.title,
+                session.title,
+            );
         }
 
-        // Read final output via ActionService.
-        let read_request = ActionRequest::new(
-            Action::ReadSessionOutput {
-                session_id: session.id,
-            },
-            ActionOrigin::LocalCli,
-        );
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(WAIT_POLL_INTERVAL.min(remaining)).await;
 
-        let read_outcome = service.execute(read_request).await.context("read output")?;
-        let read_result = require_completed(read_outcome)?;
+        let state = service
+            .runtime()
+            .status(&handle)
+            .await
+            .context("failed to check session status")?;
 
-        let DispatchResult::Text(text) = read_result else {
-            bail!("unexpected dispatch result")
-        };
-
-        if quiet {
-            println!("{text}");
-        } else {
-            println!("--- output from '{}' ---", session.title);
-            println!("{text}");
-            println!("--- end ---");
+        if state != SessionState::Running {
+            break;
         }
     }
 
+    let read_request = ActionRequest::new(
+        Action::ReadSessionOutput {
+            session_id: session.id,
+        },
+        ActionOrigin::LocalCli,
+    );
+
+    let read_outcome = service.execute(read_request).await.context("read output")?;
+    let read_result = require_completed(read_outcome)?;
+
+    let DispatchResult::Text(text) = read_result else {
+        bail!("unexpected dispatch result")
+    };
+
+    if quiet {
+        println!("{text}");
+    } else {
+        println!("--- output from '{}' ---", session.title);
+        println!("{text}");
+        println!("--- end ---");
+    }
+
     Ok(())
+}
+
+/// Accepts a bare integer (seconds) or Go-style `Ns`/`Nm`/`Nh`
+/// combinations (`"300s"`, `"10m"`, `"1h30m"`). Sub-second units are
+/// rejected — the poll cadence is 2s so finer granularity would paper
+/// over caller mistakes like `--timeout 300ms`.
+///
+/// # Errors
+///
+/// Returns a human-readable error for empty input, unknown unit
+/// characters, missing digits before a unit, or arithmetic overflow.
+pub(crate) fn parse_timeout(raw: &str) -> Result<Duration, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("timeout must not be empty".to_owned());
+    }
+
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        let secs = trimmed
+            .parse::<u64>()
+            .map_err(|e| format!("invalid timeout '{raw}': {e}"))?;
+        return Ok(Duration::from_secs(secs));
+    }
+
+    let mut total: u64 = 0;
+    let mut digits = String::new();
+    for c in trimmed.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        if digits.is_empty() {
+            return Err(format!(
+                "invalid timeout '{raw}': unit '{c}' without digits"
+            ));
+        }
+        let n = digits
+            .parse::<u64>()
+            .map_err(|e| format!("invalid timeout '{raw}': {e}"))?;
+        digits.clear();
+        let mul: u64 = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            other => {
+                return Err(format!(
+                    "invalid timeout '{raw}': unit '{other}' (expected s, m, or h)",
+                ));
+            }
+        };
+        let added = n
+            .checked_mul(mul)
+            .ok_or_else(|| format!("invalid timeout '{raw}': overflow"))?;
+        total = total
+            .checked_add(added)
+            .ok_or_else(|| format!("invalid timeout '{raw}': overflow"))?;
+    }
+    if !digits.is_empty() {
+        // Reject `10m30` rather than silently treating the tail as seconds —
+        // it's almost always a typo for `10m30s`.
+        return Err(format!(
+            "invalid timeout '{raw}': trailing digits without a unit (use `{digits}s` explicitly)",
+        ));
+    }
+
+    Ok(Duration::from_secs(total))
 }
 
 #[allow(clippy::print_stdout)]
@@ -909,6 +1004,58 @@ mod tests {
     fn parse_tool_unknown_returns_error() {
         assert!(parse_tool("vim").is_err());
         assert!(parse_tool("").is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // parse_timeout
+    // ---------------------------------------------------------------
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn parse_timeout_bare_integer_is_seconds() {
+        assert_eq!(parse_timeout("300").expect("parse"), secs(300));
+        assert_eq!(parse_timeout("0").expect("parse"), secs(0));
+    }
+
+    #[test]
+    fn parse_timeout_go_style_units() {
+        assert_eq!(parse_timeout("300s").expect("parse"), secs(300));
+        assert_eq!(parse_timeout("10m").expect("parse"), secs(600));
+        assert_eq!(parse_timeout("1h").expect("parse"), secs(3600));
+        assert_eq!(parse_timeout("1h30m").expect("parse"), secs(5400));
+        assert_eq!(parse_timeout("10m0s").expect("parse"), secs(600));
+        assert_eq!(parse_timeout("2h45m30s").expect("parse"), secs(9930));
+    }
+
+    #[test]
+    fn parse_timeout_accepts_surrounding_whitespace() {
+        assert_eq!(parse_timeout("  10m  ").expect("parse"), secs(600));
+    }
+
+    #[test]
+    fn parse_timeout_rejects_empty() {
+        assert!(parse_timeout("").is_err());
+        assert!(parse_timeout("   ").is_err());
+    }
+
+    #[test]
+    fn parse_timeout_rejects_unknown_units() {
+        assert!(parse_timeout("300ms").is_err());
+        assert!(parse_timeout("1d").is_err());
+    }
+
+    #[test]
+    fn parse_timeout_rejects_unit_without_digits() {
+        assert!(parse_timeout("s").is_err());
+        assert!(parse_timeout("ms").is_err());
+    }
+
+    #[test]
+    fn parse_timeout_rejects_trailing_digits_without_unit() {
+        assert!(parse_timeout("10m30").is_err());
     }
 
     #[tokio::test]
