@@ -119,6 +119,15 @@ pub enum Action {
         session_id: SessionId,
         parent_id: SessionId,
     },
+    /// Detach a session from its parent.
+    ///
+    /// Separate variant rather than an `Option<SessionId>` on
+    /// `SetSessionParent` so that policy + audit see the intent
+    /// explicitly ("orphan this node") instead of inferring it from a
+    /// missing payload.
+    ClearSessionParent {
+        session_id: SessionId,
+    },
     RenameSession {
         session_id: SessionId,
         new_title: String,
@@ -126,6 +135,14 @@ pub enum Action {
     MoveSessionToGroup {
         session_id: SessionId,
         group: GroupId,
+    },
+    /// Remove a session's group assignment.
+    ///
+    /// Counterpart to [`Action::MoveSessionToGroup`], kept as a distinct
+    /// variant for the same audit-clarity reason as
+    /// [`Action::ClearSessionParent`].
+    ClearSessionGroup {
+        session_id: SessionId,
     },
     ConfigureConductor {
         name: String,
@@ -217,8 +234,10 @@ impl Action {
             Self::CreateWorktree { .. }
             | Self::FinishWorktree { .. }
             | Self::SetSessionParent { .. }
+            | Self::ClearSessionParent { .. }
             | Self::RenameSession { .. }
-            | Self::MoveSessionToGroup { .. } => Capability::ModifyInfrastructure,
+            | Self::MoveSessionToGroup { .. }
+            | Self::ClearSessionGroup { .. } => Capability::ModifyInfrastructure,
 
             Self::ConfigureConductor { .. } => Capability::ConfigureConductor,
 
@@ -265,8 +284,10 @@ impl Action {
             | Self::CreateWorktree { .. }
             | Self::FinishWorktree { .. }
             | Self::SetSessionParent { .. }
+            | Self::ClearSessionParent { .. }
             | Self::RenameSession { .. }
             | Self::MoveSessionToGroup { .. }
+            | Self::ClearSessionGroup { .. }
             | Self::ConfigureConductor { .. }
             | Self::ReadHostFile { .. }
             | Self::WriteHostFile { .. }
@@ -617,6 +638,7 @@ mod proptest_tests {
     ///
     /// Split into groups of ≤10 for `prop_oneof!` (which uses `TupleUnion`
     /// internally and supports at most 10 branches per call).
+    #[allow(clippy::too_many_lines)]
     fn arb_action() -> impl Strategy<Value = Action> {
         // Group A: T0 (5) + first 5 of T1 = 10
         let read_operate = prop_oneof![
@@ -660,7 +682,7 @@ mod proptest_tests {
             arb_session_id().prop_map(|session_id| Action::RestartSession { session_id }),
         ];
 
-        // Group B: remaining T1 (2) + T2 (6) = 8
+        // Group B: remaining T1 (2) + T2 (8) = 10 (prop_oneof max)
         let operate_infra = prop_oneof![
             (arb_session_id(), arb_name()).prop_map(|(session_id, message)| {
                 Action::SendMessage {
@@ -679,6 +701,7 @@ mod proptest_tests {
                     parent_id,
                 }
             }),
+            arb_session_id().prop_map(|session_id| Action::ClearSessionParent { session_id }),
             (arb_session_id(), arb_name()).prop_map(|(session_id, new_title)| {
                 Action::RenameSession {
                     session_id,
@@ -691,6 +714,7 @@ mod proptest_tests {
                     group: GroupId::new(group),
                 }
             }),
+            arb_session_id().prop_map(|session_id| Action::ClearSessionGroup { session_id }),
             (arb_name(), arb_conductor_config())
                 .prop_map(|(name, config)| Action::ConfigureConductor { name, config }),
         ];

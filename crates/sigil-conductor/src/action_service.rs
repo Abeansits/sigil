@@ -411,8 +411,10 @@ where
             Action::CreateWorktree { .. }
             | Action::FinishWorktree { .. }
             | Action::SetSessionParent { .. }
+            | Action::ClearSessionParent { .. }
             | Action::RenameSession { .. }
             | Action::MoveSessionToGroup { .. }
+            | Action::ClearSessionGroup { .. }
             | Action::ConfigureConductor { .. }
             | Action::ReadHostFile { .. }
             | Action::WriteHostFile { .. }
@@ -798,8 +800,10 @@ pub fn extract_session_id(action: &Action) -> Option<SessionId> {
         | Action::CreateWorktree { session_id, .. }
         | Action::FinishWorktree { session_id, .. }
         | Action::SetSessionParent { session_id, .. }
+        | Action::ClearSessionParent { session_id }
         | Action::RenameSession { session_id, .. }
-        | Action::MoveSessionToGroup { session_id, .. } => Some(*session_id),
+        | Action::MoveSessionToGroup { session_id, .. }
+        | Action::ClearSessionGroup { session_id } => Some(*session_id),
         Action::ListSessions
         | Action::ListGroups
         | Action::GetSystemStatus

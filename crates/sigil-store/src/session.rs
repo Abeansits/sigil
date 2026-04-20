@@ -201,6 +201,68 @@ impl Store {
         Ok(())
     }
 
+    /// Update the group a session belongs to.
+    ///
+    /// Pass `None` to clear the group assignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] if the session does not exist,
+    /// or [`StoreError::Database`] on query failure.
+    pub async fn update_session_group(
+        &self,
+        id: &SessionId,
+        group: Option<&GroupId>,
+    ) -> Result<(), StoreError> {
+        let id_str = id.to_string();
+        let group_str = group.map(ToString::to_string);
+
+        let result = sqlx::query(
+            "UPDATE sessions SET group_id = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&group_str)
+        .bind(&id_str)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SessionNotFound { id: id_str });
+        }
+
+        Ok(())
+    }
+
+    /// Update the parent session pointer.
+    ///
+    /// Pass `None` to detach the session from any parent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::SessionNotFound`] if the session does not exist,
+    /// or [`StoreError::Database`] on query failure.
+    pub async fn update_session_parent(
+        &self,
+        id: &SessionId,
+        parent: Option<&SessionId>,
+    ) -> Result<(), StoreError> {
+        let id_str = id.to_string();
+        let parent_str = parent.map(ToString::to_string);
+
+        let result = sqlx::query(
+            "UPDATE sessions SET parent_id = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&parent_str)
+        .bind(&id_str)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::SessionNotFound { id: id_str });
+        }
+
+        Ok(())
+    }
+
     /// Update the identity spec of a session.
     ///
     /// # Errors

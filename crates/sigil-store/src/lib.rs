@@ -546,6 +546,93 @@ mod tests {
         assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
     }
 
+    // -- Group / parent update tests --
+
+    #[tokio::test]
+    async fn update_session_group_sets_new_group() {
+        let store = Store::new_in_memory().await.expect("init");
+        let record = make_session("regroup-me");
+        store.create_session(&record).await.expect("create");
+
+        let new_group = GroupId::new("moved-group");
+        store
+            .update_session_group(&record.id, Some(&new_group))
+            .await
+            .expect("update group");
+
+        let fetched = store.get_session(&record.id).await.expect("get");
+        assert_eq!(fetched.group, Some(new_group));
+    }
+
+    #[tokio::test]
+    async fn update_session_group_clears_group() {
+        let store = Store::new_in_memory().await.expect("init");
+        let record = make_session("clear-group");
+        store.create_session(&record).await.expect("create");
+        assert!(record.group.is_some(), "seed should have a group");
+
+        store
+            .update_session_group(&record.id, None)
+            .await
+            .expect("clear group");
+
+        let fetched = store.get_session(&record.id).await.expect("get");
+        assert!(fetched.group.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_session_group_nonexistent_returns_not_found() {
+        let store = Store::new_in_memory().await.expect("init");
+        let id = SessionId::new();
+        let group = GroupId::new("ghost");
+        let result = store.update_session_group(&id, Some(&group)).await;
+        assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn update_session_parent_sets_new_parent() {
+        let store = Store::new_in_memory().await.expect("init");
+        let parent = make_session("parent");
+        let child = make_session("child");
+        store.create_session(&parent).await.expect("create parent");
+        store.create_session(&child).await.expect("create child");
+
+        store
+            .update_session_parent(&child.id, Some(&parent.id))
+            .await
+            .expect("set parent");
+
+        let fetched = store.get_session(&child.id).await.expect("get child");
+        assert_eq!(fetched.parent, Some(parent.id));
+    }
+
+    #[tokio::test]
+    async fn update_session_parent_clears_parent() {
+        let store = Store::new_in_memory().await.expect("init");
+        let parent = make_session("p");
+        let mut child = make_session("c");
+        child.parent = Some(parent.id);
+        store.create_session(&parent).await.expect("create parent");
+        store.create_session(&child).await.expect("create child");
+
+        store
+            .update_session_parent(&child.id, None)
+            .await
+            .expect("clear parent");
+
+        let fetched = store.get_session(&child.id).await.expect("get child");
+        assert!(fetched.parent.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_session_parent_nonexistent_returns_not_found() {
+        let store = Store::new_in_memory().await.expect("init");
+        let id = SessionId::new();
+        let parent_id = SessionId::new();
+        let result = store.update_session_parent(&id, Some(&parent_id)).await;
+        assert_matches!(result, Err(StoreError::SessionNotFound { .. }));
+    }
+
     #[tokio::test]
     async fn list_sessions_preserves_identity() {
         let store = Store::new_in_memory().await.expect("init");

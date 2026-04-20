@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use serde::Serialize;
+
 use sigil_conductor::action_service::{ActionOutcome, ActionService, DispatchResult};
 use sigil_core::action::{Action, ActionRequest};
 use sigil_core::config::ProjectConfig;
@@ -87,6 +89,14 @@ where
         } => send(service, &name, &message, wait, quiet).await,
         SessionCommands::Output { name, quiet } => output(service, &name, quiet).await,
         SessionCommands::Remove { name } => remove(service, &name).await,
+        SessionCommands::SetGroup { name, group, clear } => {
+            set_group(service, &name, group.as_deref(), clear).await
+        }
+        SessionCommands::SetParent {
+            name,
+            parent,
+            clear,
+        } => set_parent(service, &name, parent.as_deref(), clear).await,
     }
 }
 
@@ -257,9 +267,24 @@ where
 {
     let session = resolve_session(service.store(), name).await?;
 
+    // Resolve the parent's title (if any) so JSON and text output can
+    // surface a human-readable pointer alongside the ULID.
+    let parent_title = match session.parent.as_ref() {
+        Some(parent_id) => match service.store().get_session(parent_id).await {
+            Ok(parent) => Some(parent.title),
+            Err(sigil_store::StoreError::SessionNotFound { .. }) => None,
+            Err(e) => return Err(e).context("failed to look up parent session"),
+        },
+        None => None,
+    };
+
     if json {
+        let response = ShowSessionResponse {
+            session: &session,
+            parent_title: parent_title.as_deref(),
+        };
         let formatted =
-            serde_json::to_string_pretty(&session).context("failed to serialize session")?;
+            serde_json::to_string_pretty(&response).context("failed to serialize session JSON")?;
         println!("{formatted}");
     } else {
         println!("ID:         {}", session.id);
@@ -273,7 +298,10 @@ where
             println!("Group:      {group}");
         }
         if let Some(ref parent) = session.parent {
-            println!("Parent:     {parent}");
+            match parent_title.as_deref() {
+                Some(title) => println!("Parent:     {title} ({parent})"),
+                None => println!("Parent:     {parent}"),
+            }
         }
     }
 
@@ -855,6 +883,196 @@ where
         );
         println!("{text}");
         println!("--- end ---");
+    }
+
+    Ok(())
+}
+
+/// JSON shape for `session show --json`.
+///
+/// Flattens the persisted [`SessionRecord`] and augments it with
+/// `parent_title`, a resolved lookup of the parent session's display
+/// title. `parent_title` is `null` when the session has no parent or
+/// when the parent pointer dangles (points at a record that was since
+/// removed); callers rely on the ULID in `parent` to distinguish the
+/// two.
+#[derive(Debug, Serialize)]
+struct ShowSessionResponse<'a> {
+    #[serde(flatten)]
+    session: &'a SessionRecord,
+    parent_title: Option<&'a str>,
+}
+
+/// Assert an `AuthorizedNotDispatched` outcome from a T2 action whose
+/// side effect the CLI performs itself (group/parent update, worktree).
+fn require_authorized_not_dispatched(outcome: ActionOutcome, what: &str) -> Result<()> {
+    match outcome {
+        ActionOutcome::Completed(DispatchResult::AuthorizedNotDispatched) => Ok(()),
+        ActionOutcome::Completed(other) => bail!(
+            "{what}: unexpected dispatch result {other:?}; \
+             expected AuthorizedNotDispatched"
+        ),
+        ActionOutcome::Denied { reason } => bail!("policy denied: {reason}"),
+        ActionOutcome::NeedsApproval { description } => {
+            bail!("approval required: {description}")
+        }
+    }
+}
+
+#[allow(clippy::print_stdout)]
+async fn set_group<R, P>(
+    service: &ActionService<R, P>,
+    name: &str,
+    group: Option<&str>,
+    clear: bool,
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
+
+    // One of `group` or `--clear` must be present, but not both. clap
+    // enforces the `conflicts_with` side; we enforce the required side.
+    let new_group = match (group, clear) {
+        (Some(g), false) => Some(GroupId::new(g)),
+        (None, true) => None,
+        (None, false) => bail!("provide a GROUP argument or --clear to detach"),
+        // Unreachable: clap's `conflicts_with = "group"` rejects this combo.
+        (Some(_), true) => bail!("cannot specify both GROUP and --clear"),
+    };
+
+    // Policy evaluation / audit first — both set and clear are routed
+    // through ActionService so every mutation lands in the audit log.
+    let action = match new_group.as_ref() {
+        Some(group_id) => Action::MoveSessionToGroup {
+            session_id: session.id,
+            group: group_id.clone(),
+        },
+        None => Action::ClearSessionGroup {
+            session_id: session.id,
+        },
+    };
+    let outcome = service
+        .execute(ActionRequest::new(action, ActionOrigin::LocalCli))
+        .await
+        .context("set session group")?;
+    require_authorized_not_dispatched(outcome, "set session group")?;
+
+    service
+        .store()
+        .update_session_group(&session.id, new_group.as_ref())
+        .await
+        .context("failed to update session group")?;
+
+    match new_group {
+        Some(g) => println!("Moved session '{}' to group '{g}'.", session.title),
+        None => println!("Cleared group on session '{}'.", session.title),
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::print_stdout)]
+async fn set_parent<R, P>(
+    service: &ActionService<R, P>,
+    name: &str,
+    parent: Option<&str>,
+    clear: bool,
+) -> Result<()>
+where
+    R: SessionRuntime + LifecycleHooks,
+    P: PolicyEngine,
+{
+    let session = resolve_session(service.store(), name).await?;
+
+    let new_parent = match (parent, clear) {
+        (Some(p), false) => {
+            let resolved = resolve_session(service.store(), p)
+                .await
+                .with_context(|| format!("failed to resolve parent '{p}'"))?;
+            if resolved.id == session.id {
+                bail!(
+                    "refusing to set session '{}' as its own parent",
+                    session.title
+                );
+            }
+            ensure_no_parent_cycle(service.store(), &session, &resolved).await?;
+            Some(resolved)
+        }
+        (None, true) => None,
+        (None, false) => bail!("provide a PARENT argument or --clear to detach"),
+        (Some(_), true) => bail!("cannot specify both PARENT and --clear"),
+    };
+
+    let action = match new_parent.as_ref() {
+        Some(parent_rec) => Action::SetSessionParent {
+            session_id: session.id,
+            parent_id: parent_rec.id,
+        },
+        None => Action::ClearSessionParent {
+            session_id: session.id,
+        },
+    };
+    let outcome = service
+        .execute(ActionRequest::new(action, ActionOrigin::LocalCli))
+        .await
+        .context("set session parent")?;
+    require_authorized_not_dispatched(outcome, "set session parent")?;
+
+    service
+        .store()
+        .update_session_parent(&session.id, new_parent.as_ref().map(|p| &p.id))
+        .await
+        .context("failed to update session parent")?;
+
+    match new_parent {
+        Some(p) => println!(
+            "Set parent of '{}' to '{}' ({}).",
+            session.title, p.title, p.id
+        ),
+        None => println!("Cleared parent on session '{}'.", session.title),
+    }
+
+    Ok(())
+}
+
+/// Walk the proposed parent's ancestor chain and reject the assignment
+/// if it would introduce a cycle (i.e. the child's id appears somewhere
+/// up the chain, meaning "make X a descendant of X"). Also guards
+/// against pre-existing cycles in stored data by tracking visited IDs.
+async fn ensure_no_parent_cycle(
+    store: &Store,
+    child: &SessionRecord,
+    proposed_parent: &SessionRecord,
+) -> Result<()> {
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(proposed_parent.id);
+
+    let mut cursor = proposed_parent.parent;
+    while let Some(ancestor_id) = cursor {
+        if ancestor_id == child.id {
+            bail!(
+                "refusing to create parent cycle: '{}' is already an ancestor of '{}'",
+                child.title,
+                proposed_parent.title,
+            );
+        }
+        if !visited.insert(ancestor_id) {
+            // Pre-existing cycle in stored data — refuse to touch it
+            // rather than loop forever.
+            bail!(
+                "refusing to set parent: existing parent chain for '{}' contains a cycle",
+                proposed_parent.title,
+            );
+        }
+
+        let ancestor = match store.get_session(&ancestor_id).await {
+            Ok(record) => record,
+            Err(sigil_store::StoreError::SessionNotFound { .. }) => break,
+            Err(e) => return Err(e).context("failed to walk parent chain"),
+        };
+        cursor = ancestor.parent;
     }
 
     Ok(())

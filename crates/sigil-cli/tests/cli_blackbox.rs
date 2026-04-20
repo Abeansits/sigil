@@ -664,3 +664,299 @@ fn audit_subcommand_runs_with_unwritable_db_parent() {
         "audit short-circuit must skip Store::new; stderr: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// session set-group / set-parent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_set_group_round_trips_to_show_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "create", work_dir, "-t", "bb-regroup"],
+    );
+    assert!(out.status.success(), "create should succeed");
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-group", "bb-regroup", "slack-ops"],
+    );
+    assert!(
+        out.status.success(),
+        "set-group should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("slack-ops"),
+        "confirmation should mention new group: {stdout}"
+    );
+
+    let out = run_sigil(tmp.path(), &["session", "show", "bb-regroup", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert_eq!(parsed["group"], "slack-ops");
+}
+
+#[test]
+fn session_set_group_clear_detaches_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    let out = run_sigil(
+        tmp.path(),
+        &[
+            "session",
+            "create",
+            work_dir,
+            "-t",
+            "bb-unregroup",
+            "-g",
+            "starting-group",
+        ],
+    );
+    assert!(out.status.success(), "create should succeed");
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-group", "bb-unregroup", "--clear"],
+    );
+    assert!(out.status.success(), "set-group --clear should exit 0");
+
+    let out = run_sigil(tmp.path(), &["session", "show", "bb-unregroup", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert!(
+        parsed["group"].is_null(),
+        "group should be null after --clear: {parsed}"
+    );
+}
+
+#[test]
+fn session_set_group_unknown_session_errors() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = run_sigil(tmp.path(), &["session", "set-group", "no-such", "grp"]);
+    assert!(
+        !out.status.success(),
+        "set-group on missing session must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "stderr should mention 'not found': {stderr}"
+    );
+}
+
+#[test]
+fn session_set_parent_round_trips_with_parent_title_in_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    for title in ["bb-parent", "bb-child"] {
+        let out = run_sigil(tmp.path(), &["session", "create", work_dir, "-t", title]);
+        assert!(out.status.success(), "create {title} should succeed");
+    }
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-parent", "bb-child", "bb-parent"],
+    );
+    assert!(
+        out.status.success(),
+        "set-parent should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run_sigil(tmp.path(), &["session", "show", "bb-child", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+
+    let parent_id = parsed["parent"]
+        .as_str()
+        .expect("parent should be a ULID string");
+    assert!(
+        !parent_id.is_empty(),
+        "parent ULID should be populated: {parsed}"
+    );
+    assert_eq!(
+        parsed["parent_title"], "bb-parent",
+        "parent_title should resolve to the parent's title: {parsed}"
+    );
+}
+
+#[test]
+fn session_set_parent_clear_detaches_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    for title in ["bb-detach-parent", "bb-detach-child"] {
+        let out = run_sigil(tmp.path(), &["session", "create", work_dir, "-t", title]);
+        assert!(out.status.success());
+    }
+
+    let out = run_sigil(
+        tmp.path(),
+        &[
+            "session",
+            "set-parent",
+            "bb-detach-child",
+            "bb-detach-parent",
+        ],
+    );
+    assert!(out.status.success());
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-parent", "bb-detach-child", "--clear"],
+    );
+    assert!(out.status.success(), "--clear should succeed");
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "show", "bb-detach-child", "--json"],
+    );
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert!(parsed["parent"].is_null(), "parent should be null");
+    assert!(
+        parsed["parent_title"].is_null(),
+        "parent_title should be null when no parent"
+    );
+}
+
+#[test]
+fn session_set_parent_unknown_parent_errors_without_mutation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "create", work_dir, "-t", "bb-dangling-child"],
+    );
+    assert!(out.status.success());
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-parent", "bb-dangling-child", "ghost"],
+    );
+    assert!(
+        !out.status.success(),
+        "set-parent with bad parent must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "stderr should mention 'not found': {stderr}"
+    );
+
+    // Child record must not have been mutated.
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "show", "bb-dangling-child", "--json"],
+    );
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert!(
+        parsed["parent"].is_null(),
+        "child parent should remain unset after failed lookup"
+    );
+}
+
+#[test]
+fn session_set_parent_refuses_cycle() {
+    // a -> b, then attempting b -> a must fail (would create a cycle
+    // a -> b -> a).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    for title in ["bb-cyc-a", "bb-cyc-b"] {
+        let out = run_sigil(tmp.path(), &["session", "create", work_dir, "-t", title]);
+        assert!(out.status.success());
+    }
+
+    // a's parent := b. Fine so far.
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-parent", "bb-cyc-a", "bb-cyc-b"],
+    );
+    assert!(out.status.success());
+
+    // Now try b's parent := a. Should be rejected.
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-parent", "bb-cyc-b", "bb-cyc-a"],
+    );
+    assert!(!out.status.success(), "cycle-inducing set-parent must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cycle"),
+        "stderr should mention 'cycle': {stderr}"
+    );
+
+    // And bb-cyc-b's parent must still be unset.
+    let out = run_sigil(tmp.path(), &["session", "show", "bb-cyc-b", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert!(
+        parsed["parent"].is_null(),
+        "bb-cyc-b should not have acquired a parent after rejection"
+    );
+}
+
+#[test]
+fn session_show_text_renders_parent_title_and_ulid() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    for title in ["bb-text-parent", "bb-text-child"] {
+        let out = run_sigil(tmp.path(), &["session", "create", work_dir, "-t", title]);
+        assert!(out.status.success());
+    }
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "set-parent", "bb-text-child", "bb-text-parent"],
+    );
+    assert!(out.status.success());
+
+    // Text mode (no --json) should render "Parent: <title> (<ulid>)".
+    let out = run_sigil(tmp.path(), &["session", "show", "bb-text-child"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Parent:"),
+        "text output should have a Parent line: {stdout}"
+    );
+    assert!(
+        stdout.contains("bb-text-parent"),
+        "text output should include the parent's title: {stdout}"
+    );
+}
+
+#[test]
+fn session_set_parent_refuses_self_reference() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_dir = tmp.path().to_str().expect("valid path");
+
+    let out = run_sigil(
+        tmp.path(),
+        &["session", "create", work_dir, "-t", "bb-self"],
+    );
+    assert!(out.status.success());
+
+    let out = run_sigil(tmp.path(), &["session", "set-parent", "bb-self", "bb-self"]);
+    assert!(!out.status.success(), "self-parent must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("own parent"),
+        "stderr should explain the self-parent rejection: {stderr}"
+    );
+}
