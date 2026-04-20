@@ -244,16 +244,20 @@ pub enum SessionCommands {
         /// Output raw text (no formatting).
         #[arg(short, long)]
         quiet: bool,
-        /// Max time to wait for completion (only with `--wait`). Accepts
+        /// Max time to wait for completion. Requires `--wait`. Accepts
         /// plain seconds (`300`) or Go-style durations (`300s`, `10m`,
-        /// `1h30m`). Default: 10m.
+        /// `1h30m`). Default when omitted: 10m.
+        //
+        // `requires = "wait"` would express this in clap, but it
+        // silently passes when `--no-wait` is also present. The check
+        // lives in the dispatcher (commands::session::run) instead and
+        // is covered by integration tests.
         #[arg(
             long,
             value_name = "DURATION",
-            default_value = "10m",
             value_parser = commands::session::parse_timeout,
         )]
-        timeout: std::time::Duration,
+        timeout: Option<std::time::Duration>,
     },
 
     /// Read session output.
@@ -889,7 +893,7 @@ mod tests {
         }
     }
 
-    fn send_timeout(cmd: &SessionCommands) -> std::time::Duration {
+    fn send_timeout(cmd: &SessionCommands) -> Option<std::time::Duration> {
         match cmd {
             SessionCommands::Send { timeout, .. } => *timeout,
             other => panic!("expected Session Send, got {other:?}"),
@@ -913,7 +917,9 @@ mod tests {
                 assert!(wait);
                 assert!(!no_wait);
                 assert!(quiet);
-                assert_eq!(*timeout, std::time::Duration::from_secs(600));
+                // No explicit --timeout on the command line; handler
+                // fills in the 10m default.
+                assert!(timeout.is_none());
             }
             other => panic!("expected Session Send, got {other:?}"),
         }
@@ -921,19 +927,23 @@ mod tests {
 
     #[test]
     fn cli_parses_session_send_timeout_variants() {
+        use std::time::Duration;
         assert_eq!(
             send_timeout(&parse_send_cmd(&["--wait", "--timeout", "300s"])),
-            std::time::Duration::from_secs(300),
+            Some(Duration::from_secs(300)),
         );
         assert_eq!(
             send_timeout(&parse_send_cmd(&["--wait", "--timeout", "1h30m"])),
-            std::time::Duration::from_secs(5400),
+            Some(Duration::from_secs(5400)),
         );
         assert_eq!(
             send_timeout(&parse_send_cmd(&["--wait", "--timeout", "45"])),
-            std::time::Duration::from_secs(45),
+            Some(Duration::from_secs(45)),
         );
     }
+
+    // Rejecting `--timeout` without `--wait` happens in the dispatcher;
+    // covered by `session_send_timeout::send_timeout_without_wait_*`.
 
     #[test]
     fn cli_parses_session_send_no_wait() {

@@ -152,7 +152,7 @@ async fn container_session_lifecycle() {
             wait: false,
             no_wait: false,
             quiet: true,
-            timeout: Duration::from_secs(600),
+            timeout: None,
         },
     )
     .await

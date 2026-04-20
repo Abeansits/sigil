@@ -180,7 +180,7 @@ async fn send_wait_succeeds_when_reply_arrives_before_timeout() {
             wait: true,
             no_wait: false,
             quiet: true,
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
         },
     )
     .await
@@ -213,7 +213,7 @@ async fn send_wait_times_out_with_actionable_error() {
             wait: true,
             no_wait: false,
             quiet: true,
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
         },
     )
     .await
@@ -268,7 +268,7 @@ async fn send_no_wait_returns_immediately() {
             wait: false,
             no_wait: true,
             quiet: true,
-            timeout: Duration::from_secs(600),
+            timeout: None,
         },
     )
     .await
@@ -302,7 +302,7 @@ async fn send_default_is_fire_and_forget() {
             wait: false,
             no_wait: false,
             quiet: true,
-            timeout: Duration::from_secs(600),
+            timeout: None,
         },
     )
     .await
@@ -314,4 +314,74 @@ async fn send_default_is_fire_and_forget() {
         0,
         "absence of --wait must mean no status polling",
     );
+}
+
+// `--timeout` requires `--wait`. Clap's `requires` silently passes when
+// `--no-wait` is also present, so enforcement lives in the dispatcher.
+// Both shapes (implicit and explicit fire-and-forget) must fail.
+
+#[tokio::test]
+async fn send_timeout_without_wait_is_rejected() {
+    let runtime = Arc::new(ScriptedRuntime::new(
+        usize::MAX,
+        SessionState::Running,
+        "never read",
+    ));
+    let (service, _dir) = build_service(Arc::clone(&runtime), "reject-implicit").await;
+
+    let err = sigil_cli::commands::session::run(
+        &service,
+        SessionCommands::Send {
+            name: "reject-implicit".into(),
+            message: "ping".into(),
+            wait: false,
+            no_wait: false,
+            quiet: true,
+            timeout: Some(Duration::from_secs(30)),
+        },
+    )
+    .await
+    .expect_err("--timeout without --wait must error");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("--timeout") && msg.contains("--wait"),
+        "error should name both flags so the fix is obvious, got: {msg}",
+    );
+    assert_eq!(
+        runtime.send_calls(),
+        0,
+        "rejection must precede any side-effect on the runtime",
+    );
+}
+
+#[tokio::test]
+async fn send_timeout_with_explicit_no_wait_is_rejected() {
+    let runtime = Arc::new(ScriptedRuntime::new(
+        usize::MAX,
+        SessionState::Running,
+        "never read",
+    ));
+    let (service, _dir) = build_service(Arc::clone(&runtime), "reject-no-wait").await;
+
+    let err = sigil_cli::commands::session::run(
+        &service,
+        SessionCommands::Send {
+            name: "reject-no-wait".into(),
+            message: "ping".into(),
+            wait: false,
+            no_wait: true,
+            quiet: true,
+            timeout: Some(Duration::from_secs(30)),
+        },
+    )
+    .await
+    .expect_err("--timeout with --no-wait must error");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("--timeout") && msg.contains("--wait"),
+        "error should name both flags, got: {msg}",
+    );
+    assert_eq!(runtime.send_calls(), 0);
 }
