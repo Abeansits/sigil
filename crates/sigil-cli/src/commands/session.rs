@@ -394,15 +394,32 @@ where
     Ok(())
 }
 
-/// How far the compound launch flow progressed before failing. Currently
-/// unused for routing rollback because `rollback_new_worktree` is
-/// existence-aware and idempotent — we always try it on failure and let
-/// it decide what actually needs undoing. The struct stays around so
-/// future steps with asymmetric cleanup costs have a place to hook in.
+/// How far the compound launch flow progressed before failing. Routes
+/// the compensating rollback so each committed side effect is unwound
+/// in reverse and we don't clobber state we don't own.
+///
+/// The branch-owned flag is deliberately separate from the user's `-b`
+/// intent: there is a TOCTOU window between pre-flight `branch_exists`
+/// and `git worktree add -b` where another actor could create the
+/// branch, causing `git worktree add` to fail with "already exists".
+/// Deleting that branch in rollback would destroy unrelated work. We
+/// only set `new_branch_owned` after `create_with_options` *succeeds*
+/// with `create_branch = true`, which is the only case where we
+/// unambiguously own the branch. The narrow path-occupied edge case
+/// (git creates the branch, then fails on the path) therefore leaves
+/// a harmless dangling branch rather than risking deletion of a
+/// concurrently-created one.
 #[derive(Clone, Copy, Debug, Default)]
 struct LaunchProgress {
     /// The git worktree directory was successfully created.
     worktree_created: bool,
+    /// This flow created the branch and can safely force-delete it on
+    /// rollback.
+    new_branch_owned: bool,
+    /// The runtime was started (tmux session / container alive). Used
+    /// to stop it before removing the session record so we don't
+    /// orphan a live process.
+    runtime_started: bool,
 }
 
 /// Compound flow: `sigil session launch ... --worktree BRANCH [-b]`.
@@ -441,19 +458,22 @@ where
     R: SessionRuntime + LifecycleHooks,
     P: PolicyEngine,
 {
-    // --worktree + --identity would race: identity hook registration
-    // writes into the session's cwd, which we rewrite mid-flow. Punt
-    // on the combo for this PR rather than ship a half-correct path.
-    if identity_flag.is_some() {
-        bail!(
-            "--worktree combined with --identity is not supported yet; \
-             launch without --identity and reload identity after the session is up"
-        );
-    }
-
     let tool_kind = parse_tool(tool)?;
     let repo_path = PathBuf::from(path);
     let worktree_path = sigil_runtime::WorktreeManager::worktree_path(&repo_path, branch);
+
+    // --worktree + any identity source (CLI flag *or* project config)
+    // would race: identity hook registration writes into the session's
+    // cwd, which we rewrite mid-flow. Resolve the spec before any side
+    // effect so a `.sigil/config.toml` identity doesn't silently vanish
+    // — fail explicitly instead of stripping it.
+    if resolve_identity_spec(identity_flag, &repo_path)?.is_some() {
+        bail!(
+            "--worktree combined with an identity spec is not supported yet \
+             (identity set via --identity or .sigil/config.toml); launch \
+             without an identity and reload it after the session is up"
+        );
+    }
 
     // Pre-flight: branch existence must match the -b flag. Doing this
     // before any side effect keeps a surprised user from ending up
@@ -520,22 +540,34 @@ where
             Ok(())
         }
         Err(e) => {
-            // Unwind in reverse: git worktree first (highest-impact
-            // artifact on the user's filesystem), then the session
-            // record. Always invoke rollback_new_worktree — it is
-            // existence-aware and needs to run even when our own
-            // `create_with_options` returned Err, because
-            // `git worktree add -b` creates the branch before binding
-            // the path and a failed add can leave the branch behind
-            // without a worktree dir. `rollback_new_worktree` is
-            // best-effort and logs its own warnings, so we don't
-            // propagate anything from it.
-            let _ = progress; // retained for future asymmetric rollback
+            // Unwind in reverse:
+            //   1. stop the runtime if it was started, so we don't orphan
+            //      a live tmux / container after deleting the record,
+            //   2. roll back the worktree (existence-aware; invoked even
+            //      if `create_with_options` returned Err because a
+            //      partial `git worktree add` can leave the worktree
+            //      directory behind),
+            //   3. delete the branch only if *we* created it — see
+            //      `LaunchProgress::new_branch_owned` for the TOCTOU
+            //      reasoning,
+            //   4. delete the session record last.
+            // Every step is best-effort and logs its own warnings so
+            // the user's primary error surfaces cleanly.
+            if progress.runtime_started {
+                let handle = sigil_conductor::action_service::record_to_handle(&session);
+                if let Err(stop_err) = service.runtime().stop(&handle).await {
+                    tracing::warn!(
+                        session = %session.title,
+                        error = %stop_err,
+                        "failed to stop runtime during launch-with-worktree rollback",
+                    );
+                }
+            }
             sigil_runtime::WorktreeManager::rollback_new_worktree(
                 &repo_path,
                 branch,
                 &worktree_path,
-                create_branch,
+                progress.new_branch_owned,
             )
             .await;
             if let Err(cleanup_err) = service.store().delete_session(&session.id).await {
@@ -585,8 +617,10 @@ where
     }
 
     // Step 3: git op. Once this returns Ok we own the on-disk worktree
-    // dir (and the branch if `-b` was set) — record that so a later
-    // failure can unwind it.
+    // dir and, when `-b` was set, the branch as well. We flip the
+    // `new_branch_owned` flag only on Ok so a TOCTOU "branch appeared
+    // before our git ran" failure cannot drive a rollback that
+    // force-deletes an unrelated branch.
     sigil_runtime::WorktreeManager::create_with_options(
         repo_path,
         branch,
@@ -596,6 +630,9 @@ where
     .await
     .context("failed to create git worktree")?;
     progress.worktree_created = true;
+    if create_branch {
+        progress.new_branch_owned = true;
+    }
 
     // Step 4: rewrite the session path so StartSession launches the
     // runtime inside the worktree.
@@ -606,6 +643,9 @@ where
         .context("failed to update session path to worktree")?;
 
     // Step 5: start the runtime (now running at the worktree path).
+    // Flip `runtime_started` only after policy authorises AND dispatch
+    // completes, so rollback's stop call fires exactly when there is
+    // a live runtime to tear down.
     let start_request = ActionRequest::new(
         Action::StartSession {
             session_id: session.id,
@@ -617,6 +657,7 @@ where
         .await
         .context("start session")?;
     require_completed(outcome)?;
+    progress.runtime_started = true;
 
     // Step 6: optional initial message.
     if let Some(msg) = message {

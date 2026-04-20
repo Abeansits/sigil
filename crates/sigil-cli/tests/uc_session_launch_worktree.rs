@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use sigil_audit::AuditLogWriter;
-use sigil_cli::SessionCommands;
+use sigil_cli::{SessionCommands, WorktreeCommands};
 use sigil_conductor::action_service::ActionService;
 use sigil_policy::{EvaluatorConfig, NoopGrantStore, PolicyService};
 use sigil_runtime::{TmuxRuntime, WorktreeManager};
@@ -302,6 +302,126 @@ async fn launch_errors_when_branch_missing_without_create_flag() {
     );
 }
 
+#[tokio::test]
+async fn launch_rejects_worktree_combined_with_project_identity_config() {
+    // `.sigil/config.toml` declares an identity — the launch must
+    // refuse rather than silently strip the spec and start a session
+    // without its hooks. This mirrors the explicit --identity rejection
+    // but covers the config-file path.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_path).expect("mkdir");
+    init_git_repo(&repo_path).await;
+
+    let sigil_dir = repo_path.join(".sigil");
+    std::fs::create_dir_all(&sigil_dir).expect("mkdir .sigil");
+    std::fs::write(
+        sigil_dir.join("config.toml"),
+        r#"
+[identity]
+files = ["SOUL.md"]
+reload_on = ["PostCompact"]
+"#,
+    )
+    .expect("write config.toml");
+
+    let server = format!("{SERVER}-identity-reject");
+    let (service, store) = build_service(dir.path(), &server).await;
+
+    let err = sigil_cli::commands::session::run(
+        &service,
+        SessionCommands::Launch {
+            path: repo_path.to_str().expect("utf8").to_owned(),
+            title: "identity-reject".into(),
+            tool: "claude".into(),
+            group: None,
+            message: None,
+            identity: None,
+            worktree: Some("feature/anything".into()),
+            create_branch: true,
+        },
+    )
+    .await
+    .expect_err("launch should refuse --worktree when project identity is set");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("identity"),
+        "error should mention identity: {msg}",
+    );
+
+    // Nothing persisted — pre-flight rejection happens before
+    // CreateSession.
+    assert!(store.get_session_by_title("identity-reject").await.is_err());
+}
+
+#[tokio::test]
+async fn worktree_finish_discovers_launched_via_worktree_session() {
+    if !tmux_available().await {
+        eprintln!("tmux missing — skipping worktree_finish_discovers test");
+        return;
+    }
+
+    let server = format!("{SERVER}-finish-disc");
+    kill_tmux_server(&server).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_path).expect("mkdir");
+    init_git_repo(&repo_path).await;
+
+    let (service, store) = build_service(dir.path(), &server).await;
+    let title = "launch-wt-finish";
+    let branch = "feature/finish-discovery";
+
+    sigil_cli::commands::session::run(
+        &service,
+        SessionCommands::Launch {
+            path: repo_path.to_str().expect("utf8").to_owned(),
+            title: title.to_owned(),
+            tool: "claude".into(),
+            group: None,
+            message: None,
+            identity: None,
+            worktree: Some(branch.to_owned()),
+            create_branch: true,
+        },
+    )
+    .await
+    .expect("launch with worktree");
+
+    // Confirm the session was stored with the worktree path.
+    let rec = store
+        .get_session_by_title(title)
+        .await
+        .expect("session persisted");
+    let expected_wt = WorktreeManager::worktree_path(&repo_path, branch);
+    assert_eq!(rec.path, expected_wt);
+
+    // `sigil worktree finish <session>` must still be able to locate
+    // and remove the worktree even though session.path is the worktree
+    // itself, not the repo root. Before the fix, repo_root_for_session
+    // would treat `.worktrees/foo` as the repo and look for
+    // `.worktrees/foo/.worktrees`, finding nothing.
+    sigil_cli::commands::worktree::run(
+        &service,
+        WorktreeCommands::Finish {
+            name: title.to_owned(),
+            merge: false,
+        },
+    )
+    .await
+    .expect("worktree finish should locate and remove the launched worktree");
+
+    assert!(
+        !expected_wt.exists(),
+        "worktree dir should be removed by finish",
+    );
+
+    teardown(&store, title).await;
+    kill_tmux_server(&server).await;
+}
+
 // ---------------------------------------------------------------------------
 // Rollback path: git worktree fails after preflight → session record and
 // any partial filesystem state must be cleaned up.
@@ -360,24 +480,23 @@ async fn launch_rollback_when_git_worktree_fails_after_preflight() {
         "session record should be rolled back when git worktree fails",
     );
 
-    // Branch must NOT have been created on disk (git worktree add -b is
-    // all-or-nothing for the branch, but double-check because preflight
-    // ran `rev-parse` on a missing ref).
-    let branch_check = tokio::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("git rev-parse");
+    // Sabotage-file at the worktree path must be untouched — rollback
+    // is existence-aware and only runs `git worktree remove` on dirs
+    // actually created by git worktree add.
     assert!(
-        !branch_check.status.success(),
-        "no branch should exist after rolled-back launch",
+        wt_path.exists(),
+        "pre-existing sabotage file must not be clobbered by rollback",
     );
+
+    // Branch side-effect is intentionally NOT cleaned up on this path.
+    // `git worktree add -b` creates the branch before binding the path,
+    // so a failed add can leave a branch behind. The conservative
+    // rollback policy (see LaunchProgress::new_branch_owned) skips
+    // force-delete here to avoid destroying a branch created
+    // concurrently by another actor in the TOCTOU window. The test
+    // therefore asserts nothing about branch existence — either outcome
+    // is acceptable; the contract is only "no data loss of unrelated
+    // branches" + "session record rolled back".
 }
 
 // ---------------------------------------------------------------------------
