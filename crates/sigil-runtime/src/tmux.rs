@@ -42,6 +42,20 @@ fn tool_launch_command(tool: ToolKind) -> &'static str {
     }
 }
 
+/// Detect whether the pane shows a shell-level "command not found"
+/// failure after we tried to launch the tool binary. Scoped to the
+/// tail of captured output so historical scrollback doesn't produce
+/// false positives. When this fires there is no point waiting the
+/// full readiness timeout — the tool will never come up.
+fn shell_reported_tool_not_found(pane_output: &str) -> bool {
+    let tail: Vec<&str> = pane_output.lines().rev().take(10).collect();
+    tail.iter().any(|line| {
+        line.contains("command not found")
+            || line.contains(": not found")
+            || line.contains("No such file or directory")
+    })
+}
+
 /// Whether this tool kind has readiness markers the adapter can
 /// observe on the pane.
 ///
@@ -197,6 +211,17 @@ impl TmuxRuntime {
             });
             if ready {
                 return Ok(true);
+            }
+            // Short-circuit: if the shell reports the tool binary as
+            // missing/not-executable, further polling is just a hang.
+            // Bail out so the caller's best-effort send path runs
+            // promptly instead of blocking the full timeout.
+            if shell_reported_tool_not_found(&output) {
+                warn!(
+                    title = %title,
+                    "shell reported tool binary as not found; abandoning readiness wait",
+                );
+                return Ok(false);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Ok(false);
@@ -822,6 +847,49 @@ mod tests {
     fn tool_has_readiness_markers_only_for_claude() {
         assert!(tool_has_readiness_markers(ToolKind::ClaudeCode));
         assert!(!tool_has_readiness_markers(ToolKind::Codex));
+    }
+
+    /// Short-circuiting the readiness wait when the shell reports the
+    /// tool binary as missing turns a 60s hang into an instant
+    /// warn-and-proceed. Guards against the UX regression codex
+    /// flagged in PR review.
+    #[test]
+    fn shell_reported_tool_not_found_matches_common_shell_errors() {
+        assert!(shell_reported_tool_not_found(
+            "~/work % claude\nzsh: command not found: claude\n~/work %"
+        ));
+        assert!(shell_reported_tool_not_found(
+            "$ codex\nsh: codex: not found\n$"
+        ));
+        assert!(shell_reported_tool_not_found(
+            "$ /usr/bin/claude\nbash: /usr/bin/claude: No such file or directory\n$"
+        ));
+    }
+
+    #[test]
+    fn shell_reported_tool_not_found_ignores_live_tool_output() {
+        // A running Claude TUI prints plenty of text; none of these
+        // lines should false-trigger the short-circuit.
+        let pane = "\
+            ╭─────────────╮\n\
+            │  Claude Code │\n\
+            │  > ready     │\n\
+            ╰─────────────╯\n";
+        assert!(!shell_reported_tool_not_found(pane));
+    }
+
+    #[test]
+    fn shell_reported_tool_not_found_only_looks_at_the_tail() {
+        // Historical scrollback containing the phrase must not trigger
+        // after the tool has since started successfully. Padding with
+        // enough fresh lines pushes the old error off the 10-line tail.
+        use std::fmt::Write as _;
+
+        let mut pane = String::from("zsh: command not found: claude\n");
+        for i in 0..20 {
+            writeln!(pane, "live tui line {i}").expect("write to String");
+        }
+        assert!(!shell_reported_tool_not_found(&pane));
     }
 
     /// `launch` must drive the declared tool binary into the pane, not
