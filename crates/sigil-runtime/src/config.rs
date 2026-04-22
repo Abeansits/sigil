@@ -78,6 +78,15 @@ impl ToolConfig {
             },
         );
 
+        tools.insert(
+            "opencode".to_owned(),
+            ToolEntry {
+                command: "opencode".to_owned(),
+                adapter: "opencode".to_owned(),
+                skills: Vec::new(),
+            },
+        );
+
         Self { tools }
     }
 }
@@ -89,11 +98,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_has_claude_and_codex() {
+    fn default_config_has_claude_codex_and_opencode() {
         let config = ToolConfig::default_config();
         assert!(config.tools.contains_key("claude"), "missing claude entry");
         assert!(config.tools.contains_key("codex"), "missing codex entry");
-        assert_eq!(config.tools.len(), 2);
+        assert!(
+            config.tools.contains_key("opencode"),
+            "missing opencode entry"
+        );
+        assert_eq!(config.tools.len(), 3);
     }
 
     #[test]

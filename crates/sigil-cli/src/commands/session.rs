@@ -177,7 +177,8 @@ fn parse_tool(tool: &str) -> Result<ToolKind> {
     match tool.to_lowercase().as_str() {
         "claude" | "claude-code" | "claudecode" => Ok(ToolKind::ClaudeCode),
         "codex" => Ok(ToolKind::Codex),
-        _ => bail!("unknown tool '{tool}' (expected 'claude' or 'codex')"),
+        "opencode" | "open-code" => Ok(ToolKind::OpenCode),
+        _ => bail!("unknown tool '{tool}' (expected 'claude', 'codex', or 'opencode')"),
     }
 }
 
@@ -1175,6 +1176,14 @@ mod tests {
     fn parse_tool_codex() {
         assert!(matches!(parse_tool("codex"), Ok(ToolKind::Codex)));
         assert!(matches!(parse_tool("Codex"), Ok(ToolKind::Codex)));
+    }
+
+    #[test]
+    fn parse_tool_opencode_variants() {
+        assert!(matches!(parse_tool("opencode"), Ok(ToolKind::OpenCode)));
+        assert!(matches!(parse_tool("OpenCode"), Ok(ToolKind::OpenCode)));
+        assert!(matches!(parse_tool("open-code"), Ok(ToolKind::OpenCode)));
+        assert!(matches!(parse_tool("OPENCODE"), Ok(ToolKind::OpenCode)));
     }
 
     #[test]
