@@ -960,3 +960,44 @@ fn session_set_parent_refuses_self_reference() {
         "stderr should explain the self-parent rejection: {stderr}"
     );
 }
+
+#[test]
+fn json_output_stdout_stays_clean_with_info_logging() {
+    // Regression: `| jq` pipelines broke because tracing INFO lines
+    // ("loaded audit HMAC key", "applying migration") were landing on
+    // stdout alongside JSON. The other tests set RUST_LOG=off so they
+    // never caught the leak — this one explicitly turns logging on.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sigil_dir = tmp.path().join(".sigil");
+    let db_path = sigil_dir.join("sigil.db");
+
+    let out = Command::new(sigil_bin())
+        .arg("--db")
+        .arg(&db_path)
+        .args(["status", "--json"])
+        .env("HOME", tmp.path())
+        .env("SIGIL_AUDIT_KEY", "test-blackbox-key")
+        .env("RUST_LOG", "info")
+        .env_remove("SIGIL_RUNTIME")
+        .env_remove("SIGIL_DB")
+        .output()
+        .expect("failed to execute sigil binary");
+
+    assert!(
+        out.status.success(),
+        "status --json should exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_ok(),
+        "stdout must be clean JSON even with RUST_LOG=info: {stdout:?}"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("INFO") || stderr.contains("applying migration"),
+        "INFO log lines must appear on stderr, not stdout: stderr={stderr:?}"
+    );
+}
