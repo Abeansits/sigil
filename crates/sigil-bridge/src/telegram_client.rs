@@ -321,7 +321,10 @@ mod tests {
     async fn poll_error_redacts_bot_token() {
         let token = "555555:LEAKED_IF_YOU_SEE_THIS";
         let mut client = client_with_leaky_base_url(token);
-        let err = client.poll().await.expect_err("port 1 connection should fail");
+        let err = client
+            .poll()
+            .await
+            .expect_err("port 1 connection should fail");
         let msg = format!("{err}");
 
         assert!(
