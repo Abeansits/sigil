@@ -129,12 +129,16 @@ impl TelegramClient {
             .send()
             .await
             .map_err(|e| BridgeError::Platform {
-                message: format!("getUpdates request failed: {e}"),
+                // `reqwest::Error`'s Display impl embeds the request URL —
+                // and for Telegram, the URL path contains the bot token. Use
+                // `.without_url()` to strip the URL before formatting so
+                // transient network errors don't leak the secret into logs.
+                message: format!("getUpdates request failed: {}", e.without_url()),
             })?
             .json()
             .await
             .map_err(|e| BridgeError::Platform {
-                message: format!("getUpdates parse failed: {e}"),
+                message: format!("getUpdates parse failed: {}", e.without_url()),
             })?;
 
         if !resp.ok {
@@ -176,12 +180,12 @@ impl TelegramClient {
             .send()
             .await
             .map_err(|e| BridgeError::Platform {
-                message: format!("sendMessage request failed: {e}"),
+                message: format!("sendMessage request failed: {}", e.without_url()),
             })?
             .json()
             .await
             .map_err(|e| BridgeError::Platform {
-                message: format!("sendMessage parse failed: {e}"),
+                message: format!("sendMessage parse failed: {}", e.without_url()),
             })?;
 
         if !resp.ok {
@@ -291,5 +295,61 @@ mod tests {
         let public = tg_update_to_public(raw);
         let msg = public.message.expect("should have message");
         assert_eq!(msg.text, "");
+    }
+
+    /// Build a test client whose `base_url` embeds the given token and
+    /// points at a closed localhost port, so any request fails fast with
+    /// a connection error. Centralizing this keeps the redaction tests
+    /// insulated from struct-field churn.
+    fn client_with_leaky_base_url(token: &str) -> TelegramClient {
+        TelegramClient {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .expect("http client builds"),
+            // Port 1 on the loopback interface reliably refuses connections.
+            base_url: format!("http://127.0.0.1:1/bot{token}"),
+            last_update_id: 0,
+        }
+    }
+
+    /// Regression: `reqwest::Error`'s Display embeds the request URL in
+    /// its message, and Telegram puts the bot token in the URL path. Any
+    /// transient network error would therefore leak the token into logs
+    /// unless `.without_url()` is applied.
+    #[tokio::test]
+    async fn poll_error_redacts_bot_token() {
+        let token = "555555:LEAKED_IF_YOU_SEE_THIS";
+        let mut client = client_with_leaky_base_url(token);
+        let err = client
+            .poll()
+            .await
+            .expect_err("port 1 connection should fail");
+        let msg = format!("{err}");
+
+        assert!(
+            !msg.contains(token),
+            "bot token must not appear in error message: {msg}"
+        );
+        assert!(
+            !msg.contains("127.0.0.1"),
+            "URL must be stripped from error message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_error_redacts_bot_token() {
+        let token = "555555:LEAKED_IF_YOU_SEE_THIS";
+        let client = client_with_leaky_base_url(token);
+        let err = client
+            .send_message(12345, "hello")
+            .await
+            .expect_err("port 1 connection should fail");
+        let msg = format!("{err}");
+
+        assert!(
+            !msg.contains(token),
+            "bot token must not appear in error message: {msg}"
+        );
     }
 }
