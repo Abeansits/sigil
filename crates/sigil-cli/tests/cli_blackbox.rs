@@ -995,9 +995,18 @@ fn json_output_stdout_stays_clean_with_info_logging() {
         "stdout must be clean JSON even with RUST_LOG=info: {stdout:?}"
     );
 
+    // Assert a specific log marker from our own code ("loaded audit HMAC key"
+    // comes from sigil_cli::audit) is ABSENT from stdout and PRESENT on
+    // stderr. The marker text is stable because we own the string — less
+    // brittle than matching on "INFO" or tracing's format. If a future change
+    // re-routes logs back to stdout, this assertion fires unmistakably.
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("INFO") || stderr.contains("applying migration"),
-        "INFO log lines must appear on stderr, not stdout: stderr={stderr:?}"
+        !stdout.contains("loaded audit HMAC key"),
+        "log marker must NOT leak into stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("loaded audit HMAC key"),
+        "log marker must appear on stderr: {stderr:?}"
     );
 }
