@@ -569,7 +569,11 @@ mod proptest_tests {
     }
 
     fn arb_tool_kind() -> impl Strategy<Value = ToolKind> {
-        prop_oneof![Just(ToolKind::ClaudeCode), Just(ToolKind::Codex)]
+        prop_oneof![
+            Just(ToolKind::ClaudeCode),
+            Just(ToolKind::Codex),
+            Just(ToolKind::OpenCode),
+        ]
     }
 
     fn arb_http_method() -> impl Strategy<Value = HttpMethod> {

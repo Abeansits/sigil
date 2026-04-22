@@ -38,6 +38,7 @@ fn tool_launch_command(tool: ToolKind) -> &'static str {
     match tool {
         ToolKind::ClaudeCode => "claude",
         ToolKind::Codex => "codex",
+        ToolKind::OpenCode => "opencode",
         _ => "claude",
     }
 }
@@ -837,16 +838,18 @@ mod tests {
     fn tool_launch_command_maps_known_tools() {
         assert_eq!(tool_launch_command(ToolKind::ClaudeCode), "claude");
         assert_eq!(tool_launch_command(ToolKind::Codex), "codex");
+        assert_eq!(tool_launch_command(ToolKind::OpenCode), "opencode");
     }
 
-    /// Readiness polling must be gated by tool — otherwise `Codex`
-    /// sessions stall the full `TOOL_READY_TIMEOUT` on every launch
-    /// because their prompt doesn't match the Claude-specific regex
-    /// in `ClaudeCodeAdapter`.
+    /// Readiness polling must be gated by tool — otherwise `Codex` /
+    /// `OpenCode` sessions stall the full `TOOL_READY_TIMEOUT` on every
+    /// launch because their prompt doesn't match the Claude-specific
+    /// regex in `ClaudeCodeAdapter`.
     #[test]
     fn tool_has_readiness_markers_only_for_claude() {
         assert!(tool_has_readiness_markers(ToolKind::ClaudeCode));
         assert!(!tool_has_readiness_markers(ToolKind::Codex));
+        assert!(!tool_has_readiness_markers(ToolKind::OpenCode));
     }
 
     /// Short-circuiting the readiness wait when the shell reports the

@@ -12,6 +12,7 @@ use crate::trust::ExecutionClass;
 pub enum ToolKind {
     ClaudeCode,
     Codex,
+    OpenCode,
 }
 
 /// Observable state of an agent session.
