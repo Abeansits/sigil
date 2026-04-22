@@ -297,16 +297,12 @@ mod tests {
         assert_eq!(msg.text, "");
     }
 
-    /// Regression: `reqwest::Error`'s Display embeds the request URL in
-    /// its message, and Telegram puts the bot token in the URL path. Any
-    /// transient network error would therefore leak the token into logs
-    /// unless `.without_url()` is applied. Construct a client pointed at
-    /// a closed local port so `poll()` fails immediately, then assert the
-    /// secret never appears in the error string.
-    #[tokio::test]
-    async fn poll_error_redacts_bot_token() {
-        let token = "555555:LEAKED_IF_YOU_SEE_THIS";
-        let client_result = TelegramClient {
+    /// Build a test client whose `base_url` embeds the given token and
+    /// points at a closed localhost port, so any request fails fast with
+    /// a connection error. Centralizing this keeps the redaction tests
+    /// insulated from struct-field churn.
+    fn client_with_leaky_base_url(token: &str) -> TelegramClient {
+        TelegramClient {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
@@ -314,8 +310,17 @@ mod tests {
             // Port 1 on the loopback interface reliably refuses connections.
             base_url: format!("http://127.0.0.1:1/bot{token}"),
             last_update_id: 0,
-        };
-        let mut client = client_result;
+        }
+    }
+
+    /// Regression: `reqwest::Error`'s Display embeds the request URL in
+    /// its message, and Telegram puts the bot token in the URL path. Any
+    /// transient network error would therefore leak the token into logs
+    /// unless `.without_url()` is applied.
+    #[tokio::test]
+    async fn poll_error_redacts_bot_token() {
+        let token = "555555:LEAKED_IF_YOU_SEE_THIS";
+        let mut client = client_with_leaky_base_url(token);
         let err = client.poll().await.expect_err("port 1 connection should fail");
         let msg = format!("{err}");
 
@@ -332,14 +337,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_error_redacts_bot_token() {
         let token = "555555:LEAKED_IF_YOU_SEE_THIS";
-        let client = TelegramClient {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .build()
-                .expect("http client builds"),
-            base_url: format!("http://127.0.0.1:1/bot{token}"),
-            last_update_id: 0,
-        };
+        let client = client_with_leaky_base_url(token);
         let err = client
             .send_message(12345, "hello")
             .await
