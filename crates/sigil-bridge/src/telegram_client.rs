@@ -19,10 +19,29 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL_TIMEOUT_SECS: u64 = 30;
 
 /// Telegram Bot API long-polling client.
+///
+/// `base_url` embeds the bot token in its path
+/// (`https://api.telegram.org/bot<TOKEN>`), so the type intentionally
+/// does **not** derive `Debug`. See the manual impl below for the
+/// redacted representation.
 pub struct TelegramClient {
     http: reqwest::Client,
     base_url: String,
     last_update_id: i64,
+}
+
+/// Manually redact `base_url` so `format!("{client:?}")` and
+/// `tracing::debug!(?client)` cannot leak the bot token. One
+/// accidentally-added `#[derive(Debug)]` would otherwise dump the
+/// secret into every structured log.
+impl std::fmt::Debug for TelegramClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramClient")
+            .field("http", &"reqwest::Client")
+            .field("base_url", &"<redacted>")
+            .field("last_update_id", &self.last_update_id)
+            .finish()
+    }
 }
 
 // ── Telegram API response types (private) ─────────────────────────
@@ -128,18 +147,10 @@ impl TelegramClient {
             .get(&url)
             .send()
             .await
-            .map_err(|e| BridgeError::Platform {
-                // `reqwest::Error`'s Display impl embeds the request URL —
-                // and for Telegram, the URL path contains the bot token. Use
-                // `.without_url()` to strip the URL before formatting so
-                // transient network errors don't leak the secret into logs.
-                message: format!("getUpdates request failed: {}", e.without_url()),
-            })?
+            .map_err(|e| BridgeError::from_reqwest("getUpdates request failed", e))?
             .json()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("getUpdates parse failed: {}", e.without_url()),
-            })?;
+            .map_err(|e| BridgeError::from_reqwest("getUpdates parse failed", e))?;
 
         if !resp.ok {
             let desc = resp.description.unwrap_or_default();
@@ -179,14 +190,10 @@ impl TelegramClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("sendMessage request failed: {}", e.without_url()),
-            })?
+            .map_err(|e| BridgeError::from_reqwest("sendMessage request failed", e))?
             .json()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("sendMessage parse failed: {}", e.without_url()),
-            })?;
+            .map_err(|e| BridgeError::from_reqwest("sendMessage parse failed", e))?;
 
         if !resp.ok {
             let desc = resp.description.unwrap_or_default();
@@ -334,6 +341,29 @@ mod tests {
         assert!(
             !msg.contains("127.0.0.1"),
             "URL must be stripped from error message: {msg}"
+        );
+    }
+
+    /// Regression: the bot token lives in `TelegramClient.base_url`.
+    /// Any `Debug` output (via `tracing::debug!(?client)`, panic
+    /// messages, or `dbg!(&client)`) must not reveal it.
+    #[test]
+    fn debug_impl_redacts_bot_token() {
+        let token = "555555:LEAKED_IF_YOU_SEE_THIS";
+        let client = TelegramClient::new(&SecretString::from(token)).expect("client builds");
+        let debug_repr = format!("{client:?}");
+
+        assert!(
+            !debug_repr.contains(token),
+            "Debug impl must redact bot token: {debug_repr}"
+        );
+        assert!(
+            !debug_repr.contains("api.telegram.org"),
+            "Debug impl must redact full base URL: {debug_repr}"
+        );
+        assert!(
+            debug_repr.contains("<redacted>"),
+            "Debug impl should explicitly mark the redacted field: {debug_repr}"
         );
     }
 
