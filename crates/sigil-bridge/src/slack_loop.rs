@@ -22,6 +22,25 @@ use crate::slack_client::SlackClient;
 /// Delay before reconnecting after a WebSocket error or disconnect.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
+/// Sentinel used in place of a WSS URL in formatted error messages.
+const WSS_URL_REDACTED: &str = "<wss-url-redacted>";
+
+/// Scrub a WSS URL out of a formatted error string.
+///
+/// The Socket Mode WSS URL returned by `apps.connections.open`
+/// carries an ephemeral, per-connection ticket in its query string,
+/// which is a credential for this connection. Several
+/// `tungstenite::Error` variants (`Url`, `Http`, some wrapped `Io`
+/// messages) can surface that URL into Display, so any formatted
+/// error message that originated from a connect attempt must have
+/// the URL stripped before it reaches logs. Typical connect errors
+/// (refused / TLS) don't currently embed it, but new tungstenite
+/// versions could — this is defence-in-depth, symmetrical with the
+/// `BridgeError::from_reqwest` primitive for reqwest errors.
+fn redact_wss_url(err_msg: &str, wss_url: &str) -> String {
+    err_msg.replace(wss_url, WSS_URL_REDACTED)
+}
+
 // ── Socket Mode envelope types (private) ─────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -108,7 +127,8 @@ impl SlackBridge {
             let ws_stream = match tokio_tungstenite::connect_async(&wss_url).await {
                 Ok((stream, _response)) => stream,
                 Err(e) => {
-                    tracing::warn!(error = %e, "slack bridge: websocket connect failed, retrying");
+                    let err_msg = redact_wss_url(&format!("{e}"), &wss_url);
+                    tracing::warn!(error = %err_msg, "slack bridge: websocket connect failed, retrying");
                     tokio::select! {
                         () = tokio::time::sleep(RECONNECT_DELAY) => {}
                         () = cancel.cancelled() => {
@@ -366,6 +386,36 @@ mod tests {
         assert_eq!(envelope.envelope_type, "slash_commands");
         // Non-events_api envelopes are acknowledged but not processed
         // as message events.
+    }
+
+    /// Regression: if a `tungstenite::Error`'s Display includes the
+    /// WSS URL, the Socket Mode ticket in the URL's query string
+    /// would leak into logs via the connect-failure tracing site.
+    /// `redact_wss_url` must strip the URL literal regardless of
+    /// where in the error message it appears.
+    #[test]
+    fn redact_wss_url_scrubs_embedded_ticket() {
+        let wss_url = "wss://wss-primary.slack.com/link/?ticket=LEAKED_TICKET&app_id=A123";
+        // Simulated tungstenite error message shapes (Io and Url
+        // variants are the most likely to embed the URL).
+        let io_shape = format!("IO error: failed to connect to {wss_url}: refused");
+        let url_shape = format!("URL error parsing {wss_url}: invalid port");
+
+        for err_msg in [&io_shape, &url_shape] {
+            let scrubbed = redact_wss_url(err_msg, wss_url);
+            assert!(
+                !scrubbed.contains("LEAKED_TICKET"),
+                "ticket must be stripped: {scrubbed}"
+            );
+            assert!(
+                !scrubbed.contains("wss-primary.slack.com"),
+                "WSS host must be stripped: {scrubbed}"
+            );
+            assert!(
+                scrubbed.contains(WSS_URL_REDACTED),
+                "sentinel should be present: {scrubbed}"
+            );
+        }
     }
 
     #[test]
