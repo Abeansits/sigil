@@ -12,6 +12,9 @@ use crate::error::BridgeError;
 /// HTTP timeout for Slack API calls.
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Default base URL for the Slack Web API.
+const DEFAULT_BASE_URL: &str = "https://slack.com/api";
+
 /// Slack API client.
 ///
 /// Holds two tokens:
@@ -23,6 +26,11 @@ pub struct SlackClient {
     http: reqwest::Client,
     bot_token: SecretString,
     app_token: SecretString,
+    /// Base URL for Slack Web API. Always `DEFAULT_BASE_URL` in
+    /// production; overridable in tests via struct-literal construction
+    /// so regression tests can point at a closed port and assert the
+    /// URL is stripped from formatted errors.
+    base_url: String,
 }
 
 // ── Slack API response types (private) ───────────────────────────
@@ -55,6 +63,7 @@ impl SlackClient {
             http,
             bot_token: bot_token.clone(),
             app_token: app_token.clone(),
+            base_url: DEFAULT_BASE_URL.into(),
         })
     }
 
@@ -70,21 +79,17 @@ impl SlackClient {
     pub async fn open_connection(&self) -> Result<String, BridgeError> {
         let resp: SlackApiResponse = self
             .http
-            .post("https://slack.com/api/apps.connections.open")
+            .post(format!("{}/apps.connections.open", self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.app_token.expose_secret()),
             )
             .send()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("apps.connections.open request failed: {e}"),
-            })?
+            .map_err(|e| BridgeError::from_reqwest("apps.connections.open request failed", e))?
             .json()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("apps.connections.open parse failed: {e}"),
-            })?;
+            .map_err(|e| BridgeError::from_reqwest("apps.connections.open parse failed", e))?;
 
         if !resp.ok {
             let detail = resp.error.unwrap_or_default();
@@ -114,7 +119,7 @@ impl SlackClient {
 
         let resp: SlackApiResponse = self
             .http
-            .post("https://slack.com/api/chat.postMessage")
+            .post(format!("{}/chat.postMessage", self.base_url))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.bot_token.expose_secret()),
@@ -122,14 +127,10 @@ impl SlackClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("chat.postMessage request failed: {e}"),
-            })?
+            .map_err(|e| BridgeError::from_reqwest("chat.postMessage request failed", e))?
             .json()
             .await
-            .map_err(|e| BridgeError::Platform {
-                message: format!("chat.postMessage parse failed: {e}"),
-            })?;
+            .map_err(|e| BridgeError::from_reqwest("chat.postMessage parse failed", e))?;
 
         if !resp.ok {
             let detail = resp.error.unwrap_or_default();
@@ -144,6 +145,8 @@ impl SlackClient {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -152,5 +155,69 @@ mod tests {
         let app = SecretString::from("xapp-test-app-token");
         let client = SlackClient::new(&bot, &app);
         assert!(client.is_ok());
+    }
+
+    /// Build a test client whose `base_url` embeds a fake secret and
+    /// points at a closed localhost port, so any request fails fast
+    /// with a connection error. Mirrors the Telegram regression
+    /// pattern from PR #65 so the two clients stay symmetric.
+    fn client_with_leaky_base_url(secret_marker: &str) -> SlackClient {
+        SlackClient {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .expect("http client builds"),
+            bot_token: SecretString::from("xoxb-unused-in-this-test"),
+            app_token: SecretString::from("xapp-unused-in-this-test"),
+            // Port 1 on the loopback interface reliably refuses
+            // connections. The query-string marker stands in for any
+            // URL-embedded credential and must not survive to the
+            // formatted error.
+            base_url: format!("http://127.0.0.1:1/leak?token={secret_marker}"),
+        }
+    }
+
+    /// Regression: `reqwest::Error`'s Display embeds the request URL.
+    /// `apps.connections.open` must route through
+    /// `BridgeError::from_reqwest` so a URL-embedded secret cannot
+    /// leak into logs.
+    #[tokio::test]
+    async fn open_connection_error_redacts_url() {
+        let secret = "LEAKED_IF_YOU_SEE_THIS";
+        let client = client_with_leaky_base_url(secret);
+        let err = client
+            .open_connection()
+            .await
+            .expect_err("port 1 connection should fail");
+        let msg = format!("{err}");
+
+        assert!(
+            !msg.contains(secret),
+            "URL-embedded secret must not appear in error message: {msg}"
+        );
+        assert!(
+            !msg.contains("127.0.0.1"),
+            "URL must be stripped from error message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_error_redacts_url() {
+        let secret = "LEAKED_IF_YOU_SEE_THIS";
+        let client = client_with_leaky_base_url(secret);
+        let err = client
+            .send_message("C12345", "hello")
+            .await
+            .expect_err("port 1 connection should fail");
+        let msg = format!("{err}");
+
+        assert!(
+            !msg.contains(secret),
+            "URL-embedded secret must not appear in error message: {msg}"
+        );
+        assert!(
+            !msg.contains("127.0.0.1"),
+            "URL must be stripped from error message: {msg}"
+        );
     }
 }
