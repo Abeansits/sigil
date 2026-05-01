@@ -235,14 +235,16 @@ sigil audit <subcommand>
 Implemented subcommands:
 
 - `list [--json]`
-- `show <name> [--json]`
-- `create <path> --title <title> [--tool claude|codex] [--group <group>]`
-- `launch <path> --title <title> [--tool claude|codex] [--group <group>] [--message <msg>]`
+- `show <name> [--json]` (renders `parent_title` when set)
+- `create <path> --title <title> [--tool claude|codex|opencode] [--group <group>]`
+- `launch <path> --title <title> [--tool claude|codex|opencode] [--group <group>] [--message <msg>] [--worktree <branch> [-b]]`
 - `start <name>`
 - `stop <name>`
 - `restart <name>`
-- `send <name> <message> [--wait] [-q|--quiet]`
+- `send <name> <message> [--wait | --no-wait] [--timeout <secs>] [-q|--quiet]`
 - `output <name> [-q|--quiet]`
+- `set-group <name> <group>`
+- `set-parent <name> <parent>`
 - `remove <name>`
 
 ### `worktree`

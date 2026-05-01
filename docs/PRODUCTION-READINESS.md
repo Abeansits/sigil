@@ -35,33 +35,27 @@ The migration retires one piece of infra (agent-deck — Rust+tmux session orche
 
 ## What's missing for daily-driver swap
 
-### 1. Group + parent-session CLI exposure (small)
-Group and parent fields are **stored** on session records but not **managed** through dedicated commands. Vigil uses `-g <group>` on `agent-deck launch` daily to route heartbeat-linked children correctly. Parity needed:
-- `sigil session set-group <id> <group>`
-- `sigil session set-parent <id> <parent-id>` (or expose via `session launch --parent`)
-- Group/parent visible in `session show --json`
+### 1. Group + parent-session CLI exposure — **shipped (PR #61)**
+`sigil session set-group <id> <group>` and `sigil session set-parent <id> <parent-id>` land the management commands; `parent_title` is rendered in `session show --json`. Closes the heartbeat-linkage gap.
 
-**Why this matters:** without parent linkage, child completion events don't route to the right conductor. Vigil's heartbeat protocol breaks silently.
-
-### 2. Policy-driven auto-response (medium)
+### 2. Policy-driven auto-response (medium) — **still open**
 Conductor loop has heartbeat + reconciliation + bridge-style command handling. Not yet exposed: **multi-conductor management** (one conductor per profile/channel) and **policy-driven auto-response** (rules for when conductor auto-replies vs escalates). Today this logic lives in Vigil's prompt (OPS.md § auto-response policy). Moving it into Sigil makes it testable.
 
 Likely shape: a `sigil conductor policy` subcommand + a YAML/TOML rule file. Lower priority — Vigil's prompt-layer policy works fine for now.
 
-### 3. Heartbeat durability (cron → launchd)
+### 3. Heartbeat durability (cron → launchd) — **still open**
 Current heartbeat uses Claude Code's `CronCreate` — **session-only, 7-day auto-expire**. When the conductor session restarts (or after 7 days), heartbeat stops. `durable: true` doesn't actually persist to disk (known bug).
 
 Need: launchd plist(s) firing a shell script → `sigil session send conductor-ops "<prompt>"`. Separately queued under Infra. Prerequisite for Phase D (migrating Vigil itself).
 
-### 4. `session send` semantics parity (small)
-Vigil uses `agent-deck session send <id> "msg" --wait -q --timeout 300s` daily. Need to confirm Sigil's `--wait`/`--timeout` behavior matches: single-call send + wait + raw output.
+### 4. `session send` semantics parity — **shipped (PRs #62, #63)**
+`sigil session send <id> "msg" --wait -q --timeout 300s` matches the agent-deck shape. `--timeout` rejected without `--wait` (one-line guard, PR #63).
 
-### 5. `session launch` worktree ergonomics (small)
-agent-deck: `launch <path> -t "Title" -c claude --worktree feature/branch -b` — one call creates session + worktree + branch.
-Sigil: separate `sigil worktree create` + `sigil session launch`. Two-step workflow. Not broken, just slower. Worth a compound flag.
+### 5. `session launch` worktree ergonomics — **shipped (PR #60)**
+`sigil session launch <path> --title "Title" --tool claude --worktree feature/branch -b` runs the compound launch + worktree + branch flow in one call.
 
-### 6. Error-message clarity under tool misbehavior
-When `claude` / `codex` / `opencode` children misbehave (prompt stuck in textbox, stale "Stream idle timeout", tmux capture breaks), agent-deck has known-quantity failure modes after years of wear. Sigil under real load may produce less-actionable error shapes. Only surfaces through Phase A friction log.
+### 6. Error-message clarity under tool misbehavior — **partially mitigated**
+TmuxRuntime input-delivery reliability fixed (PR #59) and `--json` stdout stays pure (PR #64). Live error-shape regressions only surface under real load — keep the Phase A friction log running through Phase D as the primary signal.
 
 ## What's explicitly **not** needed
 
