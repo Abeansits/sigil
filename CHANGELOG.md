@@ -44,10 +44,20 @@ Theme: harden the ingest edge, close daily-driver-blocker gaps for Vigil, and un
 - `cargo-deny` added for supply-chain security auditing ([#16]).
 - All of the new ingest-edge sanitization (see *Added*) is security-relevant: nonce wrap, injection-pattern scan, and the `SanitizationRequirement` policy gate harden the path from external content into agent context.
 
+### Potentially Breaking
+
+Pre-1.0, but downstream consumers should know:
+
+- Session title uniqueness is now enforced at the store layer ([#36]). Calls that previously created duplicate titles will now fail; reuse a title only after removing the prior session, or rename it via `session set-group` / `set-parent` workflows.
+- `ActionService` routing ([#41]) shifts the error and authorization surface for worktree, identity, status, and bridge T0 reads — observable shapes can change for callers that depended on the pre-`ActionService` error variants.
+- `TmuxRuntime` now auto-launches the tool and submits input only after the tool is ready ([#59]). Callers that previously raced "send before tool ready" will see different timing; the surfaced behavior is more reliable but not bit-identical.
+- `sigil session send --timeout <secs>` is now rejected when `--wait` is absent ([#63]). Scripts that combined `--timeout` with `--no-wait` (or with neither flag) must add `--wait` or drop `--timeout`.
+
 ### Notes
 
 - 11-crate workspace (added `sigil-content`); workspace structure described in `docs/ARCHITECTURE.md`.
-- `docs/FEATURE-AUDIT.md`, `docs/PRODUCTION-READINESS.md`, and `README.md` refreshed to match shipped reality.
+- `docs/FEATURE-AUDIT.md`, `docs/PRODUCTION-READINESS.md`, and `README.md` refreshed to match shipped reality. Phase A and Phase B of the Vigil → Sigil migration are marked DONE in `docs/PRODUCTION-READINESS.md` (2026-05-01); Phase C is gated on a one-step Telegram-token rotation.
+- Verified 2026-05-01: `cargo test --workspace` (991 passed, 0 failed, 0 ignored), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check --all`, `./target/release/sigil --version` reports `sigil 0.2.0`.
 
 [#16]: https://github.com/Abeansits/sigil/pull/16
 [#17]: https://github.com/Abeansits/sigil/pull/17

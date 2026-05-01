@@ -392,7 +392,7 @@ The `SanitizeReport` (defined in `sigil-core::content`) carries three independen
 
 ## Verification Snapshot
 
-The workspace currently registers 586 tests across unit and integration suites.
+The workspace currently registers 991 tests across unit and integration suites (verified 2026-05-01 via `cargo test --workspace`).
 
 Recommended verification commands:
 
