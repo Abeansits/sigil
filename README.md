@@ -123,9 +123,12 @@ Every session action is logged to an HMAC-chained audit trail:
 ```bash
 # Verify the audit log chain integrity
 sigil audit verify
+```
 
-# Optionally set a custom HMAC key (defaults to a dev key)
-export SIGIL_AUDIT_KEY="your-secret-key"
+The HMAC key is resolved in priority order: `SIGIL_AUDIT_KEY` env var, then the macOS Keychain entry `sigil/audit-hmac`, then an opt-in dev fallback. Provision the Keychain entry once with:
+
+```bash
+security add-generic-password -s sigil/audit-hmac -a $USER -w "$(openssl rand -hex 32)"
 ```
 
 ### Container Sessions
@@ -180,7 +183,7 @@ The workspace is a 10-crate DAG with `sigil-core` at the bottom and no internal 
 
 ```bash
 cargo build --release     # current macOS arm64 build: 5.7M
-cargo test               # 586 tests (includes proptest property-based tests)
+cargo test               # extensive test suite (includes proptest property-based tests)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -188,12 +191,14 @@ Rust 1.85+ is required. The release profile uses thin LTO and `codegen-units = 1
 
 ## Status
 
-The workspace has working session lifecycle commands, status reporting, worktree management, tmux and container runtime backends, domain-filtered container networking, MCP-based policy-mediated agent IPC, tmux reconciliation, audit logging with CLI verification, policy evaluation with grant-store integration and fatigue guarding, bridge CLI commands for Slack and Telegram, an agent container image, and property-based tests across core invariants.
+The workspace has working session lifecycle commands (including `session set-group`, `session set-parent`, `session launch --worktree`, and `session send --timeout`/`--no-wait` for daily-driver parity), status reporting, worktree management, tmux and container runtime backends, domain-filtered container networking, MCP-based policy-mediated agent IPC, tmux reconciliation, the `ActionService` unified policy pipeline, Keychain-backed HMAC audit logging with CLI verification, policy evaluation with grant-store integration and fatigue guarding, the Phase 1 external-content sanitization pipeline (plain / HTML / markdown / JSON with nonce-delimited provenance wrap and injection-pattern scan, wired through the conductor), bridge CLI commands for Slack and Telegram with token redaction, an agent container image, support for `claude`, `codex`, and `opencode` tools, and property-based tests across core invariants.
 
 Remaining gaps:
 
-- audit key management still uses env var or dev fallback, not Keychain-backed storage
-- content sanitization pipeline for fetched web/media inputs is not implemented
+- network read/write policy split at runtime
+- multi-conductor management and policy-driven auto-response are not exposed
+- heartbeat durability via launchd (vs session-only cron) — tracked in `docs/PRODUCTION-READINESS.md`
+- profiles, TUI, web UI, SSH remotes, and cost tracking are out of scope for now
 
 ## Docs
 
