@@ -94,7 +94,7 @@ All four friction items shipped:
 **Not a re-verification — already proven.** `sigil bridge telegram` round-trip was validated in a previous session (see `state.json` → `tools.sigil: "Telegram loop proven"`). The bridge was booted out 2026-04-18 alongside agent-deck's `bridge.py` during the pre-migration freeze, not because it was broken.
 
 - Create launchd plist for `sigil bridge telegram` (same pattern as #5 heartbeat plists at `~/.agent-deck/conductor/launchd/`)
-- Use keychain-stored token (`security find-generic-password -a vigil -s telegram-bot-token`)
+- Use keychain-stored token (`security find-generic-password -s sigil-telegram-token -a "$USER"` — matches what `scripts/install-service.sh` reads at launch)
 - Route messages to conductor-ops session (parent linkage working after PR #61)
 - Smoke-test one real back-and-forth, then leave the plist running
 - **Code is ready — the only remaining gate is a 1-step human action: rotate the Telegram bot token (the previous value circulated in cleartext error logs prior to PR #65) and seat the new value in the keychain entry above.**
