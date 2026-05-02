@@ -47,7 +47,7 @@
 | Technique | Defense | Status |
 |-----------|---------|--------|
 | HTML comments | Stripped in `sigil-content` HTML pipeline | ✅ Implemented (conditional on sanitizer-configured server) |
-| HTML hidden elements (`display:none`, `visibility:hidden\|collapse`, `opacity:0`, `hidden`/`aria-hidden`) | Stripped in `sigil-content` HTML pipeline (positional off-screen CSS not detected) | ✅ Implemented (conditional) for the listed property/attribute set |
+| HTML hidden elements (`display:none`, `visibility:hidden\|collapse`, `opacity:0`, `hidden` attribute) | Stripped in `sigil-content` HTML pipeline (positional off-screen CSS and `aria-hidden` not detected) | ✅ Implemented (conditional) for the listed property/attribute set |
 | HTML `aria-label` injection | `aria-label` attribute stripped (along with `title` and non-image `alt`); generic `aria-*` is not enumerated | ✅ Implemented (conditional, scoped to `aria-label`) |
 | JSON Unicode escapes | Text-layer Unicode normalize runs after JSON decode (zero-width, tag chars, directional overrides, variation selectors, control chars) | ✅ Implemented (conditional) |
 | Markdown comments | Stripped in `sigil-content` Markdown pipeline | ✅ Implemented (conditional on sanitizer-configured server) |
