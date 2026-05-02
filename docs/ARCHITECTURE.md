@@ -403,6 +403,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Relationship To Other Docs
 
-- [`docs/REWRITE-PROPOSAL.md`](/Users/zebas/Developer/sigil/docs/REWRITE-PROPOSAL.md) now tracks proposal items that have and have not landed.
-- [`docs/SECURITY-PLAN.md`](/Users/zebas/Developer/sigil/docs/SECURITY-PLAN.md) tracks current defenses plus remaining hardening work.
-- [`docs/USE-CASES.md`](/Users/zebas/Developer/sigil/docs/USE-CASES.md) mirrors the current CLI command surface.
+- [`docs/SECURITY-PLAN.md`](SECURITY-PLAN.md) tracks current defenses plus remaining hardening work.
+- [`docs/USE-CASES.md`](USE-CASES.md) mirrors the current CLI command surface.
+- [`docs/archived/`](archived/) holds pre-v0.2.0 proposals and architecture reviews for historical context.

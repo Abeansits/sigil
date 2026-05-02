@@ -29,9 +29,10 @@
 #      for that mis-calibration — every other HTML token (`<script>`,
 #      `<iframe>`, `<meta>`, `<body>`, close tags, attribute strings…)
 #      is preserved verbatim so the INJ/ENC/REP/MIX/FMT-001 Path-B/WRP
-#      pattern surface is unchanged. See
-#      `drafts/benign-corpus-candidates.md` §"PR3.5 — refetch note" for
-#      the PR3.6 calibration follow-up recommendation.
+#      pattern surface is unchanged. The PR3.6 follow-up that demoted
+#      FMT-001 to audit-only metadata removed the only place this strip
+#      mattered for the FP-rate gate; the workaround is retained for
+#      reproducibility of the existing benign-corpus captures.
 #   5. Collapse runs of whitespace. Write the result to stdout.
 #
 # The output shape matches the existing benign fixtures (a01, a05, a06

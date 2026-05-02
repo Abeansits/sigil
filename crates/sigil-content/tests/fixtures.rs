@@ -7,8 +7,9 @@
 //!   stops tripping its rule (or trips it at a weaker severity) fails
 //!   the test, so severity demotions require a reviewable diff.
 //! - `benign/` — real-world posts that legitimately discuss the attack
-//!   surface the scanner flags. See `drafts/benign-corpus-candidates.md`
-//!   on `main` for provenance. Drives the false-positive gate:
+//!   surface the scanner flags. Provenance for each fixture lives in
+//!   the per-file front-matter under `fixtures/benign/`. Drives the
+//!   false-positive gate:
 //!
 //!     * `measured_hits <= baseline_hits + 1` at `risk_score >=
 //!       RISK_GATE_THRESHOLD` (absolute delta, not percentage — see

@@ -314,8 +314,6 @@ The dreamer/consolidator should:
 - be idempotent
 - prefer "update state" over "append another note"
 
-This matches the lesson already captured in [docs/archived/NANOWILLIAMS-LEARNINGS.md](../archived/NANOWILLIAMS-LEARNINGS.md).
-
 ### Treat Shared Memory as a Security Boundary
 
 Shared memory is not just a UX feature. It is a privileged surface.

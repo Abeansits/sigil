@@ -205,14 +205,14 @@ Remaining gaps:
 
 - network read/write policy split at runtime
 - multi-conductor management and policy-driven auto-response are not exposed
-- heartbeat durability via launchd (vs session-only cron) — tracked in `docs/PRODUCTION-READINESS.md`
+- heartbeat durability via launchd (vs session-only cron)
 - profiles, TUI, web UI, SSH remotes, and cost tracking are out of scope for now
 
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md) — workspace structure, dependency graph, runtime flow, container runtime
 - [Feature Audit](docs/FEATURE-AUDIT.md) — current status of the implemented feature set
-- [Rewrite Proposal](docs/REWRITE-PROPOSAL.md) — proposal history plus what has and has not landed
+- [Archived design history](docs/archived/) — pre-v0.2.0 proposals and architecture reviews kept for context
 - [Security Plan](docs/SECURITY-PLAN.md) — current security controls and remaining hardening work
 - [Use Cases](docs/USE-CASES.md) — CLI and library walkthroughs aligned to the current command surface
 - [Agent Traps Defense](docs/AGENT-TRAPS-DEFENSE.md) — threat-model notes for current and planned defenses
