@@ -131,7 +131,7 @@ The `sigil-cli/tests/` directory contains cross-crate integration tests:
 
 - `audit_chain.rs` — HMAC chain integrity, tamper detection, recovery after restart
 - `audit_integration.rs` — full write-verify cycle
-- `policy_flow.rs` — end-to-end policy evaluation (Paul/Sebastian/Agent scenarios)
+- `policy_flow.rs` — end-to-end policy evaluation across CLI, Slack, and agent origin scenarios
 - `session_lifecycle.rs` — create, state changes, deletion
 - `path_validation.rs` — traversal prevention across edge cases
 - `bridge_normalization.rs` — input sanitization through the bridge path
@@ -360,6 +360,6 @@ The adversary model is sophisticated: prompt injection via fetched content, Unic
 
 ### Additional Suggestions
 
-**[Refactor]** — `resolve_principal()` in `sigil-core/src/principal.rs` hardcodes defaults (Sebastian with T3Plus from CLI). This should live in config/sigil-store so it's actually configurable per-deployment.
+**[Refactor]** — `resolve_principal()` in `sigil-core/src/principal.rs` hardcodes defaults (the local CLI principal at T3Plus). This should live in config/sigil-store so it's actually configurable per-deployment.
 
 **[Architecture]** — Consider making the Conductor's bridge command handling go through `ActionRequest` too. The `/status`, `/sessions`, `/send` commands currently use string parsing. If these were regular Actions, the authority path would be unified and auditable.

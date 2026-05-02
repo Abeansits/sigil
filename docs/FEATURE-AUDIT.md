@@ -3,7 +3,7 @@
 **Status:** current implementation audit  
 **Date:** 2026-05-01
 
-This file records how the original agent-deck feature inventory maps onto the current `sigil` workspace. It is intentionally status-oriented now; the earlier “keep / drop / modify” worksheet is no longer the best description of the code that actually exists.
+This file records the current feature surface of the `sigil` workspace and what is intentionally out of scope. It is status-oriented, not historical.
 
 ## Summary
 

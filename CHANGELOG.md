@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [0.2.0] - 2026-05-01
 
-Theme: harden the ingest edge, close daily-driver-blocker gaps for Vigil, and unify policy routing.
+Theme: harden the ingest edge, close daily-driver gaps in the CLI surface, and unify policy routing.
 
 ### Added
 

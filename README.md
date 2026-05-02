@@ -211,7 +211,7 @@ Remaining gaps:
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md) — workspace structure, dependency graph, runtime flow, container runtime
-- [Feature Audit](docs/FEATURE-AUDIT.md) — current status of the feature set carried over from agent-deck
+- [Feature Audit](docs/FEATURE-AUDIT.md) — current status of the implemented feature set
 - [Rewrite Proposal](docs/REWRITE-PROPOSAL.md) — proposal history plus what has and has not landed
 - [Security Plan](docs/SECURITY-PLAN.md) — current security controls and remaining hardening work
 - [Use Cases](docs/USE-CASES.md) — CLI and library walkthroughs aligned to the current command surface

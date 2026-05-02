@@ -23,7 +23,7 @@
 
 **Action:** Verify strip-invisible against combining diacritics. Evaluate whether emoji substitution and capitalization encoding are realistic threats for our use case (likely low risk — these are subtle and low-bandwidth).
 
-### Image — RELEVANT (Paul's image gen, social media research)
+### Image — RELEVANT (downstream tools that fetch images, social media research)
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
@@ -57,7 +57,7 @@
 
 **Action:** Add to WebFetch output sanitizer: strip HTML comments, hidden elements, aria-labels, and Markdown comments. Normalize JSON Unicode escapes.
 
-### Audio — LOWER PRIORITY (Paul's video workflow uses ElevenLabs audio)
+### Audio — LOWER PRIORITY (trusted TTS provider, e.g. ElevenLabs)
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
