@@ -349,7 +349,7 @@ This is a well-architected system with a clear security model, clean crate bound
 
 ### Build Order Progress
 
-The original proposal build-order checklist has been overtaken by the current workspace. For maintained landed-vs-backlog tracking, see [`docs/archived/REWRITE-PROPOSAL.md`](REWRITE-PROPOSAL.md) instead of this review note.
+The original proposal build-order checklist has been overtaken by the current workspace. For maintained landed-vs-backlog tracking, see [`docs/archived/REWRITE-PROPOSAL.md`](../REWRITE-PROPOSAL.md) instead of this review note.
 
 ### Architectural Philosophy
 
