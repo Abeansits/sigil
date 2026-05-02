@@ -123,9 +123,12 @@ Every session action is logged to an HMAC-chained audit trail:
 ```bash
 # Verify the audit log chain integrity
 sigil audit verify
+```
 
-# Optionally set a custom HMAC key (defaults to a dev key)
-export SIGIL_AUDIT_KEY="your-secret-key"
+The HMAC key is resolved in priority order: `SIGIL_AUDIT_KEY` env var, then the macOS Keychain entry under service `sigil` / account `audit-hmac`, then an opt-in dev fallback. Provision the Keychain entry once with:
+
+```bash
+security add-generic-password -s sigil -a audit-hmac -w "$(openssl rand -hex 32)"
 ```
 
 ### Container Sessions
@@ -156,13 +159,14 @@ sigil-bridge      Telegram/Slack parsing, identity resolution, routing, live bri
 sigil-memory      Operational memory — episode logging, mechanical consolidation
 sigil-mcp         Host-side MCP server for policy-mediated agent actions
 sigil-runtime     tmux + container runtimes, domain proxy, MCP socket, tool adapters, worktree manager
+sigil-content     External-content sanitization pipeline (plain/HTML/markdown/JSON, nonce wrap, injection-pattern scan)
 sigil-store       SQLite persistence for sessions and approval grants
 sigil-policy      Trust-zone checks, tier evaluation, normalization, fatigue guard, grant model
 sigil-audit       HMAC-chained JSONL audit writer and verifier
 sigil-core        Action protocol, origins, principals, trust model, trait ports
 ```
 
-The workspace is a 10-crate DAG with `sigil-core` at the bottom and no internal dependency cycles.
+The workspace is an 11-crate DAG with `sigil-core` at the bottom and no internal dependency cycles.
 
 ## Design
 
@@ -180,7 +184,7 @@ The workspace is a 10-crate DAG with `sigil-core` at the bottom and no internal 
 
 ```bash
 cargo build --release     # current macOS arm64 build: 5.7M
-cargo test               # 586 tests (includes proptest property-based tests)
+cargo test               # extensive test suite (includes proptest property-based tests)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -188,12 +192,21 @@ Rust 1.85+ is required. The release profile uses thin LTO and `codegen-units = 1
 
 ## Status
 
-The workspace has working session lifecycle commands, status reporting, worktree management, tmux and container runtime backends, domain-filtered container networking, MCP-based policy-mediated agent IPC, tmux reconciliation, audit logging with CLI verification, policy evaluation with grant-store integration and fatigue guarding, bridge CLI commands for Slack and Telegram, an agent container image, and property-based tests across core invariants.
+What works today:
+
+- **Sessions:** create, launch, start, stop, restart, send, output, remove, list, show, set-group, set-parent. `session launch --worktree BRANCH [-b]` runs the compound launch + worktree flow in one call. `session send` supports `--wait` (default), `--no-wait`, and `--timeout`.
+- **Runtimes:** tmux (default) and Apple Containers (behind the `container` feature). Container sessions get domain-filtered networking via `DomainProxy` and policy-mediated agent IPC via MCP over Unix sockets.
+- **Tools:** `claude`, `codex`, and `opencode` adapters.
+- **Policy:** typed `ActionRequest` protocol, trust-zone evaluation, tier ceilings, approval grants (SQLite), `FatigueGuard`, and the `ActionService` unified pipeline that routes worktree / identity / status / bridge T0 reads through one policy entrypoint.
+- **Security:** HMAC-chained JSONL audit log with `sigil audit verify`, Keychain-backed audit key resolution, `cargo-deny` supply-chain audit, Telegram bot token redaction in error logs, and the Phase 1 external-content sanitization pipeline (`sigil-content`) that runs on bytes fetched from the web / bridges / MCP tools before they reach an agent's context — format-aware strip, text-layer normalize, injection-pattern scan, nonce-delimited provenance wrap, and a `SanitizationRequirement` policy gate.
+- **Ops:** Slack and Telegram bridges with parsing, identity resolution, rate limiting, and live loops; persistent launchd service for the conductor + Telegram bridge; `sigil run` for inline commands; property-based tests across core invariants.
 
 Remaining gaps:
 
-- audit key management still uses env var or dev fallback, not Keychain-backed storage
-- content sanitization pipeline for fetched web/media inputs is not implemented
+- network read/write policy split at runtime
+- multi-conductor management and policy-driven auto-response are not exposed
+- heartbeat durability via launchd (vs session-only cron) — tracked in `docs/PRODUCTION-READINESS.md`
+- profiles, TUI, web UI, SSH remotes, and cost tracking are out of scope for now
 
 ## Docs
 
