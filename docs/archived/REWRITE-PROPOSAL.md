@@ -1,11 +1,22 @@
 # Rewrite Proposal Status
 
+> ⚠️ **Archived 2026-05-02. Historical snapshot, stale status claims.**
+> This file was last refreshed 2026-04-07 against an 8-crate workspace.
+> Since then six of the eight items it called "Not Landed Yet" have
+> shipped (container runtime, host MCP server, feature-gated container
+> support, Keychain-backed audit key, content provenance tagging,
+> WebFetch / fetched-content sanitization). The "Partially Landed"
+> sections are also out of date — `GrantStore` is wired, the bridge
+> CLI exists, `FatigueGuard` is wired into the approval flow. Preserved
+> as historical context for how the workspace was framed pre-v0.2.0.
+> For the current system, read [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 **Status:** proposal history with current landing status  
 **Date:** 2026-04-07
 
 This file no longer tries to restate the whole architecture in speculative form. Instead, it records which parts of the original rewrite proposal have landed in the current workspace and which parts are still backlog.
 
-For the current implementation, see [`docs/ARCHITECTURE.md`](/Users/zebas/Developer/sigil/docs/ARCHITECTURE.md).
+For the current implementation, see [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 ## Landed From The Proposal
 

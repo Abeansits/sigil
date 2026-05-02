@@ -1,5 +1,17 @@
 # Architecture Review — sigil
 
+> ⚠️ **Archived 2026-05-02. Historical snapshot, stale status claims.**
+> This review was written 2026-04-07 against an 8-crate workspace.
+> Since then the workspace has grown to 11 crates, the container
+> backend, the host-side MCP server, the Phase 1 content sanitization
+> pipeline, the Keychain-backed audit key, and the `ActionService`
+> unified policy pipeline have all shipped. Several "Critical" /
+> "Moderate" gaps in this review (`GrantStore` not wired, conductor
+> hardcoded to `TmuxRuntime`, `strip_ansi` regex fallback, prefix-match
+> grants) have been addressed in PRs #36–#46. The architectural
+> critique itself is preserved as historical context. For the current
+> system, read [`docs/ARCHITECTURE.md`](../../ARCHITECTURE.md).
+
 > Experimental review snapshot. Helpful for discussion, but not a source-of-truth replacement for `CLAUDE.md`, `README.md`, or `docs/ARCHITECTURE.md`.
 
 **Date:** 2026-04-07
