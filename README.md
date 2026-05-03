@@ -1,5 +1,9 @@
 # sigil
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success.svg)
+
 <!-- ASCII art rendered with: figlet -f slant sigil -->
 ```
          _       _ __
