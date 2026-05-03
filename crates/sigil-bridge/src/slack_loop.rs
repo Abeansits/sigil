@@ -59,10 +59,7 @@ struct EventPayload {
     channel: Option<String>,
     text: Option<String>,
     ts: Option<String>,
-    /// Slack sets `bot_id` on messages authored by bots/integrations.
     bot_id: Option<String>,
-    /// Slack sets `subtype: "bot_message"` for legacy/incoming-webhook
-    /// posts that lack a `bot_id` on the outer event.
     subtype: Option<String>,
 }
 

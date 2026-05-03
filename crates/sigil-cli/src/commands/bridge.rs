@@ -4,6 +4,7 @@
 //! forwards them to [`Conductor::handle_message`] for command dispatch
 //! and session forwarding.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -29,62 +30,48 @@ const REPLY_CHANNEL_CAPACITY: usize = 64;
 /// Hard cap on egress reply size in bytes.
 ///
 /// Matches Telegram's per-message limit (4096 chars). Slack tolerates
-/// more, but long replies are a stego/exfil amplifier. See
-/// `docs/design/bridge-routing.md` § Egress sanitization.
+/// more, but long replies are a stego/exfil amplifier.
 const REPLY_MAX_BYTES: usize = 4096;
 
 /// Outcome of running the egress filter on a conductor response.
 struct SanitizedReply {
-    /// Reply ready to ship to the bridge — already normalized,
-    /// truncated to `REPLY_MAX_BYTES`, and stamped with the
-    /// `… [truncated, N bytes]` suffix when truncation happened.
+    /// Reply ready to ship to the bridge — normalized and, when
+    /// oversize, truncated with the `… [truncated, N bytes]` suffix.
     text: String,
-    /// True when the post-`normalize_text` byte count exceeded
-    /// `REPLY_MAX_BYTES`.
-    truncated: bool,
-    /// Byte count of the post-`normalize_text` reply, *before*
-    /// truncation. Recorded in the audit event so an investigator
-    /// can detect oversize replies even though only the truncated
-    /// prefix reached the user.
+    /// Byte count of the normalized reply *before* truncation. The
+    /// audit event records this so an investigator sees the original
+    /// size even when only the truncated prefix reached the user.
     normalized_len: usize,
 }
 
-/// Apply the egress filter from `docs/design/bridge-routing.md`
-/// § Egress sanitization to a conductor response.
-///
-/// Two-step process:
-/// 1. `sigil_policy::normalize::normalize_text` strips invisible Unicode (zero-width,
-///    directional overrides, tag chars, variation selectors, control chars) that an
-///    upstream agent could have inserted as a covert channel.
-/// 2. If the normalized reply exceeds `REPLY_MAX_BYTES` it is truncated at a UTF-8 char
-///    boundary and stamped with a `… [truncated, N bytes]` suffix so the recipient sees
-///    the truncation.
+impl SanitizedReply {
+    fn truncated(&self) -> bool {
+        self.normalized_len > REPLY_MAX_BYTES
+    }
+}
+
+/// Strip invisible Unicode and cap a conductor response at
+/// [`REPLY_MAX_BYTES`] before it leaves the control-plane.
 fn sanitize_reply(response: &str) -> SanitizedReply {
-    let normalized = sigil_policy::normalize::normalize_text(response).cleaned;
+    let mut normalized = sigil_policy::normalize::normalize_text(response).cleaned;
     let normalized_len = normalized.len();
 
     if normalized_len <= REPLY_MAX_BYTES {
         return SanitizedReply {
             text: normalized,
-            truncated: false,
             normalized_len,
         };
     }
 
-    // Truncate at the largest char boundary that fits within the
-    // cap so the resulting String is always valid UTF-8.
     let mut cutoff = REPLY_MAX_BYTES;
     while cutoff > 0 && !normalized.is_char_boundary(cutoff) {
         cutoff -= 1;
     }
-    let text = format!(
-        "{prefix} … [truncated, {normalized_len} bytes]",
-        prefix = &normalized[..cutoff],
-    );
+    normalized.truncate(cutoff);
+    let _ = write!(normalized, " … [truncated, {normalized_len} bytes]");
 
     SanitizedReply {
-        text,
-        truncated: true,
+        text: normalized,
         normalized_len,
     }
 }
@@ -114,39 +101,35 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
         let reply_context = message.reply_context.clone();
         let response = self.conductor.handle_message(&message).await?;
 
-        let SanitizedReply {
-            text: reply_text,
-            truncated,
-            normalized_len,
-        } = sanitize_reply(&response);
+        let reply = sanitize_reply(&response);
+        let truncated = reply.truncated();
+        let reply_len = reply.text.len();
 
-        info!(
-            len = reply_text.len(),
-            truncated, "conductor response sanitized"
-        );
+        info!(len = reply_len, truncated, "conductor response sanitized");
 
-        let reply_len = reply_text.len();
-        if let Err(e) = self.reply_tx.send((reply_context, reply_text)).await {
+        if let Err(e) = self.reply_tx.send((reply_context, reply.text)).await {
             tracing::warn!(error = %e, "failed to enqueue bridge reply");
         }
 
+        let origin_summary = format!("{:?}", message.origin);
+        let target_session = message.target_session;
         log_event(
             &self.audit,
             &format!("bridge.message_routed: {} chars", message.text.len()),
-            &format!("{:?}", message.origin),
+            &origin_summary,
             PolicyDecision::Allow,
-            message.target_session,
+            target_session,
         )
         .await;
-
         log_event(
             &self.audit,
             &format!(
-                "bridge.reply_sent: {reply_len} bytes (truncated={truncated}, original={normalized_len})"
+                "bridge.reply_sent: {reply_len} bytes (truncated={truncated}, original={})",
+                reply.normalized_len,
             ),
-            &format!("{:?}", message.origin),
+            &origin_summary,
             PolicyDecision::Allow,
-            message.target_session,
+            target_session,
         )
         .await;
 
@@ -461,11 +444,10 @@ mod tests {
 
     #[test]
     fn sanitize_reply_strips_zero_width_and_directional_overrides() {
-        // Mix of U+200B (zero-width space) and U+202E (RTL override).
         let input = "hel\u{200B}lo\u{202E}world";
         let out = sanitize_reply(input);
         assert_eq!(out.text, "helloworld");
-        assert!(!out.truncated);
+        assert!(!out.truncated());
         assert_eq!(out.normalized_len, "helloworld".len());
     }
 
@@ -474,17 +456,16 @@ mod tests {
         let input = "small reply";
         let out = sanitize_reply(input);
         assert_eq!(out.text, input);
-        assert!(!out.truncated);
+        assert!(!out.truncated());
         assert_eq!(out.normalized_len, input.len());
     }
 
     #[test]
     fn sanitize_reply_truncates_oversize_with_suffix_and_byte_count() {
-        // Build a reply that is comfortably over the cap.
         let original = "x".repeat(REPLY_MAX_BYTES + 200);
         let out = sanitize_reply(&original);
 
-        assert!(out.truncated);
+        assert!(out.truncated());
         assert_eq!(out.normalized_len, original.len());
         let suffix = format!("{TRUNCATION_PREFIX}{} bytes]", original.len());
         assert!(
@@ -492,34 +473,24 @@ mod tests {
             "expected truncation suffix, got: {}",
             &out.text[out.text.len().saturating_sub(80)..]
         );
-
-        // The truncated prefix must fit within the cap.
         let prefix_len = out.text.len() - suffix.len();
         assert!(prefix_len <= REPLY_MAX_BYTES);
     }
 
     #[test]
     fn sanitize_reply_truncates_at_char_boundary_for_multibyte() {
-        // Build a reply whose REPLY_MAX_BYTES-th byte falls inside a
-        // multibyte char. Each "é" is 2 bytes in UTF-8.
-        let chunk = "é"; // 2 bytes
-        let count = REPLY_MAX_BYTES + 50; // far past the cap
-        let original: String = chunk.repeat(count);
-
-        // Sanity: REPLY_MAX_BYTES is even, "é" is 2 bytes — but the
-        // truncation logic must survive the case in general, so
-        // simulate an odd cap by building a string with a 3-byte char
-        // straddling the boundary too.
+        // 3-byte chars (€ = U+20AC) straddle the cap regardless of the
+        // cap's parity, so the boundary walk must back up at least 1
+        // byte. Validates the resulting String is still valid UTF-8.
+        let original = "€".repeat(REPLY_MAX_BYTES);
         let out = sanitize_reply(&original);
-        assert!(out.truncated);
-        // Result is always valid UTF-8.
+        assert!(out.truncated());
         assert!(std::str::from_utf8(out.text.as_bytes()).is_ok());
     }
 
     // ── ConductorSink::accept ────────────────────────────────────────
 
-    /// Tiny in-process runtime that succeeds on every call. Used to
-    /// stand a `Conductor` up without dragging in tmux or containers.
+    /// Stands a `Conductor` up without tmux or container backends.
     #[derive(Default)]
     struct NoopRuntime;
 
@@ -609,8 +580,6 @@ mod tests {
         let audit_path = dir.path().join("audit.jsonl");
         let (sink, mut reply_rx) = build_sink(&audit_path).await;
 
-        // `/help` returns the conductor help string — comfortably
-        // under the 4 KiB cap.
         sink.accept(slack_dm("/help")).await.expect("accept ok");
 
         let (_ctx, reply) = reply_rx.recv().await.expect("reply enqueued");
@@ -629,26 +598,5 @@ mod tests {
             .find(|s| s.starts_with("bridge.reply_sent:"))
             .expect("reply_sent present");
         assert!(reply_summary.contains("truncated=false"));
-    }
-
-    #[tokio::test]
-    async fn accept_strips_zero_width_chars_in_response_path() {
-        // We can't easily make the conductor return a ZW-bearing
-        // string, but the response path runs `sanitize_reply`, which
-        // is unit-tested above. Here we verify the sink still emits a
-        // reply and the audit event for a normal response.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let audit_path = dir.path().join("audit.jsonl");
-        let (sink, mut reply_rx) = build_sink(&audit_path).await;
-
-        sink.accept(slack_dm("/help")).await.expect("accept ok");
-        let (_ctx, reply) = reply_rx.recv().await.expect("reply enqueued");
-
-        // Confirm normalization invariants on the emitted reply.
-        let renorm = sigil_policy::normalize::normalize_text(&reply);
-        assert_eq!(
-            renorm.stripped_count, 0,
-            "emitted reply must already be normalized"
-        );
     }
 }

@@ -30,8 +30,7 @@ pub struct TelegramMessage {
     pub date: i64,
     /// Mirrors `message.from.is_bot` from the Telegram Bot API
     /// (<https://core.telegram.org/bots/api#user>). Bot-authored
-    /// messages are dropped at ingest to prevent self-loop (R3 in
-    /// `docs/design/bridge-routing.md`).
+    /// messages are dropped at ingest to prevent self-loop.
     pub from_is_bot: bool,
 }
 
@@ -119,7 +118,7 @@ mod tests {
                 chat_id: 42,
                 text: text.into(),
                 date: 1_700_000_000,
-                from_is_bot: false,
+                ..TelegramMessage::default()
             }),
         }
     }
@@ -187,10 +186,9 @@ mod tests {
 
     #[test]
     fn from_is_bot_drops_message_before_allowlist() {
+        // Unknown sender + is_bot: bot filter swallows the update;
+        // allowlist resolution would have raised `UnknownSender`.
         let config = default_config();
-        // Unknown sender + is_bot: filter must drop before
-        // allowlist resolution would otherwise raise
-        // `UnknownSender`.
         let mut update = make_update("UNKNOWN_BOT_USER", "loop bait");
         if let Some(m) = update.message.as_mut() {
             m.from_is_bot = true;

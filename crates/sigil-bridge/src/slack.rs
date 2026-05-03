@@ -21,13 +21,10 @@ pub struct SlackEvent {
     pub channel: String,
     pub text: String,
     pub ts: String,
-    /// `bot_id` from the Slack event payload. When set, the message
-    /// was authored by a bot and must be dropped to prevent self-loop
-    /// (R3 in `docs/design/bridge-routing.md`).
+    /// Slack attribution to a bot/integration; drop to prevent self-loop.
     pub bot_id: Option<String>,
-    /// `subtype` from the Slack event payload. Slack uses
-    /// `"bot_message"` for messages posted by integrations even when
-    /// `bot_id` is absent on the outer event.
+    /// Slack uses `"bot_message"` for legacy/incoming-webhook posts that
+    /// lack an outer `bot_id`.
     pub subtype: Option<String>,
 }
 
@@ -120,8 +117,7 @@ mod tests {
             channel: "C_GENERAL".into(),
             text: text.into(),
             ts: "1700000000.000100".into(),
-            bot_id: None,
-            subtype: None,
+            ..SlackEvent::default()
         }
     }
 
@@ -184,10 +180,9 @@ mod tests {
 
     #[test]
     fn bot_id_drops_event_before_allowlist() {
+        // Unknown sender + bot_id: the bot filter swallows the event;
+        // allowlist resolution would have raised `UnknownSender`.
         let config = default_config();
-        // Unknown sender + bot_id set: if the bot filter fires first
-        // the event is dropped; if allowlist runs first we'd see
-        // `UnknownSender`. `Ok(None)` proves ordering.
         let mut event = make_event("UNKNOWN_BOT_USER", "loop bait", "message");
         event.bot_id = Some("B0123456".into());
         let result = process_slack_event(&event, &config).expect("filter should swallow");
@@ -205,8 +200,7 @@ mod tests {
 
     #[test]
     fn other_subtypes_still_processed() {
-        // Subtypes such as `me_message` are user-authored and must
-        // continue to flow.
+        // `me_message` is user-authored and must continue to flow.
         let config = default_config();
         let mut event = make_event("PAUL_SLACK_ID", "hello", "message");
         event.subtype = Some("me_message".into());
