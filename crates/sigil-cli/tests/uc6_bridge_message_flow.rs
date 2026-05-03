@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use assert_matches::assert_matches;
-
 use sigil_bridge::error::BridgeError;
 use sigil_bridge::identity::{AllowedUser, IdentityConfig, default_config, resolve_identity};
 use sigil_bridge::rate_limit::RateLimiter;
@@ -41,6 +40,7 @@ fn tg_update(user_id: &str, text: &str) -> TelegramUpdate {
             chat_id: 42,
             text: text.into(),
             date: 1_700_000_000,
+            from_is_bot: false,
         }),
     }
 }
@@ -52,6 +52,8 @@ fn slack_event(user: &str, text: &str) -> SlackEvent {
         channel: "C_GENERAL".into(),
         text: text.into(),
         ts: "1700000000.000100".into(),
+        bot_id: None,
+        subtype: None,
     }
 }
 
@@ -446,6 +448,8 @@ fn slack_non_message_events_filtered() {
             channel: "C_GEN".into(),
             text: "some text".into(),
             ts: "1700000000.000100".into(),
+            bot_id: None,
+            subtype: None,
         };
         let result = process_slack_event(&event, &config).expect("should not error");
         assert!(result.is_none(), "{event_type} should be filtered out");

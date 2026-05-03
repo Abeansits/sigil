@@ -39,13 +39,12 @@ impl TelegramBridge {
     ///
     /// Continuously:
     /// 1. Polls Telegram for new updates and routes them to the sink.
-    /// 2. Receives conductor responses from `reply_rx` and sends them
-    ///    back to the originating Telegram chat.
+    /// 2. Receives conductor responses from `reply_rx` and sends them back to the
+    ///    originating Telegram chat.
     ///
-    /// - On poll errors: logs a warning, sleeps [`RETRY_DELAY`], and
-    ///   retries.
-    /// - On processing errors (unknown sender, oversized message):
-    ///   logs a warning and continues to the next update.
+    /// - On poll errors: logs a warning, sleeps [`RETRY_DELAY`], and retries.
+    /// - On processing errors (unknown sender, oversized message): logs a warning and
+    ///   continues to the next update.
     /// - On sink errors: logs a warning and continues.
     ///
     /// # Errors
@@ -150,10 +149,9 @@ mod tests {
     use sigil_core::traits::MessageSink;
     use tokio::sync::Mutex;
 
+    use super::*;
     use crate::identity::default_config;
     use crate::telegram::TelegramMessage;
-
-    use super::*;
 
     /// A sink that records accepted messages.
     struct RecordingSink {
@@ -199,6 +197,7 @@ mod tests {
                 chat_id: 42,
                 text: "hello".into(),
                 date: 1_700_000_000,
+                from_is_bot: false,
             }),
         }];
 
@@ -226,6 +225,7 @@ mod tests {
                 chat_id: 42,
                 text: "sneaky".into(),
                 date: 1_700_000_000,
+                from_is_bot: false,
             }),
         }];
 

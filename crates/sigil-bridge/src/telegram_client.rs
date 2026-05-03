@@ -71,6 +71,13 @@ struct TgMessage {
 #[derive(Deserialize)]
 struct TgUser {
     id: i64,
+    /// Mirrors the Telegram Bot API `User.is_bot` field
+    /// (<https://core.telegram.org/bots/api#user>). Present on every
+    /// `User` object the API returns, but tolerated as missing here
+    /// so we don't reject otherwise-valid updates if a future API
+    /// shape change drops it.
+    #[serde(default)]
+    is_bot: bool,
 }
 
 #[derive(Deserialize)]
@@ -83,7 +90,10 @@ struct TgChat {
 /// Convert a raw Telegram update into the public type.
 fn tg_update_to_public(raw: TgUpdate) -> TelegramUpdate {
     let message = raw.message.map(|m| {
-        let from_user_id = m.from.map(|u| u.id.to_string()).unwrap_or_default();
+        let (from_user_id, from_is_bot) = match m.from {
+            Some(u) => (u.id.to_string(), u.is_bot),
+            None => (String::new(), false),
+        };
 
         TelegramMessage {
             message_id: m.message_id,
@@ -91,6 +101,7 @@ fn tg_update_to_public(raw: TgUpdate) -> TelegramUpdate {
             chat_id: m.chat.id,
             text: m.text.unwrap_or_default(),
             date: m.date,
+            from_is_bot,
         }
     });
 
@@ -241,7 +252,10 @@ mod tests {
             update_id: 42,
             message: Some(TgMessage {
                 message_id: 100,
-                from: Some(TgUser { id: 999 }),
+                from: Some(TgUser {
+                    id: 999,
+                    is_bot: false,
+                }),
                 chat: TgChat { id: 555 },
                 text: Some("hello".into()),
                 date: 1_700_000_000,
@@ -287,12 +301,56 @@ mod tests {
     }
 
     #[test]
+    fn tg_update_decodes_is_bot_flag() {
+        // Confirms `User.is_bot` round-trips from the Bot API JSON
+        // shape into the public `from_is_bot` field.
+        let json = r#"{
+            "update_id": 7,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 42, "is_bot": true},
+                "chat": {"id": 1},
+                "text": "loop bait",
+                "date": 0
+            }
+        }"#;
+        let raw: TgUpdate = serde_json::from_str(json).expect("should parse");
+        let public = tg_update_to_public(raw);
+        let msg = public.message.expect("should have message");
+        assert!(msg.from_is_bot);
+    }
+
+    #[test]
+    fn tg_update_missing_is_bot_defaults_to_false() {
+        // Defence-in-depth: if the API stops emitting `is_bot` we
+        // must not panic — we treat it as a human sender and fall
+        // through to the existing allowlist gate.
+        let json = r#"{
+            "update_id": 7,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 42},
+                "chat": {"id": 1},
+                "text": "hi",
+                "date": 0
+            }
+        }"#;
+        let raw: TgUpdate = serde_json::from_str(json).expect("should parse");
+        let public = tg_update_to_public(raw);
+        let msg = public.message.expect("should have message");
+        assert!(!msg.from_is_bot);
+    }
+
+    #[test]
     fn tg_update_without_text_defaults_to_empty() {
         let raw = TgUpdate {
             update_id: 1,
             message: Some(TgMessage {
                 message_id: 1,
-                from: Some(TgUser { id: 1 }),
+                from: Some(TgUser {
+                    id: 1,
+                    is_bot: false,
+                }),
                 chat: TgChat { id: 1 },
                 text: None,
                 date: 0,
