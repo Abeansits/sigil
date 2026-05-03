@@ -405,4 +405,3 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - [`docs/SECURITY-PLAN.md`](SECURITY-PLAN.md) tracks current defenses plus remaining hardening work.
 - [`docs/USE-CASES.md`](USE-CASES.md) mirrors the current CLI command surface.
-- [`docs/archived/`](archived/) holds pre-v0.2.0 proposals and architecture reviews for historical context.

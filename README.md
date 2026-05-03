@@ -212,7 +212,6 @@ Remaining gaps:
 
 - [Architecture](docs/ARCHITECTURE.md) — workspace structure, dependency graph, runtime flow, container runtime
 - [Feature Audit](docs/FEATURE-AUDIT.md) — current status of the implemented feature set
-- [Archived design history](docs/archived/) — pre-v0.2.0 proposals and architecture reviews kept for context
 - [Security Plan](docs/SECURITY-PLAN.md) — current security controls and remaining hardening work
 - [Use Cases](docs/USE-CASES.md) — CLI and library walkthroughs aligned to the current command surface
 - [Agent Traps Defense](docs/AGENT-TRAPS-DEFENSE.md) — threat-model notes for current and planned defenses
