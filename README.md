@@ -4,14 +4,12 @@
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 ![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success.svg)
 
-<!-- ASCII art rendered with: figlet -f slant sigil -->
 ```
-         _       _ __
-   _____(_)___ _(_) /
-  / ___/ / __ `/ / /
- (__  ) / /_/ / / /
-/____/_/\__, /_/_/
-       /____/
+░░      ░░░        ░░░      ░░░        ░░  ░░░░░░░
+▒  ▒▒▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒▒▒
+▓▓      ▓▓▓▓▓▓  ▓▓▓▓▓  ▓▓▓   ▓▓▓▓▓  ▓▓▓▓▓  ▓▓▓▓▓▓▓
+███████  █████  █████  ████  █████  █████  ███████
+██      ███        ███      ███        ██        █
 ```
 
 AI coding agents with shell access can read your secrets, run arbitrary commands, or exfiltrate via any path you've left open. Sigil runs Claude Code, Codex, and OpenCode behind a typed authority protocol, policy-checked trust zones, and an HMAC-chained audit log you can verify with `sigil audit verify` — with optional Apple-Container sandboxes when you want hard isolation.
