@@ -1,12 +1,13 @@
 # sigil
 
+<!-- ASCII art rendered with: figlet -f slant sigil -->
 ```
-     _       _ _
- ___(_) __ _(_) |
-/ __| |/ _` | | |
-\__ \ | (_| | | |
-|___/_|\__, |_|_|
-       |___/
+         _       _ __
+   _____(_)___ _(_) /
+  / ___/ / __ `/ / /
+ (__  ) / /_/ / / /
+/____/_/\__, /_/_/
+       /____/
 ```
 
 A security-first Rust workspace for managing AI agent sessions. It replaces the older Go + Python split with one typed, testable workspace built around policy checks, audit logging, and sandboxed orchestration via tmux or Apple Containers.
