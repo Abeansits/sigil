@@ -1,15 +1,18 @@
 # sigil
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success.svg)
+
 ```
-     _       _ _
- ___(_) __ _(_) |
-/ __| |/ _` | | |
-\__ \ | (_| | | |
-|___/_|\__, |_|_|
-       |___/
+░░      ░░░        ░░░      ░░░        ░░  ░░░░░░░
+▒  ▒▒▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒▒▒
+▓▓      ▓▓▓▓▓▓  ▓▓▓▓▓  ▓▓▓   ▓▓▓▓▓  ▓▓▓▓▓  ▓▓▓▓▓▓▓
+███████  █████  █████  ████  █████  █████  ███████
+██      ███        ███      ███        ██        █
 ```
 
-A security-first Rust workspace for managing AI agent sessions. It replaces the older Go + Python split with one typed, testable workspace built around policy checks, audit logging, and sandboxed orchestration via tmux or Apple Containers.
+AI coding agents with shell access can read your secrets, run arbitrary commands, or exfiltrate via any path you've left open. Sigil runs Claude Code, Codex, and OpenCode behind a typed authority protocol, policy-checked trust zones, and an HMAC-chained audit log you can verify with `sigil audit verify` — with optional Apple-Container sandboxes when you want hard isolation.
 
 ## The Name
 
