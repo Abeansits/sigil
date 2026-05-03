@@ -1,7 +1,7 @@
 # Memory System — Design Document
 
 **Date:** April 11, 2026
-**Status:** Draft — awaiting Sebastian's review
+**Status:** Phase 1 implemented (PRs #25–#38). Retained as design rationale.
 **Problem:** The agent memory layer works (flat files are the right abstraction), but behavioral discipline is missing. Episodes aren't captured, learnings aren't consolidated, and nothing fires between identity reload and session end. The storage is fine. The lifecycle is broken.
 
 ## Guiding Principles

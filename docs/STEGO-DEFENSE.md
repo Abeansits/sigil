@@ -2,7 +2,7 @@
 
 **Source:** ST3GG toolkit (Pliny/elder-plinius) — 112 techniques, ALLSIGHT detection engine
 **Context:** Maps ST3GG's attack surface against sigil defenses. Companion to [`AGENT-TRAPS-DEFENSE.md`](/Users/zebas/Developer/sigil/docs/AGENT-TRAPS-DEFENSE.md).
-**Status note (2026-04-07):** This file describes the desired hardening pipeline. Today the workspace implements text normalization and tmux-output ANSI stripping, but it does not yet implement the web/media sanitization and sandbox-network controls discussed below.
+**Status note (2026-05-02):** This file describes the full hardening pipeline. The workspace implements text normalization, tmux-output ANSI stripping, Phase 1 web sanitization (HTML/Markdown/JSON/plain in `sigil-content`, fired by the conductor's `dispatch_fetch_external_content` and the MCP `fetch_url` tool when constructed with a sanitizer + fetcher; default fetcher is `DisabledFetcher`), and host-side sandbox network controls (`DomainProxy` for Apple Containers in `Filtered` mode, behind the `container` feature). Media (image/audio/PDF) sanitization is the remaining Phase 2 work. Status flags below use the convention: ✅ Implemented • ✅ Implemented (conditional, gated on container filtered mode or sanitizer-configured server) • ⚠️ Partial • ❌ Not defended at our layer.
 
 ---
 
@@ -23,7 +23,7 @@
 
 **Action:** Verify strip-invisible against combining diacritics. Evaluate whether emoji substitution and capitalization encoding are realistic threats for our use case (likely low risk — these are subtle and low-bandwidth).
 
-### Image — RELEVANT (Paul's image gen, social media research)
+### Image — RELEVANT (downstream tools that fetch images, social media research)
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
@@ -46,18 +46,18 @@
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
-| HTML comments | Strip in WebFetch sanitizer | 📋 Planned |
-| HTML hidden elements (display:none, off-screen) | Strip in WebFetch sanitizer | 📋 Planned |
-| HTML aria-label injection | Strip metadata attributes | ⚠️ Need to add |
-| JSON Unicode escapes | Normalize Unicode in JSON parsing | ⚠️ Need to add |
-| Markdown comments | Strip `<!-- -->` in Markdown content | ⚠️ Need to add |
+| HTML comments | Stripped in `sigil-content` HTML pipeline | ✅ Implemented (conditional on sanitizer-configured server) |
+| HTML hidden elements (`display:none`, `visibility:hidden\|collapse`, `opacity:0`, `hidden` attribute) | Stripped in `sigil-content` HTML pipeline (positional off-screen CSS and `aria-hidden` not detected) | ✅ Implemented (conditional) for the listed property/attribute set |
+| HTML `aria-label` injection | `aria-label` attribute stripped (along with `title` and non-image `alt`); generic `aria-*` is not enumerated | ✅ Implemented (conditional, scoped to `aria-label`) |
+| JSON Unicode escapes | Text-layer Unicode normalize runs after JSON decode (zero-width, tag chars, directional overrides, variation selectors, control chars) | ✅ Implemented (conditional) |
+| Markdown comments | Stripped in `sigil-content` Markdown pipeline | ✅ Implemented (conditional on sanitizer-configured server) |
 | XML CDATA/processing instructions | Strip if processing XML | ⚠️ Low priority |
 | CSV/YAML/TOML/INI comment encoding | Low risk — agents rarely parse raw config from untrusted sources | ✅ Low priority |
 | PDF streams/XMP | Low current priority — PDF processing is rare in this workspace | ✅ Low priority |
 
 **Action:** Add to WebFetch output sanitizer: strip HTML comments, hidden elements, aria-labels, and Markdown comments. Normalize JSON Unicode escapes.
 
-### Audio — LOWER PRIORITY (Paul's video workflow uses ElevenLabs audio)
+### Audio — LOWER PRIORITY (trusted TTS provider, e.g. ElevenLabs)
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
@@ -71,12 +71,12 @@
 
 | Technique | Defense | Status |
 |-----------|---------|--------|
-| DNS tunneling | Planned sandbox/network allowlist backend would restrict DNS | 📋 Planned |
-| ICMP payload injection | Planned sandbox backend would block raw ICMP | 📋 Planned |
-| TCP covert channels | Not directly defensible at our layer; a future sandbox would only reduce exposure | ⚠️ Planned mitigation |
-| HTTP header smuggling | Planned allowlisted egress in a sandbox backend | 📋 Planned |
+| DNS tunneling | In `Filtered` container mode, `DomainProxy` rejects raw IP addresses and only forwards to allowlisted domains; the container's `HTTP_PROXY`/`HTTPS_PROXY` env vars target the proxy socket. The container does not configure an in-VM resolver — name resolution effectively traverses the proxy. | ✅ Implemented (conditional on `container` feature + `NetworkMode::Filtered`) |
+| ICMP payload injection | The `--internal` Apple Containers network mode (used in `Filtered`) blocks DNS and TCP at the platform level; ICMP egress is **not** Rust-enforced and depends on the platform's `--internal` semantics. | ✅ Implemented (conditional, platform-enforced — sigil does not enforce ICMP semantics in code) |
+| TCP covert channels | `DomainProxy` accepts both HTTP CONNECT and plain HTTP forwarding to allowlisted domains; arbitrary destinations off the allowlist have no path out. CONNECT can target any port on an allowlisted domain. | ⚠️ Partial — egress is bounded by the allowlist, but allowlisted-domain ports are not further restricted |
+| HTTP header smuggling | Allowlisted egress via the proxy bounds the destination set; smuggling against the proxy's own HTTP parser remains the residual surface. | ⚠️ Partial (egress bounded; proxy-parser smuggling residual) |
 
-**Risk assessment:** This is planned-state analysis. The current workspace does not yet have sandboxed egress controls, so these network mitigations should be read as future hardening rather than present protection.
+**Risk assessment:** Egress controls are present in the container backend (`DomainProxy` + Apple Containers `--internal`), conditional on the `container` feature and `NetworkMode::Filtered`. The `Internal` and `Full` modes either block all egress or allow unrestricted egress; only `Filtered` engages the allowlist.
 
 ### Code — RELEVANT (agents read/write code constantly)
 

@@ -1,7 +1,7 @@
 # Identity Reload — Design Document
 
 **Date:** April 9, 2026
-**Status:** Draft — awaiting Sebastian's review
+**Status:** Implemented (PRs #18–#23). Retained as design rationale.
 **Problem:** After context compaction, agents lose identity files (SOUL.md, OPS.md, state.json) from context. No automatic mechanism to reload. Relies on human reminders, which fail.
 
 ## Guiding Principle
@@ -14,7 +14,7 @@ Simple Made Easy. A flat file with a hook that fires on compaction beats a vecto
 - Identity files: `SOUL.md` (persona), `OPS.md` (operating rules), `state.json` (current truth), `LEARNINGS.md` (shared patterns)
 - CLAUDE.md startup checklist says "read these files" — but that only fires on fresh session start, not after compaction
 - Claude Code exposes `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd` hooks
-- `agent-deck hook-handler` already fires on `PreCompact` (for session state preservation)
+- Predecessor tooling already fires Claude Code hooks on `PreCompact` (for session state preservation)
 - Sigil's conductor is generic over `SessionRuntime`
 
 ### What's Broken
@@ -45,7 +45,7 @@ pub struct IdentitySpec {
 pub enum LifecycleEvent {
     /// After context compaction completes.
     PostCompact,
-    /// On session restart (e.g., agent-deck restart, sigil session restart).
+    /// On session restart (e.g., `sigil session restart`).
     Restart,
     /// On fresh session start.
     SessionStart,
@@ -155,7 +155,7 @@ Context compaction happens
 
 ## Design Decisions (Resolved Apr 9, 2026)
 
-1. **Hook installation location:** Project-level (`.claude/settings.local.json`). Committable with the repo — the feature travels with the project. Investigate how agent-deck handles hooks for reference.
+1. **Hook installation location:** Project-level (`.claude/settings.local.json`). Committable with the repo — the feature travels with the project.
 
 2. **Session identifier:** ULID from the sigil store. Stable in any normal scenario (SQLite persists on disk). Only lost if the database is manually deleted, which is an edge case. Hook is written at session creation time when the ULID is known. Multiple sessions per path is a valid pattern (research + build, review + implement), so path alone is not sufficient.
 

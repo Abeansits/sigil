@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [0.2.0] - 2026-05-01
 
-Theme: harden the ingest edge, close daily-driver-blocker gaps for Vigil, and unify policy routing.
+Theme: harden the ingest edge, close daily-driver gaps in the CLI surface, and unify policy routing.
 
 ### Added
 
@@ -56,7 +56,7 @@ Pre-1.0, but downstream consumers should know:
 ### Notes
 
 - 11-crate workspace (added `sigil-content`); workspace structure described in `docs/ARCHITECTURE.md`.
-- `docs/FEATURE-AUDIT.md`, `docs/PRODUCTION-READINESS.md`, and `README.md` refreshed to match shipped reality. Phase A and Phase B of the Vigil → Sigil migration are marked DONE in `docs/PRODUCTION-READINESS.md` (2026-05-01); Phase C is gated on a one-step Telegram-token rotation.
+- `docs/FEATURE-AUDIT.md` and `README.md` refreshed to match shipped reality.
 - Verified 2026-05-01: `cargo test --workspace` (991 passed, 0 failed, 0 ignored), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check --all`, `./target/release/sigil --version` reports `sigil 0.2.0`.
 
 [#16]: https://github.com/Abeansits/sigil/pull/16

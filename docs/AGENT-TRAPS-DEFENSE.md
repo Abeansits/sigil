@@ -2,7 +2,7 @@
 
 **Source:** "AI Agent Traps" — Franklin et al., Google DeepMind, 2026
 **Purpose:** Map each trap category against sigil defenses. Identify what we guard against, what we can't yet, and what we should watch.
-**Status note (2026-04-07):** This file is a target-state threat-modeling document. The current workspace implements bridge normalization, sender allowlisting, rate limiting, trust-zone checks, grant persistence, and CLI/conductor audit logging. It does not yet implement container isolation, WebFetch sanitization, approval-fatigue enforcement, or memory-write controls.
+**Status note (2026-05-02):** This file is a target-state threat-modeling document. The current workspace implements bridge normalization, sender allowlisting, rate limiting, trust-zone checks, grant persistence, CLI/conductor audit logging, container isolation (`ContainerRuntime` + `DomainProxy`, behind the `container` feature gate), Phase 1 external-content sanitization (`sigil-content` — plain/HTML/Markdown/JSON paths) wired through `ActionService::dispatch_fetch_external_content` and the MCP `fetch_url` tool when those servers are constructed with a sanitizer + fetcher, and `FatigueGuard` enforcement on the approval flow. It does not yet implement memory-write controls or media (image/audio/PDF) sanitization. Status flags below use the convention: ✅ Implemented • ✅ Implemented (conditional, gated on container filtered mode or sanitizer-configured server) • ⚠️ Partial • ❌ Not defended at our layer.
 
 ---
 
@@ -12,7 +12,7 @@
 
 | Trap | Description | Our Defense | Status |
 |------|------------|-------------|--------|
-| **Web-Standard Obfuscation** | Hidden instructions in HTML comments, CSS `display:none`, `aria-label` tags, off-screen positioned text | Current defense is limited to bridge-input normalization. A future WebFetch/content sanitizer and sandbox/network policy would help, but are not implemented yet. | ⚠️ Partial — bridge text is sanitized, but fetched web content is not. |
+| **Web-Standard Obfuscation** | Hidden instructions in HTML comments, CSS `display:none`, `aria-label` tags, off-screen positioned text | Phase 1 of the `sigil-content` HTML pipeline strips `<script>`/`<style>`/`<template>`/`<noscript>` subtrees, HTML comments, `<title>`/`<meta>`, elements with the `hidden` attribute, elements with inline `display:none` / `visibility:hidden|collapse` / `opacity:0` (and class-based hidden resolved against inline `<style>` blocks), and the `aria-label` / `title` / non-image `alt` attributes. Bridge text is also sanitized. Positional off-screen CSS (e.g. negative `text-indent`, off-viewport `position:absolute`) is **not** detected. | ✅ Implemented (conditional) for HTML/Markdown/JSON/plain ingest when the conductor or MCP server is constructed with a sanitizer + fetcher (default is `DisabledFetcher`); positional off-screen CSS and image/audio/PDF stay on Phase 2. |
 | **Dynamic Cloaking** | Servers detect agent visitors (via browser fingerprinting, user-agent, IP) and serve different content | No direct current defense. Future sandbox/network allowlists may narrow exposure, but they would not solve server-side cloaking. | ❌ Can't defend fully — this is server-side. We'd need a trusted proxy that strips or flags suspicious divergence. |
 | **Steganographic Payloads** | Malicious instructions encoded in image pixel data, audio perturbations | Agents process images/audio as part of work, and the current workspace has no dedicated media sanitization pipeline. | ❌ Can't defend at our layer — this requires model-level robustness plus future media sanitization. |
 | **Syntactic Masking** | Instructions hidden in Markdown link text, LaTeX, formatting syntax | Our session output sanitizer flags suspicious patterns ("SYSTEM:", base64 blocks). But formatting-level masking is hard to detect. | ⚠️ Partial — we catch obvious markers but not sophisticated syntactic masking. |
@@ -64,7 +64,7 @@
 - **Container memory isolation:** Sandboxed sessions can NOT write to conductor memory files. They can only write to their own project directory. Memory updates go through the conductor (host-side) as a T2 action.
 
 ### Current limitations:
-- If Sebastian's own session is compromised (via a web-fetched content injection), the memory write has full authority. The audit trail catches it after the fact, but doesn't prevent it.
+- If a trusted session is compromised (via a web-fetched content injection), the memory write has full authority. The audit trail catches it after the fact, but doesn't prevent it.
 - The self-improvement loop (LEARNINGS.md promotion) is inherently vulnerable to slow poisoning. Mitigation: human review before promotion (already in OPS.md — recurrence 3+ before promotion).
 
 ---
@@ -77,7 +77,7 @@
 |------|------------|-------------|--------|
 | **Embedded Jailbreak Sequences** | Adversarial prompts in external resources that override safety alignment on ingestion | Current defenses are typed actions, tier ceilings, trust-zone checks, and audit logging. Planned sandbox isolation would strengthen this considerably. | ⚠️ Partial — authority controls reduce blast radius, but runtime isolation is not implemented yet. |
 | **Data Exfiltration Traps** | Inducing the agent to locate, encode, and exfiltrate data to attacker endpoints | Current defenses are policy-mediated actions, bridge allowlisting, and audit visibility. Planned sandbox/network restrictions would be the stronger containment layer. | ⚠️ Partial — the current workspace reduces privilege, but it does not yet provide container-style egress isolation. |
-| **Sub-agent Spawning Traps** | Exploiting orchestrator privileges to spawn attacker-controlled sub-agents with poisoned prompts | Our conductor creates sessions. If the conductor is compromised, it could spawn malicious sessions. | ⚠️ Partial — session creation is a T2 action. Bridge-originated (Paul/Slack) messages can't create sessions. But Sebastian's compromised conductor could. |
+| **Sub-agent Spawning Traps** | Exploiting orchestrator privileges to spawn attacker-controlled sub-agents with poisoned prompts | Our conductor creates sessions. If the conductor is compromised, it could spawn malicious sessions. | ⚠️ Partial — session creation is a T2 action. Bridge-originated (Slack) messages can't create sessions. But a compromised conductor could. |
 
 ### What to add to sigil:
 - **Sub-agent spawn controls:** Session creation should always log the full prompt/instructions to the audit trail. New sessions spawned by the conductor inherit the conductor's ActionOrigin chain — if the conductor was triggered by a bridge message, the spawned session carries that taint.
@@ -85,7 +85,7 @@
 - **Instructions review:** When a session is created with custom instructions (not from a template), flag for review if the instructions contain suspicious patterns (URLs, credential references, "ignore previous instructions", etc.).
 
 ### Current limitations:
-- A directly compromised conductor (via Sebastian's own CLI or Telegram) has full authority to spawn sessions. The audit trail catches it, but can't prevent it.
+- A directly compromised conductor (via the operator's CLI or Telegram) has full authority to spawn sessions. The audit trail catches it, but can't prevent it.
 
 ---
 
@@ -113,19 +113,19 @@
 
 | Trap | Description | Our Defense | Status |
 |------|------------|-------------|--------|
-| **Approval Fatigue** | Generating many benign-looking approval requests to tire the human into rubber-stamping a malicious one | Our auto-deny timeout (5 min) prevents unattended requests. But a flood of legitimate requests followed by one malicious one... | ⚠️ Real risk — this is one of the most insidious attacks. If the conductor sends 20 approval requests in a row, Sebastian will start approving without reading. |
-| **Automation Bias** | Presenting technical, benign-looking summaries that a non-expert human would likely authorize | Our conductor presents summaries to Sebastian. If those summaries are crafted to look safe... | ⚠️ Real risk — Sebastian trusts the conductor's judgment. A compromised conductor could frame malicious actions as routine. |
-| **Social Engineering via Agent** | Using the agent to deliver phishing links or manipulative content to the human | Bridge messages go directly to Sebastian. A compromised agent's output could contain phishing. | ⚠️ Partial — the audit trail logs everything, but doesn't prevent Sebastian from clicking a link in a Telegram message. |
+| **Approval Fatigue** | Generating many benign-looking approval requests to tire the human into rubber-stamping a malicious one | Our auto-deny timeout (5 min) prevents unattended requests. But a flood of legitimate requests followed by one malicious one... | ⚠️ Real risk — this is one of the most insidious attacks. If the conductor sends 20 approval requests in a row, the operator will start approving without reading. |
+| **Automation Bias** | Presenting technical, benign-looking summaries that a non-expert human would likely authorize | Our conductor presents summaries to the operator. If those summaries are crafted to look safe... | ⚠️ Real risk — the operator trusts the conductor's judgment. A compromised conductor could frame malicious actions as routine. |
+| **Social Engineering via Agent** | Using the agent to deliver phishing links or manipulative content to the human | Bridge messages go directly to the operator. A compromised agent's output could contain phishing. | ⚠️ Partial — the audit trail logs everything, but doesn't prevent the operator from clicking a link in a Telegram message. |
 
 ### What to add to sigil:
 - **Approval request rate limit:** Max N approval requests per hour per session. If a session is generating many approval requests, flag it and pause.
 - **Approval request context:** Every approval notification includes: what session requested it, what ActionOrigin triggered it, how many approvals this session has requested today, and a risk indicator based on the action's tier.
-- **Cool-down after burst:** If >3 approvals in 10 minutes, enforce a 5-minute cool-down before the next approval can be granted. Forces Sebastian to slow down.
+- **Cool-down after burst:** If >3 approvals in 10 minutes, enforce a 5-minute cool-down before the next approval can be granted. Forces the operator to slow down.
 - **Anomaly alerting:** If a session that normally never requests approvals suddenly starts requesting them, flag it loudly.
 
 ### Current limitations:
-- **Approval fatigue is fundamentally a human problem.** Technology can slow it down (rate limits, cool-downs) but can't eliminate it. Sebastian needs to treat approval requests with the same attention every time — which is hard.
-- **Automation bias is our Achilles heel.** The conductor summarizes agent output and makes it easy for Sebastian to approve. The convenience that makes the system usable is the same convenience that makes it exploitable. There is no great technical fix — the best defense is awareness and the habit of reading approval details.
+- **Approval fatigue is fundamentally a human problem.** Technology can slow it down (rate limits, cool-downs) but can't eliminate it. The operator needs to treat approval requests with the same attention every time — which is hard.
+- **Automation bias is our Achilles heel.** The conductor summarizes agent output and makes it easy for the operator to approve. The convenience that makes the system usable is the same convenience that makes it exploitable. There is no great technical fix — the best defense is awareness and the habit of reading approval details.
 
 ---
 
@@ -169,7 +169,7 @@
 ### Document as known limitations:
 - Dynamic cloaking, steganographic payloads, semantic manipulation are model-level problems outside our control
 - Approval fatigue and automation bias are human cognitive vulnerabilities — technology can slow them down but not eliminate them
-- A directly compromised conductor (via Sebastian's own compromised device) bypasses all defenses except the audit trail
+- A directly compromised conductor (via the operator's own compromised device) bypasses all defenses except the audit trail
 
 ### Future research:
 - WebFetch content scanning (detect hidden instructions in HTML before they enter agent context)

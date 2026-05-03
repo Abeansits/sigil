@@ -35,4 +35,3 @@ UC9 and UC10 are `#[ignore]` - run with `cargo test -- --ignored`.
 - `docs/RUST-STYLE-GUIDE.md` - Rust best practices for this workspace
 - `docs/SECURITY-PLAN.md` - security controls and hardening roadmap
 - `docs/USE-CASES.md` - CLI and library walkthroughs
-- `docs/REWRITE-PROPOSAL.md` - proposal history (roadmap material, not current state)
