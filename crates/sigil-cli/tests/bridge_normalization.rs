@@ -7,7 +7,6 @@
 #![allow(clippy::expect_used)]
 
 use assert_matches::assert_matches;
-
 use sigil_bridge::error::BridgeError;
 use sigil_bridge::identity::default_config;
 use sigil_bridge::telegram::{TelegramMessage, TelegramUpdate, process_telegram_update};
@@ -23,6 +22,7 @@ fn make_update(user_id: &str, text: &str) -> TelegramUpdate {
             chat_id: 42,
             text: text.into(),
             date: 1_700_000_000,
+            from_is_bot: false,
         }),
     }
 }

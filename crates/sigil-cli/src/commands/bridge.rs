@@ -8,19 +8,17 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
 use sigil_audit::AuditLogWriter;
 use sigil_bridge::{
     IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, build_config,
 };
 use sigil_conductor::Conductor;
-use sigil_core::CoreError;
-use sigil_core::PolicyDecision;
 use sigil_core::protocol::{BridgeMessage, ReplyContext};
 use sigil_core::traits::{MessageSink, SessionRuntime};
+use sigil_core::{CoreError, PolicyDecision};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::BridgeCommands;
 use crate::audit::log_event;
@@ -28,13 +26,68 @@ use crate::audit::log_event;
 /// Channel capacity for bridge response delivery.
 const REPLY_CHANNEL_CAPACITY: usize = 64;
 
+/// Hard cap on egress reply size in characters.
+///
+/// Matches Telegram's per-message limit (4096 chars). Slack tolerates
+/// more, but long replies are a stego/exfil amplifier.
+const REPLY_MAX_CHARS: usize = 4096;
+
+/// Outcome of running the egress filter on a conductor response.
+struct SanitizedReply {
+    /// Reply ready to ship to the bridge — normalized and, when
+    /// oversize, truncated with the `… [truncated, N chars]` suffix.
+    text: String,
+    /// Character count of the normalized reply *before* truncation. The
+    /// audit event records this so an investigator sees the original
+    /// size even when only the truncated prefix reached the user.
+    normalized_len: usize,
+}
+
+impl SanitizedReply {
+    fn truncated(&self) -> bool {
+        self.normalized_len > REPLY_MAX_CHARS
+    }
+}
+
+/// Strip invisible Unicode and cap a conductor response at
+/// [`REPLY_MAX_CHARS`] before it leaves the control-plane.
+fn sanitize_reply(response: &str) -> SanitizedReply {
+    let mut normalized = sigil_policy::normalize::normalize_text(response).cleaned;
+    let normalized_len = normalized.chars().count();
+
+    if normalized_len <= REPLY_MAX_CHARS {
+        return SanitizedReply {
+            text: normalized,
+            normalized_len,
+        };
+    }
+
+    let suffix = format!(" … [truncated, {normalized_len} chars]");
+    let reserved_suffix_chars = suffix.chars().count();
+    let cutoff_chars = REPLY_MAX_CHARS.saturating_sub(reserved_suffix_chars);
+    let cutoff = if cutoff_chars == 0 {
+        0
+    } else {
+        normalized
+            .char_indices()
+            .nth(cutoff_chars)
+            .map_or(normalized.len(), |(idx, _)| idx)
+    };
+    normalized.truncate(cutoff);
+    normalized.push_str(&suffix);
+
+    SanitizedReply {
+        text: normalized,
+        normalized_len,
+    }
+}
+
 /// A [`MessageSink`] that routes bridge messages through the conductor.
 ///
 /// On each accepted message the sink:
-/// 1. Forwards to [`Conductor::handle_message`] for command routing and
-///    session dispatch.
-/// 2. Sends the conductor's response (with [`ReplyContext`]) back
-///    through the reply channel so the bridge loop can deliver it.
+/// 1. Forwards to [`Conductor::handle_message`] for command routing and session dispatch.
+/// 2. Sends the conductor's response (with [`ReplyContext`]) back through the reply
+///    channel so the bridge loop can deliver it.
 /// 3. Records an audit event.
 pub(crate) struct ConductorSink<R: SessionRuntime> {
     conductor: Arc<Conductor<R>>,
@@ -46,7 +99,7 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
     async fn accept(&self, message: BridgeMessage) -> Result<(), CoreError> {
         info!(
             origin = ?message.origin,
-            text_len = message.text.len(),
+            text_len = message.text.chars().count(),
             target = ?message.target_session,
             "bridge message received"
         );
@@ -54,18 +107,62 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
         let reply_context = message.reply_context.clone();
         let response = self.conductor.handle_message(&message).await?;
 
-        info!(response = %response, "conductor response");
+        let reply = sanitize_reply(&response);
+        let truncated = reply.truncated();
+        let reply_len = reply.text.chars().count();
 
-        if let Err(e) = self.reply_tx.send((reply_context, response)).await {
+        info!(len = reply_len, truncated, "conductor response sanitized");
+
+        let origin_summary = format!("{:?}", message.origin);
+        let target_session = message.target_session;
+
+        if let Err(e) = self.reply_tx.send((reply_context, reply.text)).await {
             tracing::warn!(error = %e, "failed to enqueue bridge reply");
+            log_event(
+                &self.audit,
+                &format!(
+                    "bridge.message_routed: {} chars",
+                    message.text.chars().count()
+                ),
+                &origin_summary,
+                PolicyDecision::Allow,
+                target_session,
+            )
+            .await;
+            log_event(
+                &self.audit,
+                &format!(
+                    "bridge.reply_dropped: {reply_len} chars (truncated={truncated}, original={})",
+                    reply.normalized_len,
+                ),
+                &origin_summary,
+                PolicyDecision::Allow,
+                target_session,
+            )
+            .await;
+            return Ok(());
         }
 
         log_event(
             &self.audit,
-            &format!("bridge.message_routed: {} chars", message.text.len()),
-            &format!("{:?}", message.origin),
+            &format!(
+                "bridge.message_routed: {} chars",
+                message.text.chars().count()
+            ),
+            &origin_summary,
             PolicyDecision::Allow,
-            message.target_session,
+            target_session,
+        )
+        .await;
+        log_event(
+            &self.audit,
+            &format!(
+                "bridge.reply_sent: {reply_len} chars (truncated={truncated}, original={})",
+                reply.normalized_len,
+            ),
+            &origin_summary,
+            PolicyDecision::Allow,
+            target_session,
         )
         .await;
 
@@ -143,8 +240,9 @@ pub(crate) fn load_identity_config() -> Result<IdentityConfig> {
 pub(crate) fn evaluator_config_from_identity(
     config: &IdentityConfig,
 ) -> sigil_policy::EvaluatorConfig {
-    use sigil_core::PlatformIdentity;
     use std::collections::HashMap;
+
+    use sigil_core::PlatformIdentity;
 
     let mut user_tier_ceilings = HashMap::new();
 
@@ -358,4 +456,224 @@ fn read_env_secret(name: &str) -> Result<SecretString> {
         bail!("{name} environment variable must not be empty");
     }
     Ok(SecretString::from(val))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use std::time::Duration;
+
+    use sigil_core::origin::ActionOrigin;
+    use sigil_core::protocol::{ConductorMessage, ReplyContext};
+    use sigil_core::session::{SessionConfig, SessionHandle, SessionState};
+    use sigil_store::Store;
+
+    use super::*;
+
+    const TRUNCATION_PREFIX: &str = " … [truncated, ";
+
+    // ── sanitize_reply ────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_reply_strips_zero_width_and_directional_overrides() {
+        let input = "hel\u{200B}lo\u{202E}world";
+        let out = sanitize_reply(input);
+        assert_eq!(out.text, "helloworld");
+        assert!(!out.truncated());
+        assert_eq!(out.normalized_len, "helloworld".chars().count());
+    }
+
+    #[test]
+    fn sanitize_reply_under_cap_is_unchanged() {
+        let input = "small reply";
+        let out = sanitize_reply(input);
+        assert_eq!(out.text, input);
+        assert!(!out.truncated());
+        assert_eq!(out.normalized_len, input.chars().count());
+    }
+
+    #[test]
+    fn sanitize_reply_truncates_oversize_with_suffix_and_char_count() {
+        let original = "x".repeat(REPLY_MAX_CHARS + 200);
+        let out = sanitize_reply(&original);
+
+        assert!(out.truncated());
+        assert_eq!(out.normalized_len, original.chars().count());
+        let suffix = format!("{TRUNCATION_PREFIX}{} chars]", original.chars().count());
+        assert!(
+            out.text.ends_with(&suffix),
+            "expected truncation suffix, got: {}",
+            &out.text[out.text.len().saturating_sub(80)..]
+        );
+        assert!(out.text.chars().count() <= REPLY_MAX_CHARS);
+    }
+
+    #[test]
+    fn sanitize_reply_allows_multibyte_text_up_to_char_cap() {
+        let original = "€".repeat(REPLY_MAX_CHARS);
+        let out = sanitize_reply(&original);
+        assert!(!out.truncated());
+        assert_eq!(out.text, original);
+        assert_eq!(out.text.chars().count(), REPLY_MAX_CHARS);
+    }
+
+    #[test]
+    fn sanitize_reply_truncates_cjk_by_character_count() {
+        let original = "漢".repeat(REPLY_MAX_CHARS + 12);
+        let out = sanitize_reply(&original);
+
+        assert!(out.truncated());
+        assert_eq!(out.normalized_len, REPLY_MAX_CHARS + 12);
+        assert!(out.text.ends_with(&format!(
+            "{TRUNCATION_PREFIX}{} chars]",
+            REPLY_MAX_CHARS + 12
+        )));
+        assert!(out.text.chars().count() <= REPLY_MAX_CHARS);
+        assert!(std::str::from_utf8(out.text.as_bytes()).is_ok());
+    }
+
+    // ── ConductorSink::accept ────────────────────────────────────────
+
+    /// Stands a `Conductor` up without tmux or container backends.
+    #[derive(Default)]
+    struct NoopRuntime;
+
+    impl SessionRuntime for NoopRuntime {
+        async fn launch(&self, _config: &SessionConfig) -> Result<SessionHandle, CoreError> {
+            Err(CoreError::Runtime {
+                message: "noop runtime: launch not supported".into(),
+            })
+        }
+        async fn send(
+            &self,
+            _handle: &SessionHandle,
+            _msg: ConductorMessage,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+        async fn read_output(&self, _handle: &SessionHandle) -> Result<String, CoreError> {
+            Ok(String::new())
+        }
+        async fn status(&self, _handle: &SessionHandle) -> Result<SessionState, CoreError> {
+            Ok(SessionState::Stopped)
+        }
+        async fn stop(&self, _handle: &SessionHandle) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    async fn read_audit_log(path: &std::path::Path) -> Vec<serde_json::Value> {
+        let raw = tokio::fs::read_to_string(path).await.expect("read audit");
+        raw.lines()
+            .map(|line| serde_json::from_str(line).expect("audit line is JSON"))
+            .collect()
+    }
+
+    fn action_summary(entry: &serde_json::Value) -> &str {
+        entry
+            .get("event")
+            .and_then(|e| e.get("action_summary"))
+            .and_then(|v| v.as_str())
+            .expect("action_summary present")
+    }
+
+    async fn build_sink(
+        audit_path: &std::path::Path,
+    ) -> (
+        ConductorSink<NoopRuntime>,
+        mpsc::Receiver<(ReplyContext, String)>,
+    ) {
+        let store = Arc::new(Store::new_in_memory().await.expect("store"));
+        let runtime = Arc::new(NoopRuntime);
+        let conductor = Arc::new(Conductor::new(store, runtime, Duration::from_secs(30)));
+        let audit = Arc::new(
+            AuditLogWriter::new(audit_path, b"bridge-pr-a-test".to_vec())
+                .await
+                .expect("audit writer"),
+        );
+        let (reply_tx, reply_rx) = mpsc::channel(REPLY_CHANNEL_CAPACITY);
+        (
+            ConductorSink {
+                conductor,
+                audit,
+                reply_tx,
+            },
+            reply_rx,
+        )
+    }
+
+    fn slack_dm(text: &str) -> BridgeMessage {
+        BridgeMessage {
+            origin: ActionOrigin::BridgeSlack {
+                user_id: "U_TEST".into(),
+                channel_id: "C_TEST".into(),
+            },
+            text: text.into(),
+            target_session: None,
+            is_command: text.starts_with('/'),
+            reply_context: ReplyContext {
+                chat_id: None,
+                channel_id: Some("C_TEST".into()),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_emits_reply_sent_event_with_truncated_false_for_short_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (sink, mut reply_rx) = build_sink(&audit_path).await;
+
+        sink.accept(slack_dm("/help")).await.expect("accept ok");
+
+        let (_ctx, reply) = reply_rx.recv().await.expect("reply enqueued");
+        assert!(!reply.contains(TRUNCATION_PREFIX));
+
+        let entries = read_audit_log(&audit_path).await;
+        let summaries: Vec<&str> = entries.iter().map(action_summary).collect();
+        assert!(
+            summaries
+                .iter()
+                .any(|s| s.starts_with("bridge.message_routed:")),
+            "expected message_routed in {summaries:?}"
+        );
+        let reply_summary = summaries
+            .iter()
+            .find(|s| s.starts_with("bridge.reply_sent:"))
+            .expect("reply_sent present");
+        assert!(reply_summary.contains("truncated=false"));
+    }
+
+    #[tokio::test]
+    async fn accept_does_not_emit_reply_sent_when_reply_channel_is_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (sink, reply_rx) = build_sink(&audit_path).await;
+
+        drop(reply_rx);
+
+        sink.accept(slack_dm("/help")).await.expect("accept ok");
+
+        let entries = read_audit_log(&audit_path).await;
+        let summaries: Vec<&str> = entries.iter().map(action_summary).collect();
+        assert!(
+            summaries
+                .iter()
+                .any(|s| s.starts_with("bridge.message_routed:")),
+            "expected message_routed in {summaries:?}"
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|s| !s.starts_with("bridge.reply_sent:")),
+            "did not expect reply_sent in {summaries:?}"
+        );
+        assert!(
+            summaries
+                .iter()
+                .any(|s| s.starts_with("bridge.reply_dropped:")),
+            "expected reply_dropped in {summaries:?}"
+        );
+    }
 }

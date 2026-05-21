@@ -59,6 +59,8 @@ struct EventPayload {
     channel: Option<String>,
     text: Option<String>,
     ts: Option<String>,
+    bot_id: Option<String>,
+    subtype: Option<String>,
 }
 
 // ── Bridge ───────────────────────────────────────────────────────
@@ -83,8 +85,8 @@ impl SlackBridge {
     ///
     /// Continuously:
     /// 1. Reads Slack Socket Mode events and routes them to the sink.
-    /// 2. Receives conductor responses from `reply_rx` and sends them
-    ///    back to the originating Slack channel.
+    /// 2. Receives conductor responses from `reply_rx` and sends them back to the
+    ///    originating Slack channel.
     ///
     /// On WebSocket disconnect or error the bridge sleeps for
     /// [`RECONNECT_DELAY`], obtains a fresh WSS URL, and reconnects.
@@ -272,6 +274,8 @@ impl SlackBridge {
             channel: event_data.channel.unwrap_or_default(),
             text: event_data.text.unwrap_or_default(),
             ts: event_data.ts.unwrap_or_default(),
+            bot_id: event_data.bot_id,
+            subtype: event_data.subtype,
         };
 
         match process_slack_event(&slack_event, &self.identity_config) {
@@ -314,9 +318,8 @@ mod tests {
     use sigil_core::traits::MessageSink;
     use tokio::sync::Mutex;
 
-    use crate::identity::default_config;
-
     use super::*;
+    use crate::identity::default_config;
 
     /// A sink that records accepted messages.
     struct RecordingSink {

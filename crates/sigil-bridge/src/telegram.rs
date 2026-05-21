@@ -21,26 +21,29 @@ pub struct TelegramUpdate {
 }
 
 /// A Telegram message (simplified).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TelegramMessage {
     pub message_id: i64,
     pub from_user_id: String,
     pub chat_id: i64,
     pub text: String,
     pub date: i64,
+    /// Mirrors `message.from.is_bot` from the Telegram Bot API
+    /// (<https://core.telegram.org/bots/api#user>). Bot-authored
+    /// messages are dropped at ingest to prevent self-loop.
+    pub from_is_bot: bool,
 }
 
 /// Process a Telegram update into a `BridgeMessage`.
 ///
 /// Returns `Ok(None)` if the update contains no message (e.g., an
-/// `edited_message` or `callback_query` we don't handle yet).
+/// `edited_message` or `callback_query` we don't handle yet), or if
+/// the message is bot-authored and filtered to prevent self-loop.
 ///
 /// # Errors
 ///
-/// - `BridgeError::UnknownSender` if the user ID is not in the
-///   allowlist.
-/// - `BridgeError::MessageTooLarge` if the normalized text exceeds
-///   32 KB.
+/// - `BridgeError::UnknownSender` if the user ID is not in the allowlist.
+/// - `BridgeError::MessageTooLarge` if the normalized text exceeds 32 KB.
 pub fn process_telegram_update(
     update: &TelegramUpdate,
     config: &IdentityConfig,
@@ -48,6 +51,15 @@ pub fn process_telegram_update(
     let Some(msg) = &update.message else {
         return Ok(None);
     };
+
+    // Drop bot-authored messages before allowlist resolution.
+    if msg.from_is_bot {
+        tracing::debug!(
+            from_user_id = %msg.from_user_id,
+            "telegram: dropping bot-authored message"
+        );
+        return Ok(None);
+    }
 
     // Verify sender is in allowlist.
     let origin = ActionOrigin::BridgeTelegram {
@@ -107,6 +119,7 @@ mod tests {
                 chat_id: 42,
                 text: text.into(),
                 date: 1_700_000_000,
+                ..TelegramMessage::default()
             }),
         }
     }
@@ -170,5 +183,18 @@ mod tests {
             .expect("should succeed")
             .expect("should have a message");
         assert_eq!(result.text, "hello");
+    }
+
+    #[test]
+    fn from_is_bot_drops_message_before_allowlist() {
+        // Unknown sender + is_bot: bot filter swallows the update;
+        // allowlist resolution would have raised `UnknownSender`.
+        let config = default_config();
+        let mut update = make_update("UNKNOWN_BOT_USER", "loop bait");
+        if let Some(m) = update.message.as_mut() {
+            m.from_is_bot = true;
+        }
+        let result = process_telegram_update(&update, &config).expect("filter should swallow");
+        assert!(result.is_none());
     }
 }
