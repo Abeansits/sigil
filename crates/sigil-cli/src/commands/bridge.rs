@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
+use serde_json::{Map, Value};
 use sigil_audit::AuditLogWriter;
 use sigil_bridge::{
     IdentityConfig, SlackBridge, SlackClient, TelegramBridge, TelegramClient, build_config,
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::BridgeCommands;
-use crate::audit::log_event;
+use crate::audit::{log_event, log_event_with_fields};
 
 /// Channel capacity for bridge response delivery.
 const REPLY_CHANNEL_CAPACITY: usize = 64;
@@ -47,6 +48,31 @@ impl SanitizedReply {
     fn truncated(&self) -> bool {
         self.normalized_len > REPLY_MAX_CHARS
     }
+}
+
+/// Build structured fields for bridge reply audit events.
+///
+/// `text_len` and `normalized_len` are Unicode scalar character
+/// counts, matching the bridge egress cap enforced by
+/// `REPLY_MAX_CHARS`.
+fn bridge_reply_fields(
+    text_len: usize,
+    truncated: bool,
+    normalized_len: usize,
+    target_origin: &str,
+) -> Map<String, Value> {
+    Map::from_iter([
+        ("text_len".to_owned(), Value::from(text_len as u64)),
+        ("truncated".to_owned(), Value::from(truncated)),
+        (
+            "normalized_len".to_owned(),
+            Value::from(normalized_len as u64),
+        ),
+        (
+            "target_origin".to_owned(),
+            Value::from(target_origin.to_owned()),
+        ),
+    ])
 }
 
 /// Strip invisible Unicode and cap a conductor response at
@@ -129,15 +155,13 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
                 target_session,
             )
             .await;
-            log_event(
+            log_event_with_fields(
                 &self.audit,
-                &format!(
-                    "bridge.reply_dropped: {reply_len} chars (truncated={truncated}, original={})",
-                    reply.normalized_len,
-                ),
+                "bridge.reply_dropped",
                 &origin_summary,
                 PolicyDecision::Allow,
                 target_session,
+                bridge_reply_fields(reply_len, truncated, reply.normalized_len, &origin_summary),
             )
             .await;
             return Ok(());
@@ -154,15 +178,13 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
             target_session,
         )
         .await;
-        log_event(
+        log_event_with_fields(
             &self.audit,
-            &format!(
-                "bridge.reply_sent: {reply_len} chars (truncated={truncated}, original={})",
-                reply.normalized_len,
-            ),
+            "bridge.reply_sent",
             &origin_summary,
             PolicyDecision::Allow,
             target_session,
+            bridge_reply_fields(reply_len, truncated, reply.normalized_len, &origin_summary),
         )
         .await;
 
@@ -578,6 +600,12 @@ mod tests {
             .expect("action_summary present")
     }
 
+    fn reply_fields(
+        entry: &serde_json::Value,
+    ) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        entry.get("fields").and_then(|v| v.as_object())
+    }
+
     async fn build_sink(
         audit_path: &std::path::Path,
     ) -> (
@@ -638,11 +666,25 @@ mod tests {
                 .any(|s| s.starts_with("bridge.message_routed:")),
             "expected message_routed in {summaries:?}"
         );
-        let reply_summary = summaries
+        let reply_sent = entries
             .iter()
-            .find(|s| s.starts_with("bridge.reply_sent:"))
+            .find(|entry| action_summary(entry) == "bridge.reply_sent")
             .expect("reply_sent present");
-        assert!(reply_summary.contains("truncated=false"));
+        let fields = reply_fields(reply_sent).expect("reply_sent fields present");
+        assert_eq!(
+            fields.get("truncated"),
+            Some(&serde_json::Value::from(false))
+        );
+        assert_eq!(
+            fields.get("text_len").and_then(serde_json::Value::as_u64),
+            Some(reply.chars().count() as u64)
+        );
+        assert_eq!(
+            fields
+                .get("normalized_len")
+                .and_then(serde_json::Value::as_u64),
+            Some(reply.chars().count() as u64)
+        );
     }
 
     #[tokio::test]
@@ -664,16 +706,78 @@ mod tests {
             "expected message_routed in {summaries:?}"
         );
         assert!(
-            summaries
-                .iter()
-                .all(|s| !s.starts_with("bridge.reply_sent:")),
+            summaries.iter().all(|s| *s != "bridge.reply_sent"),
             "did not expect reply_sent in {summaries:?}"
         );
-        assert!(
-            summaries
-                .iter()
-                .any(|s| s.starts_with("bridge.reply_dropped:")),
-            "expected reply_dropped in {summaries:?}"
+        let reply_dropped = entries
+            .iter()
+            .find(|entry| action_summary(entry) == "bridge.reply_dropped")
+            .expect("reply_dropped present");
+        let fields = reply_fields(reply_dropped).expect("reply_dropped fields present");
+        assert_eq!(
+            fields.get("truncated"),
+            Some(&serde_json::Value::from(false))
         );
+        assert_eq!(fields.get("text_len"), fields.get("normalized_len"));
+    }
+
+    #[tokio::test]
+    async fn reply_event_fields_support_filtering_and_aggregation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (sink, mut reply_rx) = build_sink(&audit_path).await;
+
+        sink.accept(slack_dm("/help"))
+            .await
+            .expect("first accept ok");
+        let (_ctx, first_reply) = reply_rx.recv().await.expect("first reply enqueued");
+
+        drop(reply_rx);
+        sink.accept(slack_dm("/help"))
+            .await
+            .expect("second accept ok");
+
+        let entries = read_audit_log(&audit_path).await;
+        let reply_events: Vec<&serde_json::Value> = entries
+            .iter()
+            .filter(|entry| action_summary(entry).starts_with("bridge.reply_"))
+            .collect();
+
+        let not_truncated_count = reply_events
+            .iter()
+            .filter(|entry| {
+                reply_fields(entry)
+                    .and_then(|fields| fields.get("truncated"))
+                    .and_then(serde_json::Value::as_bool)
+                    .is_some_and(|truncated| !truncated)
+            })
+            .count();
+        let total_text_len: u64 = reply_events
+            .iter()
+            .filter_map(|entry| {
+                reply_fields(entry)
+                    .and_then(|fields| fields.get("text_len"))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .sum();
+        let reply_sent_text_len = reply_events
+            .iter()
+            .find(|entry| action_summary(entry) == "bridge.reply_sent")
+            .and_then(|entry| reply_fields(entry))
+            .and_then(|fields| fields.get("text_len"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("reply_sent text_len");
+        let reply_dropped_text_len = reply_events
+            .iter()
+            .find(|entry| action_summary(entry) == "bridge.reply_dropped")
+            .and_then(|entry| reply_fields(entry))
+            .and_then(|fields| fields.get("text_len"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("reply_dropped text_len");
+
+        assert_eq!(reply_events.len(), 2);
+        assert_eq!(not_truncated_count, 2);
+        assert_eq!(reply_sent_text_len, first_reply.chars().count() as u64);
+        assert_eq!(total_text_len, reply_sent_text_len + reply_dropped_text_len);
     }
 }

@@ -2,11 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::{Map, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
-use crate::chain::{self, ChainedEntry, GENESIS_HASH};
+use crate::chain::{self, ChainedEntry, GENESIS_HASH, payload_bytes};
 use crate::error::AuditError;
 
 /// An append-only audit log writer that maintains an HMAC chain.
@@ -72,7 +73,31 @@ impl AuditLogWriter {
     /// serialized, [`AuditError::Write`] on I/O failure, or
     /// [`AuditError::KeyNotAvailable`] if the HMAC key is rejected.
     pub async fn append(&self, event: &sigil_core::AuditEvent) -> Result<(), AuditError> {
-        let json_bytes = serde_json::to_vec(event).map_err(AuditError::Serialize)?;
+        self.append_inner(event, None).await
+    }
+
+    /// Append an audit event with structured, queryable sidecar fields.
+    ///
+    /// The sidecar fields are included in the content hash so the HMAC
+    /// chain protects them from tampering just like the core event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same error variants as [`Self::append`].
+    pub async fn append_with_fields(
+        &self,
+        event: &sigil_core::AuditEvent,
+        fields: Map<String, Value>,
+    ) -> Result<(), AuditError> {
+        self.append_inner(event, Some(fields)).await
+    }
+
+    async fn append_inner(
+        &self,
+        event: &sigil_core::AuditEvent,
+        fields: Option<Map<String, Value>>,
+    ) -> Result<(), AuditError> {
+        let json_bytes = payload_bytes(event, fields.as_ref())?;
 
         let content_hash = chain::content_hash(&json_bytes);
 
@@ -82,6 +107,7 @@ impl AuditLogWriter {
 
         let entry = ChainedEntry {
             event: event.clone(),
+            fields,
             content_hash,
             prev_hash: state.prev_hash.clone(),
             hmac: hmac_tag.clone(),
@@ -223,6 +249,56 @@ mod tests {
         let entry: ChainedEntry = serde_json::from_str(first_line)?;
 
         assert_eq!(entry.prev_hash, GENESIS_HASH);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_preserves_structured_fields_through_round_trip() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("fields.jsonl");
+        let key = b"fields-key".to_vec();
+
+        let writer = AuditLogWriter::new(&path, key).await?;
+        let event = sample_event();
+        let fields = serde_json::Map::from_iter([
+            ("text_len".to_owned(), serde_json::Value::from(12_u64)),
+            ("truncated".to_owned(), serde_json::Value::from(false)),
+            ("normalized_len".to_owned(), serde_json::Value::from(14_u64)),
+            (
+                "target_origin".to_owned(),
+                serde_json::Value::from("BridgeSlack"),
+            ),
+        ]);
+
+        writer.append_with_fields(&event, fields).await?;
+
+        let contents = tokio::fs::read_to_string(&path).await?;
+        let entry: ChainedEntry = serde_json::from_str(
+            contents
+                .lines()
+                .next()
+                .ok_or_else(|| std::io::Error::other("expected one entry"))?,
+        )?;
+
+        let fields = entry
+            .fields
+            .ok_or_else(|| std::io::Error::other("fields should be present"))?;
+        assert_eq!(
+            fields.get("text_len"),
+            Some(&serde_json::Value::from(12_u64))
+        );
+        assert_eq!(
+            fields.get("truncated"),
+            Some(&serde_json::Value::from(false))
+        );
+        assert_eq!(
+            fields.get("normalized_len"),
+            Some(&serde_json::Value::from(14_u64))
+        );
+        assert_eq!(
+            fields.get("target_origin"),
+            Some(&serde_json::Value::from("BridgeSlack"))
+        );
         Ok(())
     }
 }
