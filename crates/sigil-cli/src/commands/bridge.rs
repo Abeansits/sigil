@@ -108,12 +108,33 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
 
         info!(len = reply_len, truncated, "conductor response sanitized");
 
-        if let Err(e) = self.reply_tx.send((reply_context, reply.text)).await {
-            tracing::warn!(error = %e, "failed to enqueue bridge reply");
-        }
-
         let origin_summary = format!("{:?}", message.origin);
         let target_session = message.target_session;
+
+        if let Err(e) = self.reply_tx.send((reply_context, reply.text)).await {
+            tracing::warn!(error = %e, "failed to enqueue bridge reply");
+            log_event(
+                &self.audit,
+                &format!("bridge.message_routed: {} chars", message.text.len()),
+                &origin_summary,
+                PolicyDecision::Allow,
+                target_session,
+            )
+            .await;
+            log_event(
+                &self.audit,
+                &format!(
+                    "bridge.reply_dropped: {reply_len} bytes (truncated={truncated}, original={})",
+                    reply.normalized_len,
+                ),
+                &origin_summary,
+                PolicyDecision::Allow,
+                target_session,
+            )
+            .await;
+            return Ok(());
+        }
+
         log_event(
             &self.audit,
             &format!("bridge.message_routed: {} chars", message.text.len()),
@@ -598,5 +619,37 @@ mod tests {
             .find(|s| s.starts_with("bridge.reply_sent:"))
             .expect("reply_sent present");
         assert!(reply_summary.contains("truncated=false"));
+    }
+
+    #[tokio::test]
+    async fn accept_does_not_emit_reply_sent_when_reply_channel_is_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let (sink, reply_rx) = build_sink(&audit_path).await;
+
+        drop(reply_rx);
+
+        sink.accept(slack_dm("/help")).await.expect("accept ok");
+
+        let entries = read_audit_log(&audit_path).await;
+        let summaries: Vec<&str> = entries.iter().map(action_summary).collect();
+        assert!(
+            summaries
+                .iter()
+                .any(|s| s.starts_with("bridge.message_routed:")),
+            "expected message_routed in {summaries:?}"
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|s| !s.starts_with("bridge.reply_sent:")),
+            "did not expect reply_sent in {summaries:?}"
+        );
+        assert!(
+            summaries
+                .iter()
+                .any(|s| s.starts_with("bridge.reply_dropped:")),
+            "expected reply_dropped in {summaries:?}"
+        );
     }
 }
