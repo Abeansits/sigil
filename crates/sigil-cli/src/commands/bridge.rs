@@ -4,7 +4,6 @@
 //! forwards them to [`Conductor::handle_message`] for command dispatch
 //! and session forwarding.
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -63,12 +62,14 @@ fn sanitize_reply(response: &str) -> SanitizedReply {
         };
     }
 
-    let mut cutoff = REPLY_MAX_BYTES;
+    let suffix = format!(" … [truncated, {normalized_len} bytes]");
+    let reserved_suffix_bytes = suffix.len();
+    let mut cutoff = REPLY_MAX_BYTES.saturating_sub(reserved_suffix_bytes);
     while cutoff > 0 && !normalized.is_char_boundary(cutoff) {
         cutoff -= 1;
     }
     normalized.truncate(cutoff);
-    let _ = write!(normalized, " … [truncated, {normalized_len} bytes]");
+    normalized.push_str(&suffix);
 
     SanitizedReply {
         text: normalized,
@@ -473,8 +474,7 @@ mod tests {
             "expected truncation suffix, got: {}",
             &out.text[out.text.len().saturating_sub(80)..]
         );
-        let prefix_len = out.text.len() - suffix.len();
-        assert!(prefix_len <= REPLY_MAX_BYTES);
+        assert!(out.text.len() <= REPLY_MAX_BYTES);
     }
 
     #[test]
