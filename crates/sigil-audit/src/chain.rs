@@ -98,7 +98,14 @@ pub fn payload_bytes(
     event: &sigil_core::AuditEvent,
     fields: Option<&Map<String, Value>>,
 ) -> Result<Vec<u8>, AuditError> {
-    serde_json::to_vec(&EntryPayload { event, fields }).map_err(AuditError::Serialize)
+    match fields {
+        Some(fields) => serde_json::to_vec(&EntryPayload {
+            event,
+            fields: Some(fields),
+        })
+        .map_err(AuditError::Serialize),
+        None => serde_json::to_vec(event).map_err(AuditError::Serialize),
+    }
 }
 
 /// Verify a sequence of chained entries, returning the first broken
@@ -252,6 +259,85 @@ mod tests {
         // Tamper with the event payload -- content hash won't match.
         entry.event.action_summary = "TAMPERED".to_owned();
         assert!(verify_chain(key, &[entry]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_bytes_without_fields_matches_legacy_event_hash() -> Result<(), Box<dyn Error>> {
+        let event = sigil_core::AuditEvent {
+            request_id: sigil_core::RequestId::new(),
+            timestamp: time::OffsetDateTime::now_utc(),
+            action_summary: "legacy event".to_owned(),
+            origin_summary: "legacy origin".to_owned(),
+            decision: sigil_core::PolicyDecision::Allow,
+            session_id: None,
+            sanitize_report: None,
+        };
+
+        let legacy = serde_json::to_vec(&event)?;
+        let compat = payload_bytes(&event, None)?;
+
+        assert_eq!(compat, legacy);
+        assert_eq!(content_hash(&compat), content_hash(&legacy));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_chain_accepts_mixed_legacy_and_structured_entries() -> Result<(), Box<dyn Error>> {
+        let key = b"mixed-chain-key";
+        let first = sigil_core::AuditEvent {
+            request_id: sigil_core::RequestId::new(),
+            timestamp: time::OffsetDateTime::now_utc(),
+            action_summary: "legacy event".to_owned(),
+            origin_summary: "legacy origin".to_owned(),
+            decision: sigil_core::PolicyDecision::Allow,
+            session_id: None,
+            sanitize_report: None,
+        };
+        let second = sigil_core::AuditEvent {
+            request_id: sigil_core::RequestId::new(),
+            timestamp: time::OffsetDateTime::now_utc(),
+            action_summary: "bridge.reply_sent".to_owned(),
+            origin_summary: "BridgeSlack { user_id: U_TEST }".to_owned(),
+            decision: sigil_core::PolicyDecision::Allow,
+            session_id: None,
+            sanitize_report: None,
+        };
+        let second_fields = Map::from_iter([
+            ("text_len".to_owned(), Value::from(42_u64)),
+            ("truncated".to_owned(), Value::from(false)),
+            ("normalized_len".to_owned(), Value::from(42_u64)),
+            (
+                "target_origin".to_owned(),
+                Value::from("BridgeSlack { user_id: U_TEST }"),
+            ),
+        ]);
+
+        let first_bytes = payload_bytes(&first, None)?;
+        let first_hash = content_hash(&first_bytes);
+        let first_hmac = compute_entry_hmac(key, &first_hash, GENESIS_HASH)?;
+        let second_bytes = payload_bytes(&second, Some(&second_fields))?;
+        let second_hash = content_hash(&second_bytes);
+        let second_hmac = compute_entry_hmac(key, &second_hash, &first_hmac)?;
+
+        let entries = vec![
+            ChainedEntry {
+                event: first,
+                fields: None,
+                content_hash: first_hash,
+                prev_hash: GENESIS_HASH.to_owned(),
+                hmac: first_hmac.clone(),
+            },
+            ChainedEntry {
+                event: second,
+                fields: Some(second_fields),
+                content_hash: second_hash,
+                prev_hash: first_hmac,
+                hmac: second_hmac,
+            },
+        ];
+
+        verify_chain(key, &entries)?;
         Ok(())
     }
 }

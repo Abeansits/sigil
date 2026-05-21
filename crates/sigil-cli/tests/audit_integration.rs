@@ -174,6 +174,10 @@ async fn log_event_with_fields_persists_structured_fields() {
     assert_eq!(fields.get("text_len"), Some(&Value::from(42_u64)));
     assert_eq!(fields.get("truncated"), Some(&Value::from(true)));
     assert_eq!(fields.get("normalized_len"), Some(&Value::from(84_u64)));
+    assert_eq!(
+        fields.get("target_origin"),
+        Some(&Value::from("BridgeTelegram { chat_id: 7 }"))
+    );
 
     sigil_audit::chain::verify_chain(&key, &[entry]).expect("chain should be valid");
 }
