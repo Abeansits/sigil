@@ -120,7 +120,10 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
             tracing::warn!(error = %e, "failed to enqueue bridge reply");
             log_event(
                 &self.audit,
-                &format!("bridge.message_routed: {} chars", message.text.chars().count()),
+                &format!(
+                    "bridge.message_routed: {} chars",
+                    message.text.chars().count()
+                ),
                 &origin_summary,
                 PolicyDecision::Allow,
                 target_session,
@@ -142,7 +145,10 @@ impl<R: SessionRuntime> MessageSink for ConductorSink<R> {
 
         log_event(
             &self.audit,
-            &format!("bridge.message_routed: {} chars", message.text.chars().count()),
+            &format!(
+                "bridge.message_routed: {} chars",
+                message.text.chars().count()
+            ),
             &origin_summary,
             PolicyDecision::Allow,
             target_session,
