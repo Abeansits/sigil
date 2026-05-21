@@ -5,12 +5,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use zeroize::Zeroizing;
-
+use serde_json::{Map, Value};
 use sigil_audit::{AuditLogWriter, LoadedKey, load_audit_key};
 use sigil_core::PolicyDecision;
 use sigil_core::id::{RequestId, SessionId};
 use sigil_core::traits::AuditEvent;
+use zeroize::Zeroizing;
 
 /// Resolve the audit HMAC key using the documented priority order
 /// (env > Keychain > opt-in dev fallback).
@@ -75,6 +75,32 @@ pub async fn log_event(
     };
 
     if let Err(e) = writer.append(&event).await {
+        tracing::warn!(error = %e, action, "failed to write audit event");
+    }
+}
+
+/// Log an audit event with additional structured fields. Errors are
+/// logged via tracing but never propagated to the caller -- audit
+/// failures must not break user-facing operations.
+pub async fn log_event_with_fields(
+    writer: &AuditLogWriter,
+    action: &str,
+    origin: &str,
+    decision: PolicyDecision,
+    session_id: Option<SessionId>,
+    fields: Map<String, Value>,
+) {
+    let event = AuditEvent {
+        request_id: RequestId::new(),
+        timestamp: time::OffsetDateTime::now_utc(),
+        action_summary: action.to_owned(),
+        origin_summary: origin.to_owned(),
+        decision,
+        session_id,
+        sanitize_report: None,
+    };
+
+    if let Err(e) = writer.append_with_fields(&event, fields).await {
         tracing::warn!(error = %e, action, "failed to write audit event");
     }
 }

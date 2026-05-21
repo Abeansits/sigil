@@ -4,7 +4,7 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
 use assert_matches::assert_matches;
-
+use serde_json::{Map, Value};
 use sigil_audit::AuditLogWriter;
 use sigil_audit::chain::ChainedEntry;
 use sigil_core::PolicyDecision;
@@ -126,4 +126,54 @@ async fn init_audit_writer_creates_file_in_data_dir() {
         !contents.is_empty(),
         "audit file should contain at least one entry",
     );
+}
+
+/// Structured sidecar fields remain queryable after a CLI-style write.
+#[tokio::test]
+async fn log_event_with_fields_persists_structured_fields() {
+    let dir = tempfile::tempdir().expect("tempdir creation should succeed");
+    let audit_path = dir.path().join("audit.jsonl");
+    let key = b"fields-integration-test-key".to_vec();
+
+    let writer = AuditLogWriter::new(&audit_path, key.clone())
+        .await
+        .expect("writer creation should succeed");
+
+    let session_id = SessionId::new();
+    let fields = Map::from_iter([
+        ("text_len".to_owned(), Value::from(42_u64)),
+        ("truncated".to_owned(), Value::from(true)),
+        ("normalized_len".to_owned(), Value::from(84_u64)),
+        (
+            "target_origin".to_owned(),
+            Value::from("BridgeTelegram { chat_id: 7 }"),
+        ),
+    ]);
+
+    sigil_cli::audit::log_event_with_fields(
+        &writer,
+        "bridge.reply_sent",
+        "BridgeTelegram { chat_id: 7 }",
+        PolicyDecision::Allow,
+        Some(session_id),
+        fields,
+    )
+    .await;
+
+    let contents = tokio::fs::read_to_string(&audit_path)
+        .await
+        .expect("audit file should be readable");
+    let line = contents.lines().next().expect("expected one entry");
+    let entry: ChainedEntry =
+        serde_json::from_str(line).expect("entry should be valid ChainedEntry JSON");
+
+    assert_eq!(entry.event.action_summary, "bridge.reply_sent");
+    assert_eq!(entry.event.session_id, Some(session_id));
+
+    let fields = entry.fields.as_ref().expect("fields should be present");
+    assert_eq!(fields.get("text_len"), Some(&Value::from(42_u64)));
+    assert_eq!(fields.get("truncated"), Some(&Value::from(true)));
+    assert_eq!(fields.get("normalized_len"), Some(&Value::from(84_u64)));
+
+    sigil_audit::chain::verify_chain(&key, &[entry]).expect("chain should be valid");
 }

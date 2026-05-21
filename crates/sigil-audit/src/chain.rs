@@ -5,6 +5,8 @@
 //! computed over `content_hash || prev_hash`.
 
 use hmac::{Hmac, Mac};
+use serde::Serialize;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::error::AuditError;
@@ -72,17 +74,38 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChainedEntry {
     pub event: sigil_core::AuditEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Map<String, Value>>,
     pub content_hash: String,
     pub prev_hash: String,
     pub hmac: String,
+}
+
+#[derive(Serialize)]
+struct EntryPayload<'a> {
+    event: &'a sigil_core::AuditEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fields: Option<&'a Map<String, Value>>,
+}
+
+/// Serialize the content-hashed payload for a chained entry.
+///
+/// # Errors
+///
+/// Returns [`AuditError::Serialize`] if the payload cannot be encoded
+/// as JSON.
+pub fn payload_bytes(
+    event: &sigil_core::AuditEvent,
+    fields: Option<&Map<String, Value>>,
+) -> Result<Vec<u8>, AuditError> {
+    serde_json::to_vec(&EntryPayload { event, fields }).map_err(AuditError::Serialize)
 }
 
 /// Verify a sequence of chained entries, returning the first broken
 /// link if any.
 ///
 /// Checks three invariants per entry:
-/// 1. The stored `content_hash` matches the SHA-256 of the
-///    re-serialized event payload.
+/// 1. The stored `content_hash` matches the SHA-256 of the re-serialized event payload.
 /// 2. The `prev_hash` equals the previous entry's HMAC (or genesis).
 /// 3. The HMAC tag is correct for the content and prev hashes.
 ///
@@ -98,7 +121,7 @@ pub fn verify_chain(key: &[u8], entries: &[ChainedEntry]) -> Result<(), AuditErr
         let event_id = entry.event.request_id.to_string();
 
         // 1. Verify content hash matches the event payload.
-        let event_bytes = serde_json::to_vec(&entry.event).map_err(AuditError::Serialize)?;
+        let event_bytes = payload_bytes(&entry.event, entry.fields.as_ref())?;
         let recomputed_hash = content_hash(&event_bytes);
         if recomputed_hash != entry.content_hash {
             return Err(AuditError::ChainBroken {
@@ -211,12 +234,13 @@ mod tests {
         };
 
         // Compute content hash from the actual serialized event.
-        let event_bytes = serde_json::to_vec(&event)?;
+        let event_bytes = payload_bytes(&event, None)?;
         let ch = content_hash(&event_bytes);
         let hmac_val = compute_entry_hmac(key, &ch, GENESIS_HASH)?;
 
         let mut entry = ChainedEntry {
             event,
+            fields: None,
             content_hash: ch,
             prev_hash: GENESIS_HASH.to_owned(),
             hmac: hmac_val,
@@ -242,7 +266,6 @@ mod proptest_tests {
     )]
 
     use proptest::prelude::*;
-
     use sigil_core::PolicyDecision;
 
     use super::*;
@@ -275,11 +298,12 @@ mod proptest_tests {
         let mut prev = GENESIS_HASH.to_owned();
 
         for event in events {
-            let event_bytes = serde_json::to_vec(event).expect("serialize event");
+            let event_bytes = payload_bytes(event, None).expect("serialize event");
             let ch = content_hash(&event_bytes);
             let hmac_val = compute_entry_hmac(key, &ch, &prev).expect("compute hmac");
             entries.push(ChainedEntry {
                 event: event.clone(),
+                fields: None,
                 content_hash: ch,
                 prev_hash: prev.clone(),
                 hmac: hmac_val.clone(),
