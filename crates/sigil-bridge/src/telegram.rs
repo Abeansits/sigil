@@ -37,7 +37,8 @@ pub struct TelegramMessage {
 /// Process a Telegram update into a `BridgeMessage`.
 ///
 /// Returns `Ok(None)` if the update contains no message (e.g., an
-/// `edited_message` or `callback_query` we don't handle yet).
+/// `edited_message` or `callback_query` we don't handle yet), or if
+/// the message is bot-authored and filtered to prevent self-loop.
 ///
 /// # Errors
 ///
